@@ -181,7 +181,10 @@ pub fn spawn_session_watcher(app: AppHandle, state: SharedState) {
                 continue;
             };
             let url_string = url.to_string();
-            if url_string == last_url {
+            // During the logout guard we still re-evaluate the same URL, so a
+            // login that finishes inside the guard window is picked up as soon
+            // as it expires instead of being stuck logged out.
+            if url_string == last_url && !logout_in_progress() {
                 continue;
             }
             last_url = url_string.clone();
