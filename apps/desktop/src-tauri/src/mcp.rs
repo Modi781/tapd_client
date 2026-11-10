@@ -8,10 +8,7 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 use tauri::AppHandle;
 use tapd_core::tapd::{
-    api::{
-        bug_detail_body, bug_detail_url, bug_list_url, parse_bug_detail, parse_bug_list,
-        parse_workspaces, user_workspace_url, BugQuery,
-    },
+    api::{bug_list_url, parse_bug_list, parse_workspaces, user_workspace_url, BugQuery},
     BugListPage, Workspace,
 };
 
@@ -113,16 +110,7 @@ async fn get_bug(
     let (_, workspaces) = load_context(app).await?;
     let workspace_id = resolve_workspace(state, &workspaces, arguments)?;
 
-    let root = session_request_json(
-        app,
-        "POST",
-        &bug_detail_url(),
-        Some(bug_detail_body(&workspace_id, &bug_id)),
-        Duration::from_secs(45),
-    )
-    .await?;
-
-    let detail = parse_bug_detail(&root)?;
+    let detail = crate::commands::fetch_bug_detail(app, &workspace_id, &bug_id).await?;
     serde_json::to_value(detail).map_err(|error| error.to_string())
 }
 

@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "notification-window",
+  "description": "Capability for the self-drawn notification window.",
+  "windows": ["notification"],
+  "permissions": ["core:default"]
+}

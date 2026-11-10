@@ -10,17 +10,10 @@ use tapd_core::{
     export::{
         collect_media, download_url_for, render_markdown, slugify, MediaAsset, MediaKind, MediaRef,
     },
-    tapd::{
-        api::{bug_detail_body, bug_detail_url, parse_bug_detail},
-        BugDetail,
-    },
+    tapd::BugDetail,
 };
 
-use crate::{
-    commands::session_request_json,
-    session,
-    state::SharedState,
-};
+use crate::{session, state::SharedState};
 
 const MAX_FILE_BYTES: u64 = 200 * 1024 * 1024;
 const MAX_TOTAL_BYTES: u64 = 300 * 1024 * 1024;
@@ -148,16 +141,7 @@ async fn fetch_detail(
     workspace_id: &str,
     bug_id: &str,
 ) -> Result<BugDetail, String> {
-    let root = session_request_json(
-        app,
-        "POST",
-        &bug_detail_url(),
-        Some(bug_detail_body(workspace_id, bug_id)),
-        Duration::from_secs(45),
-    )
-    .await?;
-
-    parse_bug_detail(&root)
+    crate::commands::fetch_bug_detail(app, workspace_id, bug_id).await
 }
 
 async fn download_one(

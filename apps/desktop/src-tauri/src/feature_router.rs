@@ -1,0 +1,25 @@
+//! Single Tauri command used by feature windows (notifications / agent console).
+//!
+//! M6 and M7 own separate modules. Keeping one router avoids concurrent edits to
+//! `lib.rs` and `generate_handler!` while both features are developed.
+
+use serde_json::Value;
+use tauri::{AppHandle, State};
+
+use crate::state::SharedState;
+
+#[tauri::command]
+pub async fn feature_command(
+    app: AppHandle,
+    state: State<'_, SharedState>,
+    name: String,
+    payload: Value,
+) -> Result<Value, String> {
+    if name.starts_with("notification_") {
+        crate::notification::command(&app, state.inner(), &name, payload).await
+    } else if name.starts_with("agent_") {
+        crate::agent::command(&app, state.inner(), &name, payload).await
+    } else {
+        Err(format!("unknown feature command: {name}"))
+    }
+}

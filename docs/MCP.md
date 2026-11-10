@@ -57,7 +57,7 @@ opencode mcp list
 | `tapd_list_projects` | 可访问项目列表 | — |
 | `tapd_list_bugs` | 查询缺陷 | `workspace_id`、`owner`、`statuses`、`priorities`、`severities`、`keyword`、`only_unresolved`、`limit`、`page` |
 | `tapd_list_my_bugs` | 我的未解决缺陷 | `workspace_id`、`limit`、`page` |
-| `tapd_get_bug` | 完整详情 | `bug_id`（必填）、`workspace_id` |
+| `tapd_get_bug` | 完整详情（含 `embeddedMedia` 内嵌图片/视频、`changes` 变更记录） | `bug_id`（必填）、`workspace_id` |
 | `tapd_export_bug_md` | 导出 MD 包 | `bug_id`（必填）、`workspace_id`、`workspace_name` |
 
 约定：
@@ -94,7 +94,7 @@ opencode mcp list
 
 ```
 <bug-id>-<slug>/
-├── bug.md        # 标题、基本信息、描述、资源、评论、自定义字段
+├── bug.md        # 标题、基本信息、描述、资源（附件 + 内嵌）、变更记录、评论、自定义字段
 ├── bug.json      # 结构化数据
 └── assets/       # 图片、视频、日志等原件
 ```

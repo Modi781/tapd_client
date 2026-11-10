@@ -11,52 +11,7 @@ use crate::tapd::{
 };
 use crate::tapd::api::TAPD_BASE;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum MediaKind {
-    Image,
-    Video,
-    File,
-}
-
-impl MediaKind {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Image => "image",
-            Self::Video => "video",
-            Self::File => "file",
-        }
-    }
-
-    pub fn from_content_type(content_type: &str, filename: &str) -> Self {
-        let content_type = content_type.to_ascii_lowercase();
-        if content_type.starts_with("image/") {
-            return Self::Image;
-        }
-        if content_type.starts_with("video/") {
-            return Self::Video;
-        }
-
-        let extension = filename
-            .rsplit('.')
-            .next()
-            .unwrap_or_default()
-            .to_ascii_lowercase();
-        match extension.as_str() {
-            "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "svg" => Self::Image,
-            "mp4" | "mov" | "webm" | "m4v" | "avi" => Self::Video,
-            _ => Self::File,
-        }
-    }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MediaRef {
-    pub url: String,
-    pub kind: MediaKind,
-    pub filename_hint: String,
-}
+pub use crate::tapd::model::{MediaKind, MediaRef};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -70,20 +25,36 @@ pub struct MediaAsset {
     pub content_type: String,
 }
 
-/// Collects every image/video/file referenced by the bug.
-pub fn collect_media(detail: &BugDetail) -> Vec<MediaRef> {
+/// Collects images/videos embedded in the description and comments.
+///
+/// TAPD does not list these under `attachments`; they only exist inside the
+/// rich-text HTML, which is why a bug can look like it has no resources.
+pub fn collect_embedded_media(detail: &BugDetail) -> Vec<MediaRef> {
     let mut media = Vec::new();
     scan_html_media(&detail.description_html, &mut media);
     for comment in &detail.comments {
         scan_comment_media(comment, &mut media);
     }
+
+    dedupe(media)
+}
+
+/// Collects every image/video/file referenced by the bug.
+pub fn collect_media(detail: &BugDetail) -> Vec<MediaRef> {
+    let mut media = collect_embedded_media(detail);
     for attachment in &detail.attachments {
         push_attachment(attachment, &mut media);
     }
 
+    dedupe(media)
+}
+
+fn dedupe(media: Vec<MediaRef>) -> Vec<MediaRef> {
     let mut seen = HashSet::new();
-    media.retain(|item| !item.url.is_empty() && seen.insert(item.url.clone()));
     media
+        .into_iter()
+        .filter(|item| !item.url.is_empty() && seen.insert(item.url.clone()))
+        .collect()
 }
 
 fn push_attachment(attachment: &Attachment, media: &mut Vec<MediaRef>) {
@@ -280,35 +251,67 @@ pub fn render_markdown(
     }
 
     out.push_str("## 资源\n\n");
-    if detail.attachments.is_empty() {
-        out.push_str("_没有附件_\n\n");
+    let embedded = collect_embedded_media(detail);
+    let has_resources = !detail.attachments.is_empty() || !embedded.is_empty();
+    if !has_resources {
+        out.push_str("_没有附件或内嵌图片/视频_\n\n");
     } else {
-        for attachment in &detail.attachments {
-            let downloaded = asset_map.get(attachment.download_url.as_str());
-            let link = downloaded
-                .map(|asset| asset.relative_path.clone())
-                .unwrap_or_else(|| attachment.download_url.clone());
-            let kind = MediaKind::from_content_type(&attachment.content_type, &attachment.filename);
-            let label = match kind {
-                MediaKind::Image => format!("![{}]({})", escape_inline(&attachment.filename), link),
-                _ => format!("[{}]({})", escape_inline(&attachment.filename), link),
-            };
-            out.push_str(&format!(
-                "- {label} · {} · {} · {}\n",
-                format_size(attachment.size),
-                if attachment.content_type.is_empty() {
-                    "unknown".to_string()
-                } else {
-                    attachment.content_type.clone()
-                },
-                if downloaded.is_some() {
-                    "已下载"
-                } else {
-                    "下载失败，保留原始链接"
-                }
-            ));
+        if !detail.attachments.is_empty() {
+            out.push_str("### 附件\n\n");
+            for attachment in &detail.attachments {
+                let downloaded = asset_map.get(attachment.download_url.as_str());
+                let link = downloaded
+                    .map(|asset| asset.relative_path.clone())
+                    .unwrap_or_else(|| attachment.download_url.clone());
+                let kind = MediaKind::from_content_type(&attachment.content_type, &attachment.filename);
+                let label = match kind {
+                    MediaKind::Image => {
+                        format!("![{}]({})", escape_inline(&attachment.filename), link)
+                    }
+                    _ => format!("[{}]({})", escape_inline(&attachment.filename), link),
+                };
+                out.push_str(&format!(
+                    "- {label} · {} · {} · {}\n",
+                    format_size(attachment.size),
+                    if attachment.content_type.is_empty() {
+                        "unknown".to_string()
+                    } else {
+                        attachment.content_type.clone()
+                    },
+                    if downloaded.is_some() {
+                        "已下载"
+                    } else {
+                        "下载失败，保留原始链接"
+                    }
+                ));
+            }
+            out.push('\n');
         }
-        out.push('\n');
+
+        if !embedded.is_empty() {
+            out.push_str("### 描述/评论内嵌\n\n");
+            for item in &embedded {
+                let downloaded = asset_map.get(item.url.as_str());
+                let link = downloaded
+                    .map(|asset| asset.relative_path.clone())
+                    .unwrap_or_else(|| item.url.clone());
+                let label = match item.kind {
+                    MediaKind::Image => {
+                        format!("![{}]({})", escape_inline(&item.filename_hint), link)
+                    }
+                    _ => format!("[{}]({})", escape_inline(&item.filename_hint), link),
+                };
+                out.push_str(&format!(
+                    "- {label} · 内嵌于描述/评论 · {}\n",
+                    if downloaded.is_some() {
+                        "已下载"
+                    } else {
+                        "下载失败，保留原始链接"
+                    }
+                ));
+            }
+            out.push('\n');
+        }
     }
 
     out.push_str("## 评论\n\n");
@@ -320,6 +323,9 @@ pub fn render_markdown(
             render_comment(&mut out, comment, &mut counter, 0, &asset_map);
         }
     }
+
+    out.push_str("## 变更记录\n\n");
+    render_changes(&mut out, detail);
 
     if !detail.custom_fields.is_empty() {
         out.push_str("## 自定义字段\n\n");
@@ -337,6 +343,47 @@ pub fn render_markdown(
     ));
 
     cleanup(&out)
+}
+
+fn render_changes(out: &mut String, detail: &BugDetail) {
+    let history = &detail.changes;
+    if let Some(error) = &history.error {
+        out.push_str(&format!("_变更记录获取失败：{error}_\n\n"));
+        return;
+    }
+    if history.changes.is_empty() {
+        out.push_str("_没有变更记录_\n\n");
+        return;
+    }
+
+    if history.total as usize > history.changes.len() {
+        out.push_str(&format!(
+            "共 {} 条，以下为最近 {} 条。\n\n",
+            history.total,
+            history.changes.len()
+        ));
+    }
+
+    for change in &history.changes {
+        out.push_str(&format!(
+            "### {}. {} · {} · {}\n\n",
+            change.seq, change.time, change.author, change.kind
+        ));
+        if change.fields.is_empty() {
+            out.push_str("_（无字段明细）_\n\n");
+            continue;
+        }
+        out.push_str("| 字段 | 变更前 | 变更后 |\n| --- | --- | --- |\n");
+        for field in &change.fields {
+            out.push_str(&format!(
+                "| {} | {} | {} |\n",
+                table_cell(&field.field),
+                table_cell(&field.before),
+                table_cell(&field.after)
+            ));
+        }
+        out.push('\n');
+    }
 }
 
 fn render_comment(
@@ -457,12 +504,19 @@ fn yaml(out: &mut String, key: &str, value: &str) {
 }
 
 fn table_row(out: &mut String, key: &str, value: &str) {
-    let value = if value.trim().is_empty() {
+    out.push_str(&format!(
+        "| {} | {} |\n",
+        table_cell(key),
+        table_cell(value)
+    ));
+}
+
+fn table_cell(value: &str) -> String {
+    if value.trim().is_empty() {
         "—".to_string()
     } else {
         value.replace('|', "\\|").replace('\n', "<br>")
-    };
-    out.push_str(&format!("| {} | {} |\n", key.replace('|', "\\|"), value));
+    }
 }
 
 fn escape_inline(value: &str) -> String {
@@ -637,6 +691,53 @@ mod tests {
         assert!(markdown.contains("assets/media-2-b.mp4"));
         assert!(markdown.contains("### 1. 张芳兰"));
         assert!(markdown.contains("att-9-log.ips"));
+    }
+
+    #[test]
+    fn collects_embedded_media_separately_from_attachments() {
+        let detail = sample_detail();
+        let embedded = collect_embedded_media(&detail);
+        assert_eq!(embedded.len(), 2);
+        assert!(embedded.iter().all(|item| item.kind != MediaKind::File));
+        assert_eq!(collect_media(&detail).len(), 3);
+    }
+
+    #[test]
+    fn renders_changes_with_before_and_after() {
+        let mut detail = sample_detail();
+        detail.changes = crate::tapd::model::ChangeHistory {
+            total: 5,
+            changes: vec![crate::tapd::model::ChangeEntry {
+                seq: 1,
+                time: "2026-11-09 17:03:16".to_string(),
+                author: "郭俊宏".to_string(),
+                kind: "手动变更".to_string(),
+                fields: vec![crate::tapd::model::ChangeField {
+                    field: "处理人".to_string(),
+                    before: "范艺;".to_string(),
+                    after: "郭俊宏".to_string(),
+                }],
+            }],
+            error: None,
+        };
+
+        let markdown = render_markdown(&detail, &[], "UU");
+        assert!(markdown.contains("## 变更记录"));
+        assert!(markdown.contains("共 5 条，以下为最近 1 条"));
+        assert!(markdown.contains("### 1. 2026-11-09 17:03:16 · 郭俊宏 · 手动变更"));
+        assert!(markdown.contains("| 处理人 | 范艺; | 郭俊宏 |"));
+    }
+
+    #[test]
+    fn renders_change_error_instead_of_failing() {
+        let mut detail = sample_detail();
+        detail.changes = crate::tapd::model::ChangeHistory {
+            error: Some("HTTP 403".to_string()),
+            ..Default::default()
+        };
+
+        let markdown = render_markdown(&detail, &[], "UU");
+        assert!(markdown.contains("_变更记录获取失败：HTTP 403_"));
     }
 
     #[test]

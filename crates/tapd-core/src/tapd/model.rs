@@ -80,6 +80,82 @@ pub struct Attachment {
     pub download_url: String,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum MediaKind {
+    Image,
+    Video,
+    File,
+}
+
+impl MediaKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Image => "image",
+            Self::Video => "video",
+            Self::File => "file",
+        }
+    }
+
+    pub fn from_content_type(content_type: &str, filename: &str) -> Self {
+        let content_type = content_type.to_ascii_lowercase();
+        if content_type.starts_with("image/") {
+            return Self::Image;
+        }
+        if content_type.starts_with("video/") {
+            return Self::Video;
+        }
+
+        let extension = filename
+            .rsplit('.')
+            .next()
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        match extension.as_str() {
+            "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "svg" => Self::Image,
+            "mp4" | "mov" | "webm" | "m4v" | "avi" => Self::Video,
+            _ => Self::File,
+        }
+    }
+}
+
+/// An image/video embedded in the rich-text description or a comment.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaRef {
+    pub url: String,
+    pub kind: MediaKind,
+    pub filename_hint: String,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangeField {
+    pub field: String,
+    pub before: String,
+    pub after: String,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangeEntry {
+    pub seq: u32,
+    pub time: String,
+    pub author: String,
+    pub kind: String,
+    pub fields: Vec<ChangeField>,
+}
+
+/// Result of the legacy `changes_list` page, which is server-rendered HTML.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangeHistory {
+    pub total: u32,
+    pub changes: Vec<ChangeEntry>,
+    /// Why the history could not be loaded, when the request or parse failed.
+    pub error: Option<String>,
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BugDetail {
@@ -107,4 +183,8 @@ pub struct BugDetail {
     pub custom_fields: BTreeMap<String, String>,
     pub comments: Vec<Comment>,
     pub attachments: Vec<Attachment>,
+    /// Media embedded in the description/comments (TAPD does not list these
+    /// under `attachments`).
+    pub embedded_media: Vec<MediaRef>,
+    pub changes: ChangeHistory,
 }

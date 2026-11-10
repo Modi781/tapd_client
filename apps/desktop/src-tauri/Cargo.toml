@@ -24,7 +24,9 @@ tracing-appender = "0.2"
 axum = "0.8"
 uuid = { version = "1", features = ["v4"] }
 percent-encoding = "2"
+portable-pty = "0.9"
 reqwest = "0.13"
+base64 = "0.21"
 tapd-core = { path = "../../../crates/tapd-core" }
 
 [features]

@@ -386,7 +386,7 @@ pub fn parse_bug_detail(root: &Value) -> Result<BugDetail, String> {
         }
     }
 
-    Ok(BugDetail {
+    let mut detail = BugDetail {
         summary,
         description_html: description_html.clone(),
         description_text: html_to_text(&description_html),
@@ -410,7 +410,13 @@ pub fn parse_bug_detail(root: &Value) -> Result<BugDetail, String> {
         custom_fields: parse_custom_fields(bug),
         comments,
         attachments,
-    })
+        embedded_media: Vec::new(),
+        changes: Default::default(),
+    };
+    // Images/videos in the rich text are only discoverable by scanning the HTML.
+    detail.embedded_media = crate::export::collect_embedded_media(&detail);
+
+    Ok(detail)
 }
 
 fn parse_summary(

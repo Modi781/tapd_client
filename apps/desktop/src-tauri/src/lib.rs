@@ -1,6 +1,9 @@
+mod agent;
 mod commands;
 mod export;
+mod feature_router;
 mod mcp;
+mod notification;
 mod server;
 mod session;
 mod state;
@@ -50,11 +53,13 @@ pub fn run() {
             export::export_bug_md,
             commands::set_current_user,
             commands::mcp_config,
+            feature_router::feature_command,
             commands::set_last_workspace,
             commands::capture_snapshot,
             commands::capture_clear,
             commands::capture_export,
             commands::open_path,
+            commands::media_preview,
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
@@ -72,6 +77,9 @@ pub fn run() {
             if let Err(error) = session::ensure_session_window(&handle, &state, visible) {
                 tracing::error!(%error, "failed to create TAPD session window");
             }
+
+            notification::init(&handle, state.clone());
+            agent::init(&handle, state.clone());
             session::spawn_session_watcher(handle, state);
 
             Ok(())

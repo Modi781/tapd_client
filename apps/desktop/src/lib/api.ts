@@ -149,6 +149,35 @@ export type Attachment = {
   downloadUrl: string;
 };
 
+export type MediaKind = "image" | "video" | "file";
+
+/** Image/video embedded in the rich-text description or a comment. */
+export type MediaRef = {
+  url: string;
+  kind: MediaKind;
+  filenameHint: string;
+};
+
+export type ChangeField = {
+  field: string;
+  before: string;
+  after: string;
+};
+
+export type ChangeEntry = {
+  seq: number;
+  time: string;
+  author: string;
+  kind: string;
+  fields: ChangeField[];
+};
+
+export type ChangeHistory = {
+  total: number;
+  changes: ChangeEntry[];
+  error: string | null;
+};
+
 export type BugDetail = BugSummary & {
   descriptionHtml: string;
   descriptionText: string;
@@ -172,6 +201,8 @@ export type BugDetail = BugSummary & {
   customFields: Record<string, string>;
   comments: Comment[];
   attachments: Attachment[];
+  embeddedMedia: MediaRef[];
+  changes: ChangeHistory;
 };
 
 export type McpConfigInfo = {
@@ -204,6 +235,7 @@ export const api = {
   clearCaptures: () => invoke<void>("capture_clear"),
   exportCaptures: () => invoke<string>("capture_export"),
   openPath: (path: string) => invoke<void>("open_path", { path }),
+  mediaPreview: (url: string) => invoke<string>("media_preview", { url }),
   workspaceContext: () => invoke<WorkspaceContext>("workspace_context"),
   bugList: (query: BugQuery) => invoke<BugListPage>("bug_list", { query }),
   bugDetail: (workspaceId: string, bugId: string) =>

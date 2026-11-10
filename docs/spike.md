@@ -117,6 +117,12 @@
 - `file_list[]`：附件字段（本例为空）
 - 工作流：`GET /api/aggregation/bug_aggregation/get_bug_transition_info?...`（状态流转配置，只读阶段暂不使用）
 
+补充（2026-11-10 抓包确认）：
+
+- `get_info` 响应里的 `description` 用的是新版编辑器路径，例如 `<img src="/tfl/captures/2026-11/tapd_45336192_base64_1794213543_843.png">`；相对路径按 `https://www.tapd.cn` 补全即可下载（116 KB，带 Cookie）。
+- 这些内嵌图片/视频**不会**出现在 `attachment_list.attachments` 里，所以详情页「资源」为 0 是数据源问题，不是解析问题。`parse_bug_detail` 现在会额外扫描 HTML，写入 `embeddedMedia`。
+- 详情页额外调用了 `POST /api/aggregation/workitem_aggregation/get_info`，其 `get_tab_setting_ret.data` 里有 tab 清单和计数（`变更历史` tab 的 `count`），可用于显示数量。
+
 ### 2.4 附件与资源
 
 URL 规律（`workspace_id` 替换为项目 id）：
@@ -166,6 +172,19 @@ Rust 侧下载策略：读取 webview cookie → 手工拼 `Cookie` 头 → reqw
 - 状态（label）：新 / 接受/处理 / 已解决 / 已验证 / 重新打开 / 已拒绝 / 已关闭
 - 优先级：`urgent` 紧急、`high` 高、`medium` 中、`low` 低、`insignificant` 无关紧要
 - 严重程度：`fatal` 致命、`serious` 严重、`normal` 一般、`prompt` 提示、`advice` 建议
+
+### 2.6 变更历史
+
+变更历史 tab 是一个服务端渲染的老页面，没有 JSON 接口：
+
+`GET https://www.tapd.cn/{workspace_id}/bugtrace/bugs/changes_list?perpage=10&page=1&bug_id={bug_id}&only_content=1&microapp=1`
+
+- 返回整页 HTML；`only_content=1&microapp=1` 只是给微前端用，内容仍是完整页面。
+- 表格结构：外层 `table.bug-history` 每次变更一行（`序号` / `变更时间` / `变更人` / `变更类型`），`colspan=3` 单元格里再嵌一张表，每行是 `变更字段` / `变更前` / `变更后`。
+- 总条数：`var _revisionsCount = N;`，表头也有 `序号(N)`。
+- 分页：服务端每页最多 10 条；`page=2` 可取下一页，`perpage` 不放大返回量。
+- 解析实现：`crates/tapd-core/src/tapd/changes.rs::parse_changes_html`，用真实响应做回归测试（`crates/tapd-core/tests/fixtures/changes_list.html`）。
+
 
 ## 3. 已知坑
 

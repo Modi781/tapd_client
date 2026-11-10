@@ -10,7 +10,7 @@ use tapd_core::{
             bug_detail_body, bug_detail_url, bug_list_url, parse_bug_detail, parse_bug_list,
             parse_workspaces, user_workspace_url, BugQuery,
         },
-        BugDetail, BugListPage, Workspace,
+        changes_list_url, parse_changes_html, BugDetail, BugListPage, ChangeHistory, Workspace,
     },
 };
 
@@ -257,17 +257,94 @@ pub async fn bug_detail(
     workspace_id: String,
     bug_id: String,
 ) -> Result<BugDetail, String> {
-    let body = bug_detail_body(&workspace_id, &bug_id);
-    let root = session_request_json(
-        &app,
+    fetch_bug_detail(&app, &workspace_id, &bug_id).await
+}
+
+/// Loads a bug together with its change history.
+///
+/// The history lives in a legacy HTML page, so a failure there only degrades
+/// that section instead of failing the whole detail.
+pub(crate) async fn fetch_bug_detail(
+    app: &AppHandle,
+    workspace_id: &str,
+    bug_id: &str,
+) -> Result<BugDetail, String> {
+    let body = bug_detail_body(workspace_id, bug_id);
+    let url = bug_detail_url();
+    let detail_future = session_request_json(
+        app,
         "POST",
-        &bug_detail_url(),
+        &url,
         Some(body),
         Duration::from_secs(45),
-    )
-    .await?;
+    );
+    let changes_future = fetch_change_history(app, workspace_id, bug_id);
 
-    parse_bug_detail(&root)
+    let (root, changes) = tokio::join!(detail_future, changes_future);
+    let mut detail = parse_bug_detail(&root?)?;
+    detail.changes = changes.unwrap_or_else(|error| ChangeHistory {
+        error: Some(error),
+        ..ChangeHistory::default()
+    });
+
+    Ok(detail)
+}
+
+/// The legacy page returns at most one page of changes per request.
+const MAX_CHANGE_PAGES: u32 = 10;
+
+pub(crate) async fn fetch_change_history(
+    app: &AppHandle,
+    workspace_id: &str,
+    bug_id: &str,
+) -> Result<ChangeHistory, String> {
+    let mut history = ChangeHistory::default();
+    let mut previous_first_seq: Option<u32> = None;
+
+    for page in 1..=MAX_CHANGE_PAGES {
+        let http = session_request_text(
+            app,
+            "GET",
+            &changes_list_url(workspace_id, bug_id, page),
+            None,
+            Duration::from_secs(30),
+        )
+        .await?;
+        let parsed = parse_changes_html(&http.body)?;
+
+        if page == 1 {
+            history.total = parsed.total;
+        }
+        let Some(first_seq) = parsed.changes.first().map(|change| change.seq) else {
+            break;
+        };
+        // Guard against the server ignoring `page` and repeating the first page.
+        if page > 1 && previous_first_seq == Some(first_seq) {
+            break;
+        }
+        previous_first_seq = Some(first_seq);
+
+        for change in parsed.changes {
+            if history
+                .changes
+                .iter()
+                .any(|existing| existing.seq == change.seq)
+            {
+                continue;
+            }
+            history.changes.push(change);
+        }
+
+        if history.changes.len() as u32 >= history.total {
+            break;
+        }
+    }
+
+    if history.total < history.changes.len() as u32 {
+        history.total = history.changes.len() as u32;
+    }
+
+    Ok(history)
 }
 
 #[derive(Serialize)]
@@ -356,6 +433,21 @@ pub(crate) async fn session_request_json(
     body: Option<Value>,
     timeout: Duration,
 ) -> Result<Value, String> {
+    let http = session_request_text(app, method, url, body, timeout).await?;
+
+    serde_json::from_str(&http.body)
+        .map_err(|error| format!("invalid TAPD JSON response: {error}"))
+}
+
+/// Same as [`session_request_json`] but returns the raw body, for the legacy
+/// pages TAPD renders as HTML.
+pub(crate) async fn session_request_text(
+    app: &AppHandle,
+    method: &str,
+    url: &str,
+    body: Option<Value>,
+    timeout: Duration,
+) -> Result<BridgeHttpResult, String> {
     let window = app
         .get_webview_window(session::SESSION_LABEL)
         .ok_or_else(|| "会话窗口尚未创建，请先打开登录窗口".to_string())?;
@@ -378,8 +470,7 @@ pub(crate) async fn session_request_json(
         ));
     }
 
-    serde_json::from_str(&http.body)
-        .map_err(|error| format!("invalid TAPD JSON response: {error}"))
+    Ok(http)
 }
 
 fn string_field(value: &Value, key: &str) -> String {
@@ -454,4 +545,122 @@ pub fn open_path(path: String) -> Result<(), String> {
         .spawn()
         .map(|_| ())
         .map_err(|error| error.to_string())
+}
+
+const MEDIA_PREVIEW_LIMIT: u64 = 12 * 1024 * 1024;
+const MEDIA_USER_AGENT: &str =
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko)";
+
+/// Downloads a TAPD-hosted image with the session cookies and returns it as a
+/// `data:` URL, so the main window can show a thumbnail without having the
+/// tapd.cn cookies itself (cross-site image loads are blocked by SameSite).
+#[tauri::command]
+pub async fn media_preview(app: AppHandle, url: String) -> Result<String, String> {
+    if !is_tapd_media_url(&url) {
+        return Err("只支持 TAPD 站内资源地址".to_string());
+    }
+
+    let window = app
+        .get_webview_window(session::SESSION_LABEL)
+        .ok_or_else(|| "会话窗口尚未创建".to_string())?;
+    let cookie = session::cookie_header(&window)?;
+
+    let response = reqwest::Client::builder()
+        .user_agent(MEDIA_USER_AGENT)
+        .timeout(Duration::from_secs(60))
+        .build()
+        .map_err(|error| error.to_string())?
+        .get(&url)
+        .header(reqwest::header::COOKIE, cookie)
+        .header(reqwest::header::REFERER, "https://www.tapd.cn/")
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!("HTTP {status}"));
+    }
+
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    // TAPD often replies with a bare `image` instead of `image/png`.
+    if !content_type.starts_with("image") {
+        return Err(format!("不是图片（{content_type}）"));
+    }
+    if response.content_length().unwrap_or(0) > MEDIA_PREVIEW_LIMIT {
+        return Err("图片超过 12MB，已跳过预览".to_string());
+    }
+
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|error| error.to_string())?;
+    if bytes.len() as u64 > MEDIA_PREVIEW_LIMIT {
+        return Err("图片超过 12MB，已跳过预览".to_string());
+    }
+
+    let mime = if content_type.contains('/') {
+        content_type
+    } else {
+        sniff_image_mime(&bytes).to_string()
+    };
+
+    use base64::Engine;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    Ok(format!("data:{mime};base64,{encoded}"))
+}
+
+/// Minimal magic-number sniffing for the formats TAPD stores.
+fn sniff_image_mime(bytes: &[u8]) -> &'static str {
+    if bytes.starts_with(&[0x89, b'P', b'N', b'G']) {
+        return "image/png";
+    }
+    if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        return "image/jpeg";
+    }
+    if bytes.starts_with(b"GIF8") {
+        return "image/gif";
+    }
+    if bytes.len() > 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        return "image/webp";
+    }
+    if bytes.starts_with(b"BM") {
+        return "image/bmp";
+    }
+    "image/png"
+}
+
+fn is_tapd_media_url(url: &str) -> bool {
+    ["https://www.tapd.cn/", "https://file.tapd.cn/", "https://tdl.tapd.cn/"]
+        .iter()
+        .any(|prefix| url.starts_with(prefix))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sniffs_image_mime_from_magic_bytes() {
+        assert_eq!(sniff_image_mime(&[0x89, b'P', b'N', b'G', 1]), "image/png");
+        assert_eq!(sniff_image_mime(&[0xFF, 0xD8, 0xFF, 0xE0]), "image/jpeg");
+        assert_eq!(sniff_image_mime(b"GIF89a"), "image/gif");
+        assert_eq!(sniff_image_mime(b"RIFF1234WEBPVP8 "), "image/webp");
+        assert_eq!(sniff_image_mime(b"not-an-image"), "image/png");
+    }
+
+    #[test]
+    fn only_allows_tapd_media_urls() {
+        assert!(is_tapd_media_url(
+            "https://www.tapd.cn/tfl/captures/2026-11/a.png"
+        ));
+        assert!(is_tapd_media_url("https://file.tapd.cn/1/attachments/download/2/a.png"));
+        assert!(!is_tapd_media_url("https://evil.example.com/a.png"));
+        assert!(!is_tapd_media_url("file:///etc/passwd"));
+    }
 }
