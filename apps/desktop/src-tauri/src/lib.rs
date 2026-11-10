@@ -62,6 +62,7 @@ pub fn run() {
             commands::open_path,
             commands::open_media,
             commands::media_endpoint,
+            commands::list_dirs,
             commands::open_targets,
             commands::set_open_target,
         ])

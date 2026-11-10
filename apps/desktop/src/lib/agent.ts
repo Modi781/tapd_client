@@ -8,9 +8,17 @@ export type AgentTaskStatus =
   | "failed"
   | "canceled";
 
+/** Per-project agent settings, edited from the project card in settings. */
+export type ProjectAgentConfig = {
+  repoPath: string;
+  rule: string;
+};
+
 export type AgentConfig = {
   binaryPath: string;
+  /** Legacy: migrated into `projects` on load. */
   repoMappings: Record<string, string>;
+  projects: Record<string, ProjectAgentConfig>;
   promptTemplate: string;
   readyQuietMs: number;
   readyTimeoutMs: number;

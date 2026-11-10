@@ -1,0 +1,286 @@
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import { ChevronDown, ChevronUp, FolderGit2, FolderOpen } from "lucide-react";
+import clsx from "clsx";
+
+import { agentApi, type ProjectAgentConfig } from "../lib/agent";
+import { api, type Workspace, type WorkspaceContext } from "../lib/api";
+import type { SettingsSectionProps } from "../lib/feature";
+import { Button } from "./ui";
+import { FolderPicker } from "./FolderPicker";
+
+const INPUT_CLASS =
+  "w-full rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-700 outline-none transition placeholder:text-slate-300 focus:border-sky-300 focus:ring-2 focus:ring-sky-100";
+
+const emptyProject = (): ProjectAgentConfig => ({ repoPath: "", rule: "" });
+
+/**
+ * Project cards: each TAPD project carries its local repository folder and its
+ * own agent rules. Everything saves on blur / on pick — there is no save button.
+ */
+export function ProjectSettings(props: {
+  context: WorkspaceContext | null;
+  toast: SettingsSectionProps["toast"];
+}) {
+  const { context, toast } = props;
+  const [projects, setProjects] = useState<Record<string, ProjectAgentConfig>>({});
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+  const [pickerFor, setPickerFor] = useState<string | null>(null);
+  const [dragging, setDragging] = useState(false);
+
+  const projectsRef = useRef<Record<string, ProjectAgentConfig>>({});
+  useEffect(() => {
+    projectsRef.current = projects;
+  }, [projects]);
+
+  useEffect(() => {
+    void agentApi
+      .configGet()
+      .then(({ config }) => setProjects(config.projects ?? {}))
+      .catch((error) => toast("error", String(error)));
+  }, [toast]);
+
+  const persist = useCallback(
+    async (next: Record<string, ProjectAgentConfig>) => {
+      setProjects(next);
+      try {
+        const { config: updated } = await agentApi.configSet({ projects: next });
+        setProjects(updated.projects ?? {});
+      } catch (error) {
+        toast("error", String(error));
+      }
+    },
+    [toast],
+  );
+
+  /** Local edit only; the save happens on blur. */
+  const edit = useCallback((workspaceId: string, patch: Partial<ProjectAgentConfig>) => {
+    setProjects((current) => {
+      const previous = current[workspaceId] ?? emptyProject();
+      return {
+        ...current,
+        [workspaceId]: {
+          repoPath: patch.repoPath ?? previous.repoPath,
+          rule: patch.rule ?? previous.rule,
+        },
+      };
+    });
+  }, []);
+
+  const save = useCallback(() => {
+    void persist(projectsRef.current);
+  }, [persist]);
+
+  // Dropping a folder (or a file inside it) onto a project card sets its path.
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    void getCurrentWindow()
+      .onDragDropEvent((event) => {
+        const payload = event.payload;
+        if (payload.type === "enter") {
+          setDragging(true);
+          return;
+        }
+        if (payload.type === "leave") {
+          setDragging(false);
+          return;
+        }
+        if (payload.type !== "drop") return;
+        setDragging(false);
+
+        const path = payload.paths?.[0];
+        if (!path) return;
+
+        const ratio = window.devicePixelRatio || 1;
+        const element = document.elementFromPoint(
+          payload.position.x / ratio,
+          payload.position.y / ratio,
+        );
+        const card = element?.closest?.("[data-project-id]") as HTMLElement | null;
+        const workspaceId = card?.dataset.projectId;
+        if (!workspaceId) return;
+
+        void api
+          .listDirs(path)
+          .then((listing) => {
+            void persist({
+              ...projectsRef.current,
+              [workspaceId]: {
+                ...(projectsRef.current[workspaceId] ?? emptyProject()),
+                repoPath: listing.path,
+              },
+            });
+            toast("ok", `已设置文件夹：${listing.path}`);
+          })
+          .catch((error) => toast("error", String(error)));
+      })
+      .then((fn) => {
+        unlisten = fn;
+      });
+    return () => unlisten?.();
+  }, [persist, toast]);
+
+  // TAPD projects plus any project already configured but not in the list.
+  const workspaces = useMemo<Workspace[]>(() => {
+    const list = [...(context?.workspaces ?? [])];
+    for (const id of Object.keys(projects)) {
+      if (!list.some((workspace) => workspace.id === id)) {
+        list.push({
+          id,
+          name: id,
+          prettyName: id,
+          category: "",
+          status: "",
+          logoColor: null,
+          lastVisitedTime: null,
+          jumpUrl: null,
+        });
+      }
+    }
+    return list;
+  }, [context, projects]);
+
+  const pickerProject = pickerFor ? projects[pickerFor] ?? emptyProject() : null;
+
+  return (
+    <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+      <h2 className="flex items-center gap-2 text-sm font-semibold text-slate-900">
+        <FolderGit2 size={15} className="text-slate-400" />
+        项目
+      </h2>
+      <p className="mt-1 text-xs text-slate-500">
+        点击左侧项目切换。每个项目在这里设置本地文件夹和项目规则，Agent
+        修复时直接使用；文件夹可以拖进卡片，或点「选择」。改动失焦即保存。
+      </p>
+
+      <div className="mt-3 grid gap-2 sm:grid-cols-2">
+        {workspaces.map((workspace) => {
+          const project = projects[workspace.id] ?? emptyProject();
+          const open = expanded[workspace.id] ?? false;
+          const hasRule = project.rule.trim().length > 0;
+
+          return (
+            <div
+              key={workspace.id}
+              data-project-id={workspace.id}
+              className={clsx(
+                "rounded-xl border bg-white p-3 transition",
+                open ? "border-sky-200 shadow-sm" : "border-slate-100",
+                dragging && "border-dashed border-sky-300 bg-sky-50/40",
+              )}
+            >
+              <div className="flex items-center gap-2">
+                <span
+                  className="h-2.5 w-2.5 shrink-0 rounded-full"
+                  style={{ backgroundColor: workspace.logoColor || "#0ea5e9" }}
+                />
+                <span className="min-w-0 flex-1 truncate text-xs font-medium text-slate-800">
+                  {workspace.name}
+                </span>
+                <span className="shrink-0 font-mono text-[10px] text-slate-400">
+                  {workspace.id}
+                </span>
+                <button
+                  type="button"
+                  onClick={() =>
+                    setExpanded((current) => ({ ...current, [workspace.id]: !open }))
+                  }
+                  className={clsx(
+                    "inline-flex shrink-0 items-center gap-1 rounded-md px-1.5 py-1 text-[10px] transition",
+                    hasRule
+                      ? "text-sky-600 hover:bg-sky-50"
+                      : "text-slate-400 hover:bg-slate-50",
+                  )}
+                >
+                  规则
+                  {open ? <ChevronUp size={11} /> : <ChevronDown size={11} />}
+                </button>
+              </div>
+
+              <div className="mt-2">
+                <div className="flex items-center justify-between text-[10px] text-slate-400">
+                  <span>本地文件夹</span>
+                  {project.repoPath ? (
+                    <span className="truncate pl-2 font-mono text-[10px] text-slate-400">
+                      {project.repoPath.split("/").pop()}
+                    </span>
+                  ) : null}
+                </div>
+                <div className="mt-1 flex items-center gap-1.5">
+                  <input
+                    value={project.repoPath}
+                    onChange={(event) =>
+                      edit(workspace.id, { repoPath: event.target.value })
+                    }
+                    onBlur={save}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") event.currentTarget.blur();
+                    }}
+                    placeholder="/Users/you/projects/repo"
+                    spellCheck={false}
+                    className={`${INPUT_CLASS} font-mono`}
+                  />
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    icon={<FolderOpen size={12} />}
+                    onClick={() => setPickerFor(workspace.id)}
+                  >
+                    选择
+                  </Button>
+                </div>
+              </div>
+
+              {open ? (
+                <div className="mt-2">
+                  <div className="text-[10px] text-slate-400">项目规则</div>
+                  <textarea
+                    value={project.rule}
+                    onChange={(event) => edit(workspace.id, { rule: event.target.value })}
+                    onBlur={save}
+                    rows={4}
+                    placeholder={"例如：\n- 只改 Rust 层，UI 交给同事\n- 提交前必须跑 cargo test"}
+                    className={`${INPUT_CLASS} mt-1 resize-y leading-5`}
+                  />
+                  <p className="mt-1 text-[10px] leading-4 text-slate-400">
+                    默认提示词模板里的{" "}
+                    <code className="rounded bg-slate-100 px-1 font-mono">
+                      {"{{project_rule}}"}
+                    </code>{" "}
+                    会引入这段规则。
+                  </p>
+                </div>
+              ) : null}
+            </div>
+          );
+        })}
+
+        {workspaces.length === 0 ? (
+          <div className="rounded-xl border border-dashed border-slate-200 p-3 text-xs text-slate-400">
+            登录后加载项目
+          </div>
+        ) : null}
+      </div>
+
+      <FolderPicker
+        open={pickerFor !== null}
+        initialPath={pickerProject?.repoPath}
+        title="选择项目文件夹"
+        description="设置这个 TAPD 项目对应的本地仓库目录，Agent 会以它为工作目录。"
+        onCancel={() => setPickerFor(null)}
+        onSelect={(path) => {
+          const workspaceId = pickerFor;
+          setPickerFor(null);
+          if (!workspaceId) return;
+          void persist({
+            ...projectsRef.current,
+            [workspaceId]: {
+              ...(projectsRef.current[workspaceId] ?? emptyProject()),
+              repoPath: path,
+            },
+          });
+        }}
+      />
+    </section>
+  );
+}

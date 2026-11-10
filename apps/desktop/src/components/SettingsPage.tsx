@@ -15,11 +15,11 @@ import {
   type AppInfo,
   type McpConfigInfo,
   type SessionStatus,
-  type Workspace,
   type WorkspaceContext,
 } from "../lib/api";
 import type { SettingsSectionProps } from "../lib/feature";
 import { AgentSettings } from "./AgentSettings";
+import { ProjectSettings } from "./ProjectSettings";
 import { NotificationSettings } from "./NotificationSettings";
 import { Badge, Button } from "./ui";
 
@@ -95,26 +95,7 @@ export function SettingsPage(props: Props) {
         </div>
       </section>
 
-      <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-        <h2 className="flex items-center gap-2 text-sm font-semibold text-slate-900">
-          <Server size={15} className="text-slate-400" />
-          项目
-        </h2>
-        <p className="mt-1 text-xs text-slate-500">
-          项目列表来自 TAPD「我的项目」。点击左侧项目切换；默认进入上次选择的项目。
-        </p>
-
-        <div className="mt-3 grid gap-2 sm:grid-cols-2">
-          {(context?.workspaces ?? []).map((workspace) => (
-            <WorkspaceRow key={workspace.id} workspace={workspace} />
-          ))}
-          {!context ? (
-            <div className="rounded-xl border border-dashed border-slate-200 p-3 text-xs text-slate-400">
-              登录后加载项目
-            </div>
-          ) : null}
-        </div>
-      </section>
+      <ProjectSettings context={context} toast={toast} />
 
       <NotificationSettings toast={toast} />
 
@@ -244,19 +225,6 @@ function InfoTile({ label, value }: { label: string; value: string }) {
     <div className="rounded-xl border border-slate-100 bg-slate-50/70 p-3">
       <div className="text-[10px] uppercase tracking-wide text-slate-400">{label}</div>
       <div className="mt-1 truncate text-sm font-medium text-slate-800">{value}</div>
-    </div>
-  );
-}
-
-function WorkspaceRow({ workspace }: { workspace: Workspace }) {
-  return (
-    <div className="flex items-center gap-2 rounded-xl border border-slate-100 bg-white px-3 py-2">
-      <span
-        className="h-2.5 w-2.5 shrink-0 rounded-full"
-        style={{ backgroundColor: workspace.logoColor || "#0ea5e9" }}
-      />
-      <span className="min-w-0 flex-1 truncate text-xs text-slate-700">{workspace.name}</span>
-      <Badge tone="neutral">{workspace.id}</Badge>
     </div>
   );
 }

@@ -42,22 +42,37 @@ const LOG_DIR: &str = "agent-logs";
 const DEFAULT_BINARY: &str = "opencode";
 const MAX_LOG_TAIL_BYTES: usize = 400 * 1024;
 
-pub const DEFAULT_PROMPT_TEMPLATE: &str = "请修复 TAPD 缺陷：{{title}}\n\n缺陷详情文件：{{md_path}}\n本地仓库：{{repo_path}}\n项目：{{workspace_name}} / 严重程度：{{severity}} / 优先级：{{priority}}\n\n要求：\n1. 先完整阅读 bug.md 和 assets/ 下的截图、视频。\n2. 定位根因，做最小必要修改。\n3.修复时请遵循团队代码规范，确保代码可读、可维护。\n4. 修复完成后，提交代码并在 TAPD 中更新缺陷状态并简要评论原由以及解决方案和修复影响范围。";
+pub const DEFAULT_PROMPT_TEMPLATE: &str = "请修复 TAPD 缺陷：{{title}}\n\n缺陷详情文件：{{md_path}}\n本地仓库：{{repo_path}}\n项目：{{workspace_name}} / 严重程度：{{severity}} / 优先级：{{priority}}\n\n项目规则：\n{{project_rule}}\n\n要求：\n1. 先完整阅读 bug.md 和 assets/ 下的截图、视频。\n2. 定位根因，做最小必要修改。\n3.修复时请遵循团队代码规范，确保代码可读、可维护。\n4. 修复完成后，提交代码并在 TAPD 中更新缺陷状态并简要评论原由以及解决方案和修复影响范围。";
 
-/// Previous default; migrated on load so existing installs pick up the new
-/// commit + TAPD write-back instructions.
-const LEGACY_PROMPT_TEMPLATE: &str = "请修复 TAPD 缺陷：{{title}}\n\n缺陷详情文件：{{md_path}}\n本地仓库：{{repo_path}}\n项目：{{workspace_name}} / 严重程度：{{severity}} / 优先级：{{priority}}\n\n要求：\n1. 先完整阅读 bug.md 和 assets/ 下的截图、视频。\n2. 定位根因，做最小必要修改。\n3. 修改后运行相关测试或构建。\n4. 不要自行 git commit / push，完成后说明改了哪些文件。";
+/// Previous defaults; untouched installs are migrated to the current default
+/// (which also carries the `{{project_rule}}` slot).
+const LEGACY_PROMPT_TEMPLATES: &[&str] = &[
+    "请修复 TAPD 缺陷：{{title}}\n\n缺陷详情文件：{{md_path}}\n本地仓库：{{repo_path}}\n项目：{{workspace_name}} / 严重程度：{{severity}} / 优先级：{{priority}}\n\n要求：\n1. 先完整阅读 bug.md 和 assets/ 下的截图、视频。\n2. 定位根因，做最小必要修改。\n3.修复时请遵循团队代码规范，确保代码可读、可维护。\n4. 修复完成后，提交代码并在 TAPD 中更新缺陷状态并简要评论原由以及解决方案和修复影响范围。",
+    "请修复 TAPD 缺陷：{{title}}\n\n缺陷详情文件：{{md_path}}\n本地仓库：{{repo_path}}\n项目：{{workspace_name}} / 严重程度：{{severity}} / 优先级：{{priority}}\n\n要求：\n1. 先完整阅读 bug.md 和 assets/ 下的截图、视频。\n2. 定位根因，做最小必要修改。\n3. 修改后运行相关测试或构建。\n4. 不要自行 git commit / push，完成后说明改了哪些文件。",
+];
 
 // ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
 
+/// Per-project agent settings, edited from the project card.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ProjectAgentConfig {
+    /// Absolute local repository path used as the agent's working directory.
+    pub repo_path: String,
+    /// Project-specific rules appended to (or injected into) the prompt.
+    pub rule: String,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct AgentConfig {
     pub binary_path: String,
-    /// TAPD workspace id -> absolute local repository path.
+    /// Legacy map kept only for migration; use `projects` instead.
     pub repo_mappings: BTreeMap<String, String>,
+    /// TAPD workspace id -> repository path + project rules.
+    pub projects: BTreeMap<String, ProjectAgentConfig>,
     pub prompt_template: String,
     /// How long the TUI must stay quiet (after producing output) before we
     /// consider it ready and inject the task.
@@ -72,6 +87,7 @@ impl Default for AgentConfig {
         Self {
             binary_path: DEFAULT_BINARY.to_string(),
             repo_mappings: BTreeMap::new(),
+            projects: BTreeMap::new(),
             prompt_template: DEFAULT_PROMPT_TEMPLATE.to_string(),
             ready_quiet_ms: 900,
             ready_timeout_ms: 15_000,
@@ -90,20 +106,58 @@ impl AgentConfig {
         };
 
         if self.prompt_template.trim().is_empty()
-            || self.prompt_template.trim() == LEGACY_PROMPT_TEMPLATE
+            || LEGACY_PROMPT_TEMPLATES
+                .iter()
+                .any(|legacy| self.prompt_template.trim() == *legacy)
         {
             self.prompt_template = DEFAULT_PROMPT_TEMPLATE.to_string();
         }
 
         self.ready_quiet_ms = self.ready_quiet_ms.clamp(100, 10_000);
         self.ready_timeout_ms = self.ready_timeout_ms.clamp(1_000, 120_000);
-        self.repo_mappings = self
-            .repo_mappings
+
+        // Migrate the old id -> path map into per-project settings once.
+        for (workspace_id, path) in std::mem::take(&mut self.repo_mappings) {
+            let path = path.trim().to_string();
+            if path.is_empty() {
+                continue;
+            }
+            self.projects
+                .entry(workspace_id)
+                .or_insert_with(ProjectAgentConfig::default)
+                .repo_path = path;
+        }
+
+        self.projects = self
+            .projects
             .into_iter()
-            .map(|(key, value)| (key, value.trim().to_string()))
-            .filter(|(_, value)| !value.is_empty())
+            .map(|(workspace_id, project)| {
+                let repo_path = project.repo_path.trim().to_string();
+                let rule = project.rule.trim().to_string();
+                (workspace_id, ProjectAgentConfig { repo_path, rule })
+            })
+            .filter(|(_, project)| !project.repo_path.is_empty() || !project.rule.is_empty())
             .collect();
+
         self
+    }
+
+    /// Repository path for a workspace (legacy map only exists pre-migration).
+    fn repo_path_for(&self, workspace_id: &str) -> String {
+        self.projects
+            .get(workspace_id)
+            .map(|project| project.repo_path.clone())
+            .filter(|path| !path.is_empty())
+            .or_else(|| self.repo_mappings.get(workspace_id).cloned())
+            .unwrap_or_default()
+    }
+
+    /// Project rules for a workspace.
+    fn rule_for(&self, workspace_id: &str) -> String {
+        self.projects
+            .get(workspace_id)
+            .map(|project| project.rule.clone())
+            .unwrap_or_default()
     }
 }
 
@@ -112,6 +166,7 @@ impl AgentConfig {
 struct AgentConfigPatch {
     binary_path: Option<String>,
     repo_mappings: Option<BTreeMap<String, String>>,
+    projects: Option<BTreeMap<String, ProjectAgentConfig>>,
     prompt_template: Option<String>,
     ready_quiet_ms: Option<u64>,
     ready_timeout_ms: Option<u64>,
@@ -241,6 +296,8 @@ pub struct PromptVars {
     pub bug_id: String,
     pub severity: String,
     pub priority: String,
+    /// Project-specific rules (from the project card in settings).
+    pub project_rule: String,
 }
 
 impl PromptVars {
@@ -253,11 +310,16 @@ impl PromptVars {
             bug_id: task.bug_id.clone(),
             severity: task.severity.clone(),
             priority: task.priority.clone(),
+            project_rule: String::new(),
         }
     }
 }
 
 /// Replaces `{{variable}}` placeholders; unknown placeholders are left intact.
+///
+/// The project rule is exposed as `{{project_rule}}` so a global template can
+/// decide where it lands; when the template has no such placeholder the rule is
+/// appended as its own section instead of being silently dropped.
 pub fn render_prompt(template: &str, vars: &PromptVars) -> String {
     let pairs = [
         ("title", vars.title.as_str()),
@@ -267,11 +329,19 @@ pub fn render_prompt(template: &str, vars: &PromptVars) -> String {
         ("bug_id", vars.bug_id.as_str()),
         ("severity", vars.severity.as_str()),
         ("priority", vars.priority.as_str()),
+        ("project_rule", vars.project_rule.as_str()),
     ];
 
+    let has_rule_slot = template.contains("{{project_rule}}");
     let mut rendered = template.to_string();
     for (key, value) in pairs {
         rendered = rendered.replace(&format!("{{{{{key}}}}}"), value);
+    }
+
+    let rule = vars.project_rule.trim();
+    if !has_rule_slot && !rule.is_empty() {
+        rendered.push_str("\n\n项目规则：\n");
+        rendered.push_str(rule);
     }
     rendered
 }
@@ -544,6 +614,9 @@ impl AgentCore {
             if let Some(mappings) = patch.repo_mappings {
                 config.repo_mappings = mappings;
             }
+            if let Some(projects) = patch.projects {
+                config.projects = projects;
+            }
             if let Some(template) = patch.prompt_template {
                 config.prompt_template = template;
             }
@@ -594,11 +667,7 @@ impl AgentCore {
             .unwrap_or_else(|| format!("缺陷 {bug_id}"));
         let severity = request.severity.clone().unwrap_or_default();
         let priority = request.priority.clone().unwrap_or_default();
-        let repo_path = config
-            .repo_mappings
-            .get(workspace_id)
-            .cloned()
-            .unwrap_or_default();
+        let repo_path = config.repo_path_for(workspace_id);
 
         let task = AgentTask {
             id,
@@ -854,7 +923,9 @@ impl AgentCore {
             return;
         }
 
-        task.prompt = render_prompt(&config.prompt_template, &PromptVars::from_task(&task));
+        let mut vars = PromptVars::from_task(&task);
+        vars.project_rule = config.rule_for(&task.workspace_id);
+        task.prompt = render_prompt(&config.prompt_template, &vars);
 
         // 4. Move to `running` with the resolved paths, then start the PTY.
         let Some(running_task) = self.update_task(&task.id, |current| {
@@ -1451,6 +1522,7 @@ mod tests {
                 ("1".to_string(), "  /repo  ".to_string()),
                 ("2".to_string(), "   ".to_string()),
             ]),
+            projects: BTreeMap::new(),
             prompt_template: "  ".to_string(),
             ready_quiet_ms: 1,
             ready_timeout_ms: 999_999,
@@ -1461,8 +1533,11 @@ mod tests {
         assert_eq!(config.binary_path, "opencode");
         assert_eq!(config.ready_quiet_ms, 100);
         assert_eq!(config.ready_timeout_ms, 120_000);
-        assert_eq!(config.repo_mappings.len(), 1);
-        assert_eq!(config.repo_mappings.get("1").map(String::as_str), Some("/repo"));
+        assert_eq!(config.repo_mappings.len(), 0);
+        assert_eq!(
+            config.projects.get("1").map(|project| project.repo_path.as_str()),
+            Some("/repo")
+        );
         assert_eq!(config.prompt_template, DEFAULT_PROMPT_TEMPLATE);
         assert!(!config.auto_open_console);
     }
@@ -1477,6 +1552,7 @@ mod tests {
             bug_id: "42".to_string(),
             severity: "严重".to_string(),
             priority: "高".to_string(),
+            project_rule: "只用 Rust 写".to_string(),
         };
 
         let rendered = render_prompt(
@@ -1485,8 +1561,43 @@ mod tests {
         );
         assert_eq!(
             rendered,
-            "标题|/exports/bug.md|/repo|UU|42|严重|高|{{unknown}}"
+            "标题|/exports/bug.md|/repo|UU|42|严重|高|{{unknown}}\n\n项目规则：\n只用 Rust 写"
         );
+    }
+
+    #[test]
+    fn project_rule_uses_the_explicit_slot() {
+        let vars = PromptVars {
+            title: "t".to_string(),
+            md_path: "m".to_string(),
+            repo_path: "r".to_string(),
+            workspace_name: "w".to_string(),
+            bug_id: "1".to_string(),
+            severity: "s".to_string(),
+            priority: "p".to_string(),
+            project_rule: "先跑 cargo test".to_string(),
+        };
+
+        assert_eq!(
+            render_prompt("规则：{{project_rule}}", &vars),
+            "规则：先跑 cargo test"
+        );
+    }
+
+    #[test]
+    fn empty_project_rule_adds_nothing() {
+        let vars = PromptVars {
+            title: "t".to_string(),
+            md_path: "m".to_string(),
+            repo_path: "r".to_string(),
+            workspace_name: "w".to_string(),
+            bug_id: "1".to_string(),
+            severity: "s".to_string(),
+            priority: "p".to_string(),
+            project_rule: String::new(),
+        };
+
+        assert_eq!(render_prompt("{{title}}", &vars), "t");
     }
 
     #[test]

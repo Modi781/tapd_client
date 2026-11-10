@@ -1,6 +1,9 @@
 use std::{
-    sync::Mutex,
-    time::Duration,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Mutex,
+    },
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
@@ -8,6 +11,27 @@ use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindow, WebviewWindo
 use crate::state::SharedState;
 
 pub const SESSION_LABEL: &str = "tapd-session";
+
+/// While a logout is running, the URL watcher must not resurrect `loggedIn`
+/// from the still-loaded TAPD page (navigation happens asynchronously).
+static LOGOUT_GUARD_UNTIL: AtomicU64 = AtomicU64::new(0);
+
+fn now_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or_default()
+}
+
+/// Suppresses session auto-detection for `millis`, so a logout does not flip
+/// straight back to "logged in" before TAPD lands on the login page.
+pub fn begin_logout_guard(millis: u64) {
+    LOGOUT_GUARD_UNTIL.store(now_millis() + millis, Ordering::SeqCst);
+}
+
+fn logout_in_progress() -> bool {
+    now_millis() < LOGOUT_GUARD_UNTIL.load(Ordering::SeqCst)
+}
 pub const TAPD_HOME: &str = "https://www.tapd.cn/";
 
 /// TAPD redirects into a workspace shell after a successful login.
@@ -151,7 +175,11 @@ pub fn spawn_session_watcher(app: AppHandle, state: SharedState) {
                 let mut config = state.config.lock().expect("config lock");
                 config.last_session_url = Some(url_string.clone());
 
-                if logged_in && !config.logged_in {
+                // A logout just cleared cookies and is still navigating: don't
+                // read the old page as a fresh login and flip the state back.
+                let suppress_login = logout_in_progress() && !config.logged_in;
+
+                if !suppress_login && logged_in && !config.logged_in {
                     config.logged_in = true;
                     login_changed = true;
                 } else if !logged_in && config.logged_in && auth_page {
