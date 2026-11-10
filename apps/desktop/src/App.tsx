@@ -168,7 +168,7 @@ export default function App() {
   const autoCollapseSidebar =
     viewportWidth <
     52 +
-      MIN_SIDEBAR_WIDTH +
+      expandedSidebarWidth +
       (detailRendered ? DETAIL_CONTENT_MIN + effectiveDetailWidth : MIN_CONTENT_WIDTH) +
       LAYOUT_GUTTER;
   const sidebarHidden = sidebarPeek
@@ -183,7 +183,10 @@ export default function App() {
   // Never let the sidebar eat the content area on a narrow window.
   const effectiveSidebarWidth = sidebarHidden
     ? 0
-    : Math.max(180, Math.min(sidebarWidth, viewportWidth - MIN_CONTENT_WIDTH));
+    : Math.max(
+        180,
+        Math.min(sidebarWidth, viewportWidth - 52 - MIN_CONTENT_WIDTH),
+      );
 
   const infoRef = useRef<AppInfo | null>(null);
   infoRef.current = info;
