@@ -1,0 +1,122 @@
+name: Release
+
+# Pushes to the `release` branch produce a universal macOS dmg as a workflow
+# artifact; pushing a `v*` tag additionally publishes a GitHub release.
+on:
+  push:
+    branches: [release]
+    tags: ["v*"]
+  workflow_dispatch:
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  macos-universal:
+    runs-on: macos-14
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12.10.1
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: . -> target
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Detect signing secrets
+        id: signing
+        env:
+          CERT: ${{ secrets.APPLE_CERTIFICATE }}
+        run: |
+          if [ -n "$CERT" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Configure code signing (optional)
+        # Requires APPLE_CERTIFICATE, APPLE_CERTIFICATE_PASSWORD and
+        # APPLE_SIGNING_IDENTITY repository secrets. Skipped when absent,
+        # producing an unsigned build.
+        if: steps.signing.outputs.enabled == 'true'
+        env:
+          CERT: ${{ secrets.APPLE_CERTIFICATE }}
+          CERT_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID_SECRET: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD_SECRET: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID_SECRET: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          {
+            echo "APPLE_CERTIFICATE=$CERT"
+            echo "APPLE_CERTIFICATE_PASSWORD=$CERT_PASSWORD"
+            echo "APPLE_SIGNING_IDENTITY=$IDENTITY"
+          } >> "$GITHUB_ENV"
+          if [ -n "$APPLE_ID_SECRET" ]; then
+            {
+              echo "APPLE_ID=$APPLE_ID_SECRET"
+              echo "APPLE_PASSWORD=$APPLE_PASSWORD_SECRET"
+              echo "APPLE_TEAM_ID=$APPLE_TEAM_ID_SECRET"
+            } >> "$GITHUB_ENV"
+          fi
+
+      - name: Typecheck frontend
+        run: pnpm typecheck
+
+      - name: Test Rust workspace
+        run: pnpm test:rust
+
+      - name: Build universal MCP sidecar
+        run: bash scripts/build-sidecar.sh universal-apple-darwin
+
+      - name: Build universal app and dmg
+        run: pnpm -C apps/desktop tauri build --target universal-apple-darwin --bundles app,dmg
+
+      - name: Collect artifacts
+        id: meta
+        run: |
+          VERSION=$(node -p "require('./apps/desktop/src-tauri/tauri.conf.json').version")
+          OUT=dist-release
+          mkdir -p "$OUT"
+          cp target/universal-apple-darwin/release/bundle/dmg/*.dmg "$OUT"/
+          cp -R "target/universal-apple-darwin/release/bundle/macos/TAPD Client.app" "$OUT"/
+          (cd "$OUT" && shasum -a 256 ./*.dmg > SHA256SUMS.txt)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          find "$OUT" -maxdepth 1 -print
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tapd-client-${{ steps.meta.outputs.version }}-universal-${{ github.run_number }}
+          path: dist-release
+          if-no-files-found: error
+
+      - name: Publish GitHub release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist-release/*.dmg
+            dist-release/SHA256SUMS.txt
+          generate_release_notes: true

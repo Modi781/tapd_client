@@ -555,6 +555,7 @@ exporter: "tapd-client/1.0"
 | M5 MCP | ✅ | stdio sidecar、查询/导出 + 评论/状态写回共 9 个工具、opencode v2 联调通过 |
 | M6 通知 | ✅ | 可配置范围（我的/项目、新建/转移/重新打开）、自绘弹窗、忽略/查看、处理=改派+接受 |
 | M7 Agent | ✅ | opencode PTY TUI、串行队列、prompt 注入、xterm 控制台、取消/重试、任务恢复 |
+| M8 打包 | ✅（打包链路） | `tapd-mcp` 作为 externalBin 打进 App；`pnpm build:universal` 本地出 dmg；push `release` 分支由 GitHub Actions 出 universal dmg 与 artifact，tag 额外发 Release。MCP 策略/审计 UI 尚未做 |
 
 ### 与计划的偏差
 
@@ -568,7 +569,7 @@ exporter: "tapd-client/1.0"
 
 ### 已知待办
 
-- M8：sidecar 打包进 App、策略设置与审计 UI、universal dmg。
+- M8 剩余：MCP 策略设置与审计 UI、首启引导、诊断包（sidecar 打包与 universal dmg 已完成）。
 - SQLite 缓存与跨项目增量轮询（当前实时请求 + 单项目通知游标）。
 - 通知历史视图、托盘角标、未读计数。
 - Agent 任务常驻面板、并发数配置（当前固定 1）、进程树取消。
