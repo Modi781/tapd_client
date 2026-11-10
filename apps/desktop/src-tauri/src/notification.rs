@@ -424,7 +424,8 @@ pub fn kanban_transition_body(
         "entity_type": "bug",
         "current_status": current_status,
         "next_status": next_status,
-        "from": "",
+        // TAPD 要求 from 非空，空字符串会被拒绝（from:不允许为空）。
+        "from": current_status,
         "fields": [],
         "is_manual": 1,
         "auto_complete": 0,
@@ -452,7 +453,7 @@ pub fn workflow_transition_body(
         "entity_type": "bug",
         "current_status": current_status,
         "next_status": next_status,
-        "from": "",
+        "from": current_status,
         "fields": [],
         "is_manual": 1,
         "auto_complete": 0,

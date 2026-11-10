@@ -115,6 +115,9 @@ pub fn run() {
         .expect("error while building tauri application")
         .run(|app, event| match event {
             RunEvent::Exit => {
+                // The agent TUI/serve run in their own sessions, so they must be
+                // stopped explicitly or they keep working after the app is gone.
+                agent::shutdown(app);
                 if let Some(state) = app.try_state::<Arc<AppState>>() {
                     RuntimeInfo::clear(&state.paths.runtime_file);
                 }

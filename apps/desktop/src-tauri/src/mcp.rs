@@ -661,7 +661,8 @@ async fn transition_once(
         "entity_type": "bug",
         "current_status": current_status,
         "next_status": next_status,
-        "from": "",
+        // TAPD 要求 from 非空，空字符串会直接返回 "from:不允许为空"。
+        "from": current_status,
         "fields": fields,
         "is_manual": 1,
         "auto_complete": 0,
@@ -698,7 +699,7 @@ async fn transition_once(
         "entity_type": "bug",
         "current_status": current_status,
         "next_status": next_status,
-        "from": "",
+        "from": current_status,
         "fields": fields,
         "is_manual": 1,
         "auto_complete": 0,
