@@ -27,13 +27,6 @@ pub fn opencode_config_path() -> Option<PathBuf> {
     config_path_from_cli().or_else(fallback_config_path)
 }
 
-/// Whether the global config already points at this sidecar.
-pub fn is_imported(command_path: &str) -> bool {
-    opencode_config_path()
-        .map(|path| is_imported_in(&path, command_path))
-        .unwrap_or(false)
-}
-
 /// Ensures the tapd MCP server is present in the opencode global config.
 ///
 /// Returns `{ path, backupPath, changed, imported }`, matching the frontend
@@ -302,7 +295,8 @@ fn ensure_mcp_in_file(path: &Path, command_path: &str) -> Result<MergeOutcome, S
     })
 }
 
-fn is_imported_in(path: &Path, command_path: &str) -> bool {
+/// Whether the given config file already points at this sidecar.
+pub(crate) fn is_imported_in(path: &Path, command_path: &str) -> bool {
     let Ok(raw) = std::fs::read_to_string(path) else {
         return false;
     };

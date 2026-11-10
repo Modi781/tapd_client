@@ -121,11 +121,19 @@ export default function App() {
     getRefreshing,
   );
 
-  // The sidebar follows the window until the user drags it once.
+  // The sidebar follows the window until the user drags it once. Coalesce
+  // resize events into one update per frame; window expansion fires many.
   useEffect(() => {
-    const onResize = () => setViewportWidth(window.innerWidth);
+    let frame = 0;
+    const onResize = () => {
+      window.cancelAnimationFrame(frame);
+      frame = window.requestAnimationFrame(() => setViewportWidth(window.innerWidth));
+    };
     window.addEventListener("resize", onResize);
-    return () => window.removeEventListener("resize", onResize);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      window.removeEventListener("resize", onResize);
+    };
   }, []);
 
   useEffect(() => {
@@ -134,6 +142,8 @@ export default function App() {
   }, [viewportWidth, sidebarSized]);
 
   const [detailOpen, setDetailOpen] = useState(false);
+  /** Kept true during the close animation; false unmounts the pane entirely. */
+  const [detailRendered, setDetailRendered] = useState(false);
   const [detail, setDetail] = useState<BugDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState<string | null>(null);
@@ -159,7 +169,7 @@ export default function App() {
     viewportWidth <
     52 +
       MIN_SIDEBAR_WIDTH +
-      (detailOpen ? DETAIL_CONTENT_MIN + effectiveDetailWidth : MIN_CONTENT_WIDTH) +
+      (detailRendered ? DETAIL_CONTENT_MIN + effectiveDetailWidth : MIN_CONTENT_WIDTH) +
       LAYOUT_GUTTER;
   const sidebarHidden = sidebarPeek
     ? false
@@ -178,9 +188,10 @@ export default function App() {
   const infoRef = useRef<AppInfo | null>(null);
   infoRef.current = info;
 
-  /** Detail pane visibility, readable from stable callbacks. */
-  const detailOpenRef = useRef(false);
-  detailOpenRef.current = detailOpen;
+  /** Whether the pane currently occupies layout (true during close animation). */
+  const detailRenderedRef = useRef(false);
+  detailRenderedRef.current = detailRendered;
+  const detailCloseTimer = useRef<number | null>(null);
   /** Layout values readable from the stable `loadBugDetail` callback. */
   const layoutRef = useRef({
     viewportWidth,
@@ -208,7 +219,7 @@ export default function App() {
     const seq = ++detailSeq.current;
     // Codex-style pane: make room first (collapse the project list on narrow
     // windows, then grow the window leftwards if needed), then animate in.
-    if (!detailOpenRef.current) {
+    if (!detailRenderedRef.current) {
       const layout = layoutRef.current;
       const requiredWithSidebar =
         52 +
@@ -231,8 +242,21 @@ export default function App() {
         .ensureWindowWidth(required)
         .catch(() => 0)
         .finally(() => {
-          if (seq === detailSeq.current) setDetailOpen(true);
+          if (seq !== detailSeq.current) return;
+          // Put the pane in layout first, then flip the transform on the next
+          // frame so the slide-in animates without animating layout widths.
+          setDetailRendered(true);
+          window.requestAnimationFrame(() => {
+            if (seq === detailSeq.current) setDetailOpen(true);
+          });
         });
+    } else {
+      // Reopening during the close animation: keep the layout, slide back in.
+      if (detailCloseTimer.current !== null) {
+        window.clearTimeout(detailCloseTimer.current);
+        detailCloseTimer.current = null;
+      }
+      setDetailOpen(true);
     }
     setDetail(null);
     setDetailError(null);
@@ -266,6 +290,28 @@ export default function App() {
       }
     })();
   }, []);
+
+  /** Slides the pane out, then removes it from layout to free the content area. */
+  const closeDetail = useCallback(() => {
+    detailSeq.current += 1;
+    setDetailOpen(false);
+    if (detailCloseTimer.current !== null) {
+      window.clearTimeout(detailCloseTimer.current);
+    }
+    detailCloseTimer.current = window.setTimeout(() => {
+      detailCloseTimer.current = null;
+      setDetailRendered(false);
+    }, 220);
+  }, []);
+
+  useEffect(
+    () => () => {
+      if (detailCloseTimer.current !== null) {
+        window.clearTimeout(detailCloseTimer.current);
+      }
+    },
+    [],
+  );
 
   useEffect(() => {
     if (!toast) return;
@@ -415,95 +461,115 @@ export default function App() {
   const selectWorkspace = (id: string) => {
     setWorkspaceId(id);
     setView("bugs");
-    detailSeq.current += 1;
-    setDetailOpen(false);
+    closeDetail();
     void api.setLastWorkspace(id);
   };
 
-  const openBug = (bug: BugSummary) => {
-    loadBugDetail(bug.workspaceId, bug.id);
-  };
+  const openBug = useCallback(
+    (bug: BugSummary) => {
+      loadBugDetail(bug.workspaceId, bug.id);
+    },
+    [loadBugDetail],
+  );
 
   /** Opens/switches the right-side detail pane without leaving the current view. */
-  const openBugById = (workspaceId: string, bugId: string) => {
-    loadBugDetail(workspaceId, bugId);
-  };
+  const openBugById = useCallback(
+    (workspaceId: string, bugId: string) => {
+      loadBugDetail(workspaceId, bugId);
+    },
+    [loadBugDetail],
+  );
 
-  const handleExport = async (target: BugDetail) => {
-    setExporting(true);
-    try {
-      const name =
-        context?.workspaces.find((item) => item.id === target.workspaceId)?.name ?? null;
-      const result = await api.exportBugMd(target.workspaceId, target.id, name);
-      setLastExport(result);
-      showToast("ok", `已导出 ${result.assetCount} 个资源：${result.markdownPath}`);
-    } catch (error) {
-      showToast("error", String(error));
-    } finally {
-      setExporting(false);
-    }
-  };
+  const handleExport = useCallback(
+    async (target: BugDetail) => {
+      setExporting(true);
+      try {
+        const name =
+          context?.workspaces.find((item) => item.id === target.workspaceId)?.name ?? null;
+        const result = await api.exportBugMd(target.workspaceId, target.id, name);
+        setLastExport(result);
+        showToast("ok", `已导出 ${result.assetCount} 个资源：${result.markdownPath}`);
+      } catch (error) {
+        showToast("error", String(error));
+      } finally {
+        setExporting(false);
+      }
+    },
+    [context, showToast],
+  );
 
-  const doEnqueueAgent = async (target: AgentTarget) => {
-    const workspaceName =
-      target.workspaceName ||
-      context?.workspaces.find((item) => item.id === target.workspaceId)?.name ||
-      null;
+  const doEnqueueAgent = useCallback(
+    async (target: AgentTarget) => {
+      const workspaceName =
+        target.workspaceName ||
+        context?.workspaces.find((item) => item.id === target.workspaceId)?.name ||
+        null;
 
-    try {
-      const { task } = await agentApi.enqueueBug({
-        workspaceId: target.workspaceId,
-        bugId: target.id,
-        workspaceName,
-        title: target.title,
-        severity: target.severityLabel,
-        priority: target.priorityLabel,
-      });
-      showToast("ok", "已加入 Agent 队列");
-      setAgentFocusTaskId(task.id);
-      setView("agent");
-    } catch (error) {
-      showToast("error", String(error));
-    }
-  };
+      try {
+        const { task } = await agentApi.enqueueBug({
+          workspaceId: target.workspaceId,
+          bugId: target.id,
+          workspaceName,
+          title: target.title,
+          severity: target.severityLabel,
+          priority: target.priorityLabel,
+        });
+        showToast("ok", "已加入 Agent 队列");
+        setAgentFocusTaskId(task.id);
+        setView("agent");
+      } catch (error) {
+        showToast("error", String(error));
+      }
+    },
+    [context, showToast],
+  );
 
   /** Asks for the project folder first when none is configured, then enqueues. */
-  const enqueueAgent = async (target: AgentTarget) => {
-    try {
-      const { config } = await agentApi.configGet();
-      const repoPath = (config.projects?.[target.workspaceId]?.repoPath ?? "").trim();
-      if (!repoPath) {
-        setPendingAgent(target);
+  const enqueueAgent = useCallback(
+    async (target: AgentTarget) => {
+      try {
+        const { config } = await agentApi.configGet();
+        const repoPath = (config.projects?.[target.workspaceId]?.repoPath ?? "").trim();
+        if (!repoPath) {
+          setPendingAgent(target);
+          return;
+        }
+      } catch (error) {
+        showToast("error", String(error));
         return;
       }
-    } catch (error) {
-      showToast("error", String(error));
-      return;
-    }
-    await doEnqueueAgent(target);
-  };
+      await doEnqueueAgent(target);
+    },
+    [doEnqueueAgent, showToast],
+  );
 
-  const applyAgentFolder = async (target: AgentTarget, path: string) => {
-    setPendingAgent(null);
-    try {
-      const { config } = await agentApi.configGet();
-      const projects = {
-        ...(config.projects ?? {}),
-        [target.workspaceId]: {
-          ...(config.projects?.[target.workspaceId] ?? { repoPath: "", rule: "" }),
-          repoPath: path,
-        },
-      };
-      await agentApi.configSet({ projects });
-      showToast("ok", `已设置项目目录：${path}`);
-    } catch (error) {
-      showToast("error", String(error));
-      return;
-    }
-    await doEnqueueAgent(target);
-  };
+  const applyAgentFolder = useCallback(
+    async (target: AgentTarget, path: string) => {
+      setPendingAgent(null);
+      try {
+        const { config } = await agentApi.configGet();
+        const projects = {
+          ...(config.projects ?? {}),
+          [target.workspaceId]: {
+            ...(config.projects?.[target.workspaceId] ?? { repoPath: "", rule: "" }),
+            repoPath: path,
+          },
+        };
+        await agentApi.configSet({ projects });
+        showToast("ok", `已设置项目目录：${path}`);
+      } catch (error) {
+        showToast("error", String(error));
+        return;
+      }
+      await doEnqueueAgent(target);
+    },
+    [doEnqueueAgent, showToast],
+  );
 
-  const handleAgentFix = (target: BugDetail) => void enqueueAgent(target);
+  const handleAgentFix = useCallback(
+    (target: BugDetail) => void enqueueAgent(target),
+    [enqueueAgent],
+  );
 
   const handleLogout = () => {
     if (!window.confirm("退出登录会清除本地 TAPD 会话数据，确定继续吗？")) return;
@@ -512,8 +578,7 @@ export default function App() {
         await api.logout();
         setContext(null);
         setWorkspaceId("");
-        detailSeq.current += 1;
-        setDetailOpen(false);
+        closeDetail();
         showToast("ok", "已退出登录");
         await refreshBase();
       } catch (error) {
@@ -522,33 +587,37 @@ export default function App() {
     })();
   };
 
-  const openPath = (path: string) => {
-    void api.openPath(path).catch((error) => showToast("error", String(error)));
-  };
+  const openPath = useCallback(
+    (path: string) => {
+      void api.openPath(path).catch((error) => showToast("error", String(error)));
+    },
+    [showToast],
+  );
 
-  const openMedia = async (
-    url: string,
-    mode: OpenMediaMode,
-    kind?: string,
-    target?: string,
-  ) => {
-    try {
-      // Opening is self-evident (the app comes to the front); only failures
-      // need a toast.
-      await api.openMedia(url, mode, kind, target);
-    } catch (error) {
-      showToast("error", String(error));
-    }
-  };
+  const openMedia = useCallback(
+    async (url: string, mode: OpenMediaMode, kind?: string, target?: string) => {
+      try {
+        // Opening is self-evident (the app comes to the front); only failures
+        // need a toast.
+        await api.openMedia(url, mode, kind, target);
+      } catch (error) {
+        showToast("error", String(error));
+      }
+    },
+    [showToast],
+  );
 
-  const copy = async (text: string) => {
-    try {
-      await navigator.clipboard.writeText(text);
-      showToast("ok", "已复制");
-    } catch (error) {
-      showToast("error", `复制失败：${String(error)}`);
-    }
-  };
+  const copy = useCallback(
+    async (text: string) => {
+      try {
+        await navigator.clipboard.writeText(text);
+        showToast("ok", "已复制");
+      } catch (error) {
+        showToast("error", `复制失败：${String(error)}`);
+      }
+    },
+    [showToast],
+  );
 
   const startSidebarResize = (event: ReactMouseEvent<HTMLButtonElement>) => {
     event.preventDefault();
@@ -759,7 +828,9 @@ export default function App() {
         <div
           className={clsx(
             "relative flex shrink-0 flex-col overflow-hidden",
-            !resizingSidebar && "transition-[width] duration-200 ease-out",
+            // Auto-collapse is instant: animating both the sidebar and the
+            // detail pane reflows the bug table every frame.
+            !resizingSidebar && !autoCollapseSidebar && "transition-[width] duration-200 ease-out",
           )}
           style={{ width: effectiveSidebarWidth }}
         >
@@ -908,10 +979,10 @@ export default function App() {
                 me={context?.user.nick ?? info.me}
                 scope={scope}
                 onScopeChange={setScope}
-                onOpenBug={(bug) => void openBug(bug)}
-                onOpenWeb={(url) => openPath(url)}
-                onCopyLink={(url) => void copy(url)}
-                onAgentFix={(bug) => void enqueueAgent(bug)}
+                onOpenBug={openBug}
+                onOpenWeb={openPath}
+                onCopyLink={copy}
+                onAgentFix={enqueueAgent}
                 refreshToken={refreshToken}
               />
             ) : (
@@ -964,57 +1035,50 @@ export default function App() {
 
         {/* Right detail pane (Codex-style): part of the layout, so the top
             drag strip stays reachable while it is open. */}
-        <div
-          aria-hidden={!detailOpen}
-          inert={!detailOpen}
-          className={clsx(
-            "relative h-full shrink-0 overflow-hidden",
-            !resizingDetail && "transition-[width] duration-200 ease-out",
-          )}
-          style={{ width: detailOpen ? effectiveDetailWidth : 0 }}
-        >
+        {detailRendered ? (
           <div
-            className="flex h-full flex-col pb-2 pr-2"
+            aria-hidden={!detailOpen}
+            inert={!detailOpen}
+            className="relative h-full shrink-0 overflow-hidden"
             style={{ width: effectiveDetailWidth }}
           >
-            <BugDetailDrawer
-              open={detailOpen}
-              detail={detail}
-              loading={detailLoading}
-              error={detailError}
-              exporting={exporting}
-              lastExport={lastExport}
-              onClose={() => {
-                // Cancel any pending "reveal after resize" callback.
-                detailSeq.current += 1;
-                setDetailOpen(false);
-              }}
-              onOpenWeb={(url) => openPath(url)}
-              onCopy={(text) => void copy(text)}
-              onExport={(target) => void handleExport(target)}
-              onAgentFix={(target) => void handleAgentFix(target)}
-              onOpenPath={openPath}
-              onOpenMedia={(url, mode, kind, target) =>
-                void openMedia(url, mode, kind, target)
-              }
-            />
-          </div>
+            <div
+              className="flex h-full flex-col pb-2 pr-2"
+              style={{ width: effectiveDetailWidth }}
+            >
+              <BugDetailDrawer
+                open={detailOpen}
+                detail={detail}
+                loading={detailLoading}
+                error={detailError}
+                exporting={exporting}
+                lastExport={lastExport}
+                onClose={closeDetail}
+                onOpenWeb={openPath}
+                onCopy={copy}
+                onExport={handleExport}
+                onAgentFix={handleAgentFix}
+                onOpenPath={openPath}
+                onOpenMedia={openMedia}
+              />
+            </div>
 
-          {detailOpen ? (
-            <button
-              type="button"
-              aria-label="调整详情面板宽度"
-              title="拖动调整详情面板宽度"
-              onMouseDown={startDetailResize}
-              className={clsx(
-                "absolute left-0 top-0 z-10 h-full w-1.5 cursor-col-resize",
-                resizingDetail
-                  ? "bg-sky-400/50"
-                  : "bg-transparent transition hover:bg-black/[0.06]",
-              )}
-            />
-          ) : null}
-        </div>
+            {detailOpen ? (
+              <button
+                type="button"
+                aria-label="调整详情面板宽度"
+                title="拖动调整详情面板宽度"
+                onMouseDown={startDetailResize}
+                className={clsx(
+                  "absolute left-0 top-0 z-10 h-full w-1.5 cursor-col-resize",
+                  resizingDetail
+                    ? "bg-sky-400/50"
+                    : "bg-transparent transition hover:bg-black/[0.06]",
+                )}
+              />
+            ) : null}
+          </div>
+        ) : null}
       </div>
 
       {pendingAgent ? (

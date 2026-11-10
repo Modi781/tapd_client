@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { memo, useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import {
   ArrowRight,
@@ -69,7 +69,7 @@ type Props = {
   ) => void;
 };
 
-export function BugDetailDrawer(props: Props) {
+function BugDetailDrawerImpl(props: Props) {
   const {
     open,
     detail,
@@ -211,7 +211,7 @@ export function BugDetailDrawer(props: Props) {
       <aside
         aria-hidden={!open}
         className={clsx(
-          "flex h-full min-w-0 flex-col overflow-hidden rounded-xl bg-white shadow-[0_1px_3px_rgba(15,23,42,0.06)] ring-1 ring-black/[0.06] transition-[transform,opacity] duration-200 ease-out",
+          "flex h-full min-w-0 flex-col overflow-hidden rounded-xl bg-white shadow-[0_1px_3px_rgba(15,23,42,0.06)] ring-1 ring-black/[0.06] transform-gpu will-change-transform transition-[transform,opacity] duration-200 ease-out",
           open ? "translate-x-0 opacity-100" : "pointer-events-none translate-x-4 opacity-0",
         )}
       >
@@ -524,6 +524,9 @@ export function BugDetailDrawer(props: Props) {
     </>
   );
 }
+
+/** Memoized: the pane is large and only changes when its own props change. */
+export const BugDetailDrawer = memo(BugDetailDrawerImpl);
 
 /**
  * Placeholder that mirrors the panel's loaded layout (meta grid, description,

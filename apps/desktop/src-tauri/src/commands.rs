@@ -434,8 +434,26 @@ pub(crate) fn sidecar_command_path() -> String {
 }
 
 #[tauri::command]
-pub fn mcp_config(state: State<'_, SharedState>) -> McpConfigInfo {
+pub async fn mcp_config(
+    state: State<'_, SharedState>,
+) -> Result<McpConfigInfo, String> {
     let command_path = sidecar_command_path();
+
+    // Discovering the opencode config shells out to `opencode debug paths`
+    // (up to 3s); keep it off the UI thread and discover it only once.
+    let discovery_command = command_path.clone();
+    let (config_path, imported) = tokio::task::spawn_blocking(move || {
+        match crate::mcp_import::opencode_config_path() {
+            Some(path) => {
+                let imported =
+                    crate::mcp_import::is_imported_in(&path, &discovery_command);
+                (Some(path), imported)
+            }
+            None => (None, false),
+        }
+    })
+    .await
+    .unwrap_or((None, false));
 
     let snippet = serde_json::to_string_pretty(&serde_json::json!({
         "$schema": "https://opencode.ai/config.json",
@@ -450,7 +468,7 @@ pub fn mcp_config(state: State<'_, SharedState>) -> McpConfigInfo {
     }))
     .unwrap_or_default();
 
-    McpConfigInfo {
+    Ok(McpConfigInfo {
         command_path: command_path.clone(),
         snippet,
         transport: "stdio".to_string(),
@@ -467,10 +485,9 @@ pub fn mcp_config(state: State<'_, SharedState>) -> McpConfigInfo {
             "tapd_update_bug_status",
         ],
         port: state.runtime_info().map(|runtime| runtime.port),
-        config_path: crate::mcp_import::opencode_config_path()
-            .map(|path| path.to_string_lossy().to_string()),
-        imported: crate::mcp_import::is_imported(&command_path),
-    }
+        config_path: config_path.map(|path| path.to_string_lossy().to_string()),
+        imported,
+    })
 }
 
 #[tauri::command]

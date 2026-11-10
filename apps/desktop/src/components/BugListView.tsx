@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import {
   Bug,
@@ -77,7 +77,7 @@ type Props = {
   refreshToken: number;
 };
 
-export function BugListView(props: Props) {
+function BugListViewImpl(props: Props) {
   const {
     workspace,
     me,
@@ -538,6 +538,13 @@ export function BugListView(props: Props) {
     </div>
   );
 }
+
+/**
+ * Memoized so detail-pane state changes (open/loading/detail) do not reconcile
+ * the whole bug table. Props must stay referentially stable: App passes
+ * `useCallback` handlers and the workspace object from the loaded context.
+ */
+export const BugListView = memo(BugListViewImpl);
 
 function RowAction(props: { label: string; icon: ReactNode; onClick: () => void }) {
   return (
