@@ -719,7 +719,7 @@ impl NotificationService {
             json!({ "items": items, "quiet": quiet }),
         );
 
-        apply_island(&self.app, !items.is_empty() && !quiet, items.len(), true);
+        apply_island(&self.app, &self.state, !items.is_empty() && !quiet, items.len(), true);
     }
 
     async fn ensure_identity(&self, workspace_id: &str) -> Result<Option<String>, String> {
@@ -1093,8 +1093,14 @@ const ISLAND_TOP_MARGIN: f64 = 6.0;
 
 /// Bumped on every layout change so a superseded animation stops early.
 static LAYOUT_SEQ: AtomicU64 = AtomicU64::new(0);
+/// Last position we set ourselves, so user drags can be told apart.
+static LAST_SET_POSITION: Mutex<(i32, i32)> = Mutex::new((0, 0));
+/// Wall-clock (ms) until which window moves belong to our own animation.
+static ANIMATING_UNTIL: AtomicU64 = AtomicU64::new(0);
+/// Debounce token for persisting a user drag.
+static MOVE_SEQ: AtomicU64 = AtomicU64::new(0);
 
-fn ensure_window(app: &AppHandle) -> Result<WebviewWindow, String> {
+fn ensure_window(app: &AppHandle, state: &SharedState) -> Result<WebviewWindow, String> {
     if let Some(window) = app.get_webview_window(WINDOW_LABEL) {
         return Ok(window);
     }
@@ -1118,15 +1124,77 @@ fn ensure_window(app: &AppHandle) -> Result<WebviewWindow, String> {
     .build()
     .map_err(|error| error.to_string())?;
 
-    let window_for_event = window.clone();
+    let window_for_events = window.clone();
+    let app_for_events = app.clone();
+    let state_for_events = state.clone();
     window.on_window_event(move |event| {
-        if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-            api.prevent_close();
-            let _ = window_for_event.hide();
+        match event {
+            tauri::WindowEvent::CloseRequested { api, .. } => {
+                api.prevent_close();
+                let _ = window_for_events.hide();
+            }
+            tauri::WindowEvent::Moved(position) => {
+                // Ignore the moves produced by our own layout animation.
+                let now = now_millis();
+                if now < ANIMATING_UNTIL.load(Ordering::SeqCst) {
+                    return;
+                }
+                let expected = *LAST_SET_POSITION.lock().expect("island position lock");
+                if (position.x - expected.0).abs() <= 2 && (position.y - expected.1).abs() <= 2 {
+                    return;
+                }
+
+                // The user is dragging: persist the final anchor once it settles.
+                let sequence = MOVE_SEQ.fetch_add(1, Ordering::SeqCst) + 1;
+                let app = app_for_events.clone();
+                let state = state_for_events.clone();
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(Duration::from_millis(350)).await;
+                    if MOVE_SEQ.load(Ordering::SeqCst) != sequence {
+                        return;
+                    }
+                    let Some(window) = app.get_webview_window(WINDOW_LABEL) else {
+                        return;
+                    };
+                    let (Ok(position), Ok(size)) = (window.outer_position(), window.outer_size())
+                    else {
+                        return;
+                    };
+                    let anchor = (position.x + size.width as i32 / 2, position.y);
+                    let snapshot = {
+                        let mut config = state.config.lock().expect("config lock");
+                        config.island_anchor = Some(anchor);
+                        config.clone()
+                    };
+                    if let Err(error) = state.save_config(&snapshot) {
+                        tracing::warn!(%error, "failed to persist island position");
+                    }
+                });
+            }
+            _ => {}
         }
     });
 
     Ok(window)
+}
+
+fn now_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or_default()
+}
+
+fn mark_animating() {
+    ANIMATING_UNTIL.store(now_millis() + 320, Ordering::SeqCst);
+}
+
+/// Remembers a position we are about to set, so the resulting `Moved` event is
+/// not mistaken for a user drag.
+fn remember_position(x: i32, y: i32) {
+    if let Ok(mut expected) = LAST_SET_POSITION.lock() {
+        *expected = (x, y);
+    }
 }
 
 fn monitor_for(app: &AppHandle) -> Option<tauri::Monitor> {
@@ -1143,16 +1211,76 @@ fn island_size(expanded: bool, count: usize) -> (f64, f64) {
     (CARD_WIDTH, CARD_BASE_HEIGHT + (rows - 1.0) * CARD_ROW_HEIGHT)
 }
 
-/// Top-centre rectangle (physical pixels) for a logical island size.
-fn island_rect(app: &AppHandle, width: f64, height: f64) -> Option<(i32, i32, u32, u32)> {
+/// Rectangle (physical pixels) for a logical island size.
+///
+/// Uses the anchor the user dragged the capsule to, otherwise top-centre.
+fn island_rect(
+    app: &AppHandle,
+    state: &SharedState,
+    width: f64,
+    height: f64,
+) -> Option<(i32, i32, u32, u32)> {
     let monitor = monitor_for(app)?;
     let scale = monitor.scale_factor();
     let area = monitor.work_area();
     let w = (width * scale).round().max(1.0) as u32;
     let h = (height * scale).round().max(1.0) as u32;
-    let x = area.position.x + (area.size.width as i32 - w as i32).max(0) / 2;
-    let y = area.position.y + (ISLAND_TOP_MARGIN * scale).round() as i32;
+
+    let anchor = state
+        .config_snapshot()
+        .island_anchor
+        .filter(|anchor| anchor_is_on_screen(app, *anchor));
+
+    let left = area.position.x;
+    let top = area.position.y;
+    let (x, y) = place_island(
+        anchor,
+        left,
+        top,
+        area.size.width as i32,
+        w as i32,
+        (ISLAND_TOP_MARGIN * scale).round() as i32,
+    );
+
     Some((x, y, w, h))
+}
+
+/// Position for an island of `width` pixels: centred on the saved anchor, or
+/// top-centre of the work area when the user never dragged it.
+fn place_island(
+    anchor: Option<(i32, i32)>,
+    area_left: i32,
+    area_top: i32,
+    area_width: i32,
+    width: i32,
+    margin: i32,
+) -> (i32, i32) {
+    match anchor {
+        Some((center_x, top)) => (center_x - width / 2, top),
+        None => (
+            area_left + (area_width - width).max(0) / 2,
+            area_top + margin,
+        ),
+    }
+}
+
+/// Guards against a saved position from a monitor that is no longer attached.
+fn anchor_is_on_screen(app: &AppHandle, anchor: (i32, i32)) -> bool {
+    let Ok(monitors) = app.available_monitors() else {
+        return true;
+    };
+    if monitors.is_empty() {
+        return true;
+    }
+
+    monitors.iter().any(|monitor| {
+        let area = monitor.work_area();
+        let left = area.position.x;
+        let top = area.position.y;
+        let right = left + area.size.width as i32;
+        let bottom = top + area.size.height as i32;
+        anchor.0 >= left && anchor.0 <= right && anchor.1 >= top - 40 && anchor.1 <= bottom
+    })
 }
 
 fn lerp(from: f64, to: f64, t: f64) -> f64 {
@@ -1161,12 +1289,18 @@ fn lerp(from: f64, to: f64, t: f64) -> f64 {
 
 /// Places the island at the top centre of the screen. `animated` interpolates
 /// the resize so the card grows out of the capsule (Dynamic Island style).
-fn apply_island(app: &AppHandle, expanded: bool, count: usize, animated: bool) {
+fn apply_island(
+    app: &AppHandle,
+    state: &SharedState,
+    expanded: bool,
+    count: usize,
+    animated: bool,
+) {
     let (width, height) = island_size(expanded, count);
-    let Some((x, y, w, h)) = island_rect(app, width, height) else {
+    let Some((x, y, w, h)) = island_rect(app, state, width, height) else {
         return;
     };
-    let Ok(window) = ensure_window(app) else {
+    let Ok(window) = ensure_window(app, state) else {
         return;
     };
 
@@ -1174,9 +1308,11 @@ fn apply_island(app: &AppHandle, expanded: bool, count: usize, animated: bool) {
     let _ = window.show();
 
     if !animated {
+        remember_position(x, y);
         let _ = window.set_size(PhysicalSize::new(w, h));
         let _ = window.set_position(PhysicalPosition::new(x, y));
     } else {
+        mark_animating();
         let sequence = LAYOUT_SEQ.fetch_add(1, Ordering::SeqCst) + 1;
         let window_for_animation = window.clone();
         tauri::async_runtime::spawn(async move {
@@ -1199,6 +1335,8 @@ fn apply_island(app: &AppHandle, expanded: bool, count: usize, animated: bool) {
                 let next_h = lerp(start_size.height as f64, h as f64, eased).round() as u32;
                 let next_x = lerp(start_pos.x as f64, x as f64, eased).round() as i32;
                 let next_y = lerp(start_pos.y as f64, y as f64, eased).round() as i32;
+                remember_position(next_x, next_y);
+                mark_animating();
                 let _ = window_for_animation.set_size(PhysicalSize::new(next_w, next_h));
                 let _ = window_for_animation.set_position(PhysicalPosition::new(next_x, next_y));
                 tokio::time::sleep(Duration::from_millis(14)).await;
@@ -1346,11 +1484,18 @@ pub async fn command(
                 .unwrap_or(true);
             let (items, _quiet) = service.pending_payload();
             let expanded = expanded && !items.is_empty();
-            apply_island(app, expanded, items.len(), true);
+            apply_island(app, state, expanded, items.len(), true);
             Ok(json!({ "ok": true, "expanded": expanded, "count": items.len() }))
         }
         "notification_open_main" => {
             focus_main_window(app);
+            Ok(json!({ "ok": true }))
+        }
+        "notification_start_drag" => {
+            // Native drag: no window-plugin ACL involved, so the transparent
+            // island window can be dragged like a real panel.
+            let window = ensure_window(app, state)?;
+            window.start_dragging().map_err(|error| error.to_string())?;
             Ok(json!({ "ok": true }))
         }
         "notification_simulate" => {
@@ -2306,5 +2451,35 @@ mod tests {
         assert_eq!(format_tapd_time(time), "2026-11-10 12:34:00");
         assert_eq!(parse_tapd_time("2026-11-10 12:34:00"), Some(time));
         assert_eq!(parse_tapd_time(""), None);
+    }
+}
+
+#[cfg(test)]
+mod island_tests {
+    use super::*;
+
+    const AREA: (i32, i32, i32) = (0, 30, 1920);
+    const MARGIN: i32 = 6;
+
+    #[test]
+    fn island_position_defaults_to_top_centre() {
+        let (x, y) = place_island(None, AREA.0, AREA.1, AREA.2, 210, MARGIN);
+        assert_eq!(x, (1920 - 210) / 2);
+        assert_eq!(y, 36);
+    }
+
+    #[test]
+    fn island_position_prefers_saved_anchor() {
+        // Dragged to the right edge at y=120 while collapsed.
+        let (x, y) = place_island(Some((1500, 120)), AREA.0, AREA.1, AREA.2, 210, MARGIN);
+        assert_eq!((x, y), (1395, 120));
+    }
+
+    #[test]
+    fn expanding_keeps_the_anchor_centre() {
+        let collapsed = place_island(Some((1500, 120)), AREA.0, AREA.1, AREA.2, 210, MARGIN);
+        let expanded = place_island(Some((1500, 120)), AREA.0, AREA.1, AREA.2, 384, MARGIN);
+        assert_eq!(collapsed.0 + 105, expanded.0 + 192);
+        assert_eq!(collapsed.1, expanded.1);
     }
 }

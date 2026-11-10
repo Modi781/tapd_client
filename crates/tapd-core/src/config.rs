@@ -27,6 +27,9 @@ pub struct AppConfig {
     /// Chosen "open with" target per resource kind (`image` / `video` / `file`);
     /// missing means the system default app.
     pub open_with: BTreeMap<String, String>,
+    /// Where the user dragged the status capsule: physical pixels of the
+    /// island's (centre x, top y). `None` = top-centre default.
+    pub island_anchor: Option<(i32, i32)>,
 }
 
 impl Default for AppConfig {
@@ -41,6 +44,7 @@ impl Default for AppConfig {
             poll_interval_secs: 60,
             device_name: None,
             open_with: BTreeMap::new(),
+            island_anchor: None,
         }
     }
 }

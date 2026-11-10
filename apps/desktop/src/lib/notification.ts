@@ -123,6 +123,8 @@ export const notificationApi = {
       { expanded },
     ),
   openMain: () => featureCommand<{ ok: boolean }>("notification_open_main"),
+  /** Starts an OS window drag; the Rust side persists the final position. */
+  startDrag: () => featureCommand<{ ok: boolean }>("notification_start_drag"),
 };
 
 /** Subscribes to the pending list pushed by the Rust window manager. */

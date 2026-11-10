@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
-import type { ReactNode } from "react";
+import type { MouseEvent as ReactMouseEvent, ReactNode } from "react";
 import clsx from "clsx";
 import {
   AlertTriangle,
@@ -8,6 +8,8 @@ import {
   CheckCircle2,
   FileJson,
   Loader2,
+  PanelLeftClose,
+  PanelLeftOpen,
   RefreshCw,
   Settings as SettingsIcon,
   Wifi,
@@ -33,12 +35,17 @@ import { BugListView } from "./components/BugListView";
 import { CapturesPage } from "./components/CapturesPage";
 import { LoginGate } from "./components/LoginGate";
 import { SettingsPage } from "./components/SettingsPage";
-import { Badge, Button, Spinner } from "./components/ui";
+import { Button, Spinner } from "./components/ui";
 import { featureCommand } from "./lib/feature";
 
 type View = "bugs" | "captures" | "settings";
 type Scope = "mine" | "all";
 type Toast = { kind: "ok" | "error"; text: string };
+
+// Project sidebar sizing. Dragging below the minimum collapses it.
+const DEFAULT_SIDEBAR_WIDTH = 264;
+const MIN_SIDEBAR_WIDTH = 208;
+const MAX_SIDEBAR_WIDTH = 420;
 
 const NAV: Array<{ id: View; label: string; icon: ReactNode }> = [
   { id: "bugs", label: "缺陷", icon: <Bug size={15} /> },
@@ -57,6 +64,9 @@ export default function App() {
   const [view, setView] = useState<View>("bugs");
   const [toast, setToast] = useState<Toast | null>(null);
   const [refreshToken, setRefreshToken] = useState(0);
+  const [sidebarWidth, setSidebarWidth] = useState(DEFAULT_SIDEBAR_WIDTH);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [resizingSidebar, setResizingSidebar] = useState(false);
 
   const [detailOpen, setDetailOpen] = useState(false);
   const [detail, setDetail] = useState<BugDetail | null>(null);
@@ -226,7 +236,14 @@ export default function App() {
     }
   };
 
-  const handleAgentFix = async (target: BugDetail) => {
+  const enqueueAgent = async (target: {
+    workspaceId: string;
+    id: string;
+    title: string;
+    severityLabel: string;
+    priorityLabel: string;
+    workspaceName?: string;
+  }) => {
     const workspaceName =
       target.workspaceName ||
       context?.workspaces.find((item) => item.id === target.workspaceId)?.name ||
@@ -253,6 +270,8 @@ export default function App() {
       showToast("error", String(error));
     }
   };
+
+  const handleAgentFix = (target: BugDetail) => void enqueueAgent(target);
 
   const handleLogout = () => {
     if (!window.confirm("退出登录会清除本地 TAPD 会话数据，确定继续吗？")) return;
@@ -296,6 +315,46 @@ export default function App() {
     } catch (error) {
       showToast("error", `复制失败：${String(error)}`);
     }
+  };
+
+  const startSidebarResize = (event: ReactMouseEvent<HTMLButtonElement>) => {
+    event.preventDefault();
+    const startX = event.clientX;
+    const startWidth = sidebarCollapsed ? 0 : sidebarWidth;
+    if (sidebarCollapsed) {
+      // Dragging out of the collapsed state starts from the minimum width.
+      setSidebarCollapsed(false);
+      setSidebarWidth(MIN_SIDEBAR_WIDTH);
+    }
+    setResizingSidebar(true);
+
+    const stop = () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      setResizingSidebar(false);
+    };
+
+    const onMove = (move: MouseEvent) => {
+      const next = Math.max(0, Math.min(MAX_SIDEBAR_WIDTH, startWidth + (move.clientX - startX)));
+      // Below the minimum the sidebar gives up and collapses with a transition.
+      if (next < MIN_SIDEBAR_WIDTH) {
+        stop();
+        setSidebarCollapsed(true);
+        setSidebarWidth(DEFAULT_SIDEBAR_WIDTH);
+        return;
+      }
+      setSidebarWidth(next);
+    };
+
+    const onUp = () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      setResizingSidebar(false);
+      setSidebarWidth((width) => Math.max(MIN_SIDEBAR_WIDTH, width));
+    };
+
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
   };
 
   const toastNode = toast ? (
@@ -360,55 +419,99 @@ export default function App() {
         : "账户、项目与本地数据";
 
   return (
-    <div className="flex h-full bg-slate-50">
-      <aside className="flex w-64 shrink-0 flex-col bg-ink-900 text-slate-300">
-        <div className="flex items-center gap-3 px-5 py-5">
-          <div className="grid h-9 w-9 place-items-center rounded-xl bg-gradient-to-br from-sky-400 to-emerald-400 text-ink-900 shadow-lg shadow-sky-500/20">
-            <Bug size={20} strokeWidth={2.4} />
+    <div
+      className={clsx(
+        "flex h-full flex-col overflow-hidden bg-[#f4f4f2] text-slate-900",
+        resizingSidebar && "select-none",
+      )}
+    >
+      {/* macOS traffic lights live over this strip; whole strip drags the window. */}
+      <div
+        className="flex h-11 shrink-0 items-center gap-2 px-4"
+        data-tauri-drag-region
+      >
+        <span className="ml-[62px] text-[11px] font-medium uppercase tracking-[0.14em] text-slate-400">
+          TAPD Client
+        </span>
+        <span className="flex-1" data-tauri-drag-region />
+        {contextLoading ? <Spinner className="text-slate-300" /> : null}
+      </div>
+
+      <div className="flex min-h-0 flex-1">
+        {/* Icon rail */}
+        <div className="flex w-[52px] shrink-0 flex-col items-center pb-2">
+          <div className="flex flex-col items-center gap-1">
+            {NAV.filter((item) => item.id !== "settings").map((item) => (
+              <button
+                key={item.id}
+                type="button"
+                title={item.label}
+                aria-label={item.label}
+                onClick={() => setView(item.id)}
+                className={clsx(
+                  "grid h-9 w-9 place-items-center rounded-xl transition",
+                  view === item.id
+                    ? "bg-black/[0.07] text-slate-900"
+                    : "text-slate-500 hover:bg-black/[0.04] hover:text-slate-700",
+                )}
+              >
+                {item.icon}
+              </button>
+            ))}
           </div>
-          <div className="min-w-0">
-            <div className="truncate text-sm font-semibold text-white">TAPD Client</div>
-            <div className="text-[11px] uppercase tracking-widest text-slate-500">
-              {context?.user.company || "workspace"}
-            </div>
-          </div>
+          <div className="flex-1" data-tauri-drag-region />
+          <button
+            type="button"
+            title="设置"
+            aria-label="设置"
+            onClick={() => setView("settings")}
+            className={clsx(
+              "grid h-9 w-9 place-items-center rounded-xl transition",
+              view === "settings"
+                ? "bg-black/[0.07] text-slate-900"
+                : "text-slate-500 hover:bg-black/[0.04] hover:text-slate-700",
+            )}
+          >
+            <SettingsIcon size={15} />
+          </button>
         </div>
 
-        <nav className="flex flex-col gap-1 px-3">
-          {NAV.map((item) => (
-            <button
-              key={item.id}
-              type="button"
-              onClick={() => setView(item.id)}
-              className={clsx(
-                "flex items-center gap-3 rounded-lg px-3 py-2 text-left text-sm transition",
-                view === item.id
-                  ? "bg-white/10 text-white"
-                  : "text-slate-400 hover:bg-white/5 hover:text-slate-200",
-              )}
-            >
-              <span className={view === item.id ? "text-sky-400" : "text-slate-500"}>
-                {item.icon}
+        {/* Project sidebar (resizable) */}
+        <div
+          className={clsx(
+            "relative flex shrink-0 flex-col overflow-hidden",
+            !resizingSidebar && "transition-[width] duration-200 ease-out",
+          )}
+          style={{ width: sidebarCollapsed ? 0 : sidebarWidth }}
+        >
+          <div className="flex h-9 shrink-0 items-center gap-1 pr-1" data-tauri-drag-region>
+            <span className="min-w-0 flex-1 truncate px-2 text-[13px] font-semibold text-slate-800">
+              项目
+            </span>
+            {context?.workspaces.length ? (
+              <span className="text-[11px] tabular-nums text-slate-400">
+                {context.workspaces.length}
               </span>
-              <span className="flex-1">{item.label}</span>
+            ) : null}
+            <button
+              type="button"
+              aria-label="收起项目列表"
+              title="收起项目列表"
+              onClick={() => setSidebarCollapsed(true)}
+              className="grid h-7 w-7 place-items-center rounded-lg text-slate-400 transition hover:bg-black/[0.05] hover:text-slate-600"
+            >
+              <PanelLeftClose size={14} />
             </button>
-          ))}
-        </nav>
-
-        <div className="mt-5 flex min-h-0 flex-1 flex-col">
-          <div className="flex items-center justify-between px-5 pb-1 text-[10px] uppercase tracking-widest text-slate-500">
-            <span>项目</span>
-            {contextLoading ? <Spinner className="text-slate-500" /> : null}
           </div>
 
-          <div className="min-h-0 flex-1 overflow-y-auto px-3 pb-3">
+          <div className="min-h-0 flex-1 space-y-0.5 overflow-y-auto px-2 pb-2">
             {contextError ? (
-              <div className="rounded-lg border border-rose-500/20 bg-rose-500/10 p-2.5 text-[11px] leading-5 text-rose-200">
+              <div className="rounded-xl bg-rose-50 p-2.5 text-[11px] leading-5 text-rose-700 ring-1 ring-rose-100">
                 <div className="break-all">{contextError}</div>
                 <button
                   type="button"
                   onClick={() => void loadContext()}
-                  className="mt-2 inline-flex items-center gap-1 rounded border border-rose-400/30 px-2 py-1 text-[10px]"
+                  className="mt-2 inline-flex items-center gap-1 rounded-md bg-white px-2 py-1 text-[10px] text-rose-700 ring-1 ring-rose-200 transition hover:bg-rose-100"
                 >
                   <RefreshCw size={10} />
                   重试
@@ -417,7 +520,7 @@ export default function App() {
             ) : null}
 
             {!context && contextLoading ? (
-              <div className="px-2 py-2 text-[11px] text-slate-500">读取项目…</div>
+              <div className="px-2 py-2 text-[11px] text-slate-400">读取项目…</div>
             ) : null}
 
             {context?.workspaces.map((item) => {
@@ -428,10 +531,10 @@ export default function App() {
                   type="button"
                   onClick={() => selectWorkspace(item.id)}
                   className={clsx(
-                    "mb-1 flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-left text-xs transition",
+                    "flex w-full items-center gap-2.5 rounded-lg px-2.5 py-[7px] text-left text-[13px] transition",
                     active
-                      ? "bg-white/10 text-white"
-                      : "text-slate-400 hover:bg-white/5 hover:text-slate-200",
+                      ? "bg-black/[0.06] font-medium text-slate-900"
+                      : "text-slate-600 hover:bg-black/[0.04]",
                   )}
                 >
                   <span
@@ -439,120 +542,136 @@ export default function App() {
                     style={{ backgroundColor: item.logoColor || "#0ea5e9" }}
                   />
                   <span className="min-w-0 flex-1 truncate">{item.name}</span>
-                  {active ? <span className="h-1.5 w-1.5 rounded-full bg-sky-400" /> : null}
+                  {active ? (
+                    <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-500" />
+                  ) : null}
                 </button>
               );
             })}
           </div>
+
+          <div className="space-y-1.5 border-t border-black/[0.06] px-3 py-2.5 text-[11px] text-slate-500">
+            <div className="flex items-center gap-2">
+              {info.loggedIn ? (
+                <Wifi size={12} className="text-emerald-500" />
+              ) : (
+                <WifiOff size={12} className="text-amber-500" />
+              )}
+              <span className="truncate">
+                {context?.user.nick || info.me || "已登录"}
+                {context?.user.userId ? ` · ${context.user.userId}` : ""}
+              </span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-slate-400">v{info.version}</span>
+              {info.runtimePort ? (
+                <span className="rounded-md bg-black/[0.05] px-1.5 py-0.5 text-[10px] text-slate-500">
+                  MCP :{info.runtimePort}
+                </span>
+              ) : null}
+            </div>
+          </div>
+
+          <button
+            type="button"
+            aria-label="调整项目列表宽度"
+            title="拖动调整宽度，拖到很窄会自动收起"
+            onMouseDown={startSidebarResize}
+            className={clsx(
+              "absolute right-0 top-0 z-10 h-full w-1.5 cursor-col-resize",
+              resizingSidebar ? "bg-sky-400/50" : "bg-transparent transition hover:bg-black/[0.06]",
+            )}
+          />
         </div>
 
-        <div className="space-y-2 border-t border-white/5 px-5 py-4 text-[11px] text-slate-500">
-          <div className="flex items-center gap-2">
-            {info.loggedIn ? (
-              <Wifi size={12} className="text-emerald-400" />
-            ) : (
-              <WifiOff size={12} className="text-amber-400" />
-            )}
-            <span className="truncate">
-              {context?.user.nick || info.me || "已登录"}
-              {context?.user.userId ? ` · ${context.user.userId}` : ""}
-            </span>
-          </div>
-          <div className="flex items-center justify-between">
-            <span>v{info.version}</span>
-            {info.runtimePort ? <Badge tone="slate">MCP :{info.runtimePort}</Badge> : null}
-          </div>
-        </div>
-      </aside>
-
-      <main className="flex min-w-0 flex-1 flex-col">
-        <header className="flex h-14 shrink-0 items-center justify-between border-b border-slate-200 bg-white px-5">
-          <div className="min-w-0">
-            <h1 className="truncate text-sm font-semibold text-slate-900">{title}</h1>
-            <p className="truncate text-[11px] text-slate-500">{subtitle}</p>
-          </div>
-          <div className="flex items-center gap-2">
-            {scope === "mine" ? (
-              <Badge tone="blue">我的缺陷</Badge>
-            ) : (
-              <Badge tone="neutral">全部缺陷</Badge>
-            )}
-            <Button
-              size="sm"
-              variant="ghost"
-              onClick={() => {
-                setRefreshToken((token) => token + 1);
-                void refreshBase();
-              }}
-              icon={<RefreshCw size={13} />}
+        {/* Content panel */}
+        <main className="mb-2 mr-2 flex min-w-0 flex-1 flex-col overflow-hidden rounded-xl bg-white shadow-[0_1px_3px_rgba(15,23,42,0.06)] ring-1 ring-black/[0.06]">
+          <header className="flex h-12 shrink-0 items-center gap-1.5 px-2" data-tauri-drag-region>
+            <button
+              type="button"
+              aria-label={sidebarCollapsed ? "展开项目列表" : "收起项目列表"}
+              title={sidebarCollapsed ? "展开项目列表" : "收起项目列表"}
+              onClick={() => setSidebarCollapsed((current) => !current)}
+              className="grid h-8 w-8 shrink-0 place-items-center rounded-lg text-slate-400 transition hover:bg-black/[0.05] hover:text-slate-700"
             >
-              刷新
-            </Button>
-          </div>
-        </header>
+              {sidebarCollapsed ? <PanelLeftOpen size={15} /> : <PanelLeftClose size={15} />}
+            </button>
 
-        {view === "bugs" ? (
-          contextError ? (
-            <div className="p-5">
-              <div className="rounded-xl border border-rose-200 bg-rose-50 p-4 text-xs leading-6 text-rose-700">
-                <div className="font-semibold">项目列表加载失败</div>
-                <div className="mt-1 break-all">{contextError}</div>
-                <Button
-                  size="sm"
-                  className="mt-3"
-                  onClick={() => void loadContext()}
-                  icon={<RefreshCw size={13} />}
-                >
-                  重新加载
-                </Button>
-              </div>
+            <div className="min-w-0 flex-1 px-1">
+              <h1 className="truncate text-[13px] font-semibold leading-5 text-slate-900">
+                {title}
+              </h1>
+              <p className="truncate text-[11px] leading-4 text-slate-400">{subtitle}</p>
             </div>
-          ) : workspace ? (
-            <BugListView
-              key={workspace.id}
-              workspace={workspace}
-              me={context?.user.nick ?? info.me}
-              scope={scope}
-              onScopeChange={setScope}
-              onOpenBug={(bug) => void openBug(bug)}
-              refreshToken={refreshToken}
-            />
-          ) : (
-            <div className="flex flex-1 items-center justify-center">
-              <div className="text-center">
-                <Spinner className="mx-auto" />
-                <p className="mt-2 text-xs text-slate-400">正在加载项目…</p>
+
+          </header>
+
+          {view === "bugs" ? (
+            contextError ? (
+              <div className="p-5">
+                <div className="rounded-xl bg-rose-50 p-4 text-xs leading-6 text-rose-700 ring-1 ring-rose-100">
+                  <div className="font-semibold">项目列表加载失败</div>
+                  <div className="mt-1 break-all">{contextError}</div>
+                  <Button
+                    size="sm"
+                    className="mt-3"
+                    onClick={() => void loadContext()}
+                    icon={<RefreshCw size={13} />}
+                  >
+                    重新加载
+                  </Button>
+                </div>
               </div>
-            </div>
-          )
-        ) : (
-          <div className="min-h-0 flex-1 overflow-y-auto p-5">
-            {view === "captures" ? (
-              <CapturesPage toast={showToast} onOpenPath={openPath} />
-            ) : (
-              <SettingsPage
-                info={info}
-                status={status}
-                context={context}
-                onShowLogin={() => {
-                  void api
-                    .sessionShow()
-                    .then(() => showToast("ok", "已打开 TAPD 窗口"))
-                    .catch((error) => showToast("error", String(error)));
-                }}
-                onLogout={handleLogout}
-                onRefresh={() => {
-                  void refreshBase();
-                  setRefreshToken((token) => token + 1);
-                }}
-                onOpenPath={openPath}
-                onCopy={(text) => void copy(text)}
-                toast={showToast}
+            ) : workspace ? (
+              <BugListView
+                key={workspace.id}
+                workspace={workspace}
+                me={context?.user.nick ?? info.me}
+                scope={scope}
+                onScopeChange={setScope}
+                onOpenBug={(bug) => void openBug(bug)}
+                onOpenWeb={(url) => openPath(url)}
+                onCopyLink={(url) => void copy(url)}
+                onAgentFix={(bug) => void enqueueAgent(bug)}
+                refreshToken={refreshToken}
               />
-            )}
-          </div>
-        )}
-      </main>
+            ) : (
+              <div className="flex flex-1 items-center justify-center">
+                <div className="text-center">
+                  <Spinner className="mx-auto" />
+                  <p className="mt-2 text-xs text-slate-400">正在加载项目…</p>
+                </div>
+              </div>
+            )
+          ) : (
+            <div className="min-h-0 flex-1 overflow-y-auto p-5">
+              {view === "captures" ? (
+                <CapturesPage toast={showToast} onOpenPath={openPath} />
+              ) : (
+                <SettingsPage
+                  info={info}
+                  status={status}
+                  context={context}
+                  onShowLogin={() => {
+                    void api
+                      .sessionShow()
+                      .then(() => showToast("ok", "已打开 TAPD 窗口"))
+                      .catch((error) => showToast("error", String(error)));
+                  }}
+                  onLogout={handleLogout}
+                  onRefresh={() => {
+                    void refreshBase();
+                    setRefreshToken((token) => token + 1);
+                  }}
+                  onOpenPath={openPath}
+                  onCopy={(text) => void copy(text)}
+                  toast={showToast}
+                />
+              )}
+            </div>
+          )}
+        </main>
+      </div>
 
       <BugDetailDrawer
         open={detailOpen}

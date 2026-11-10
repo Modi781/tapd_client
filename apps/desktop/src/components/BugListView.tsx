@@ -1,11 +1,16 @@
 import { useCallback, useEffect, useState } from "react";
+import type { ReactNode } from "react";
 import {
   Bug,
   ChevronLeft,
   ChevronRight,
+  Copy,
+  ExternalLink,
+  Eye,
   ListFilter,
   RefreshCw,
   Search,
+  Sparkles,
   UserRound,
   Users,
 } from "lucide-react";
@@ -56,11 +61,25 @@ type Props = {
   scope: Scope;
   onScopeChange: (scope: Scope) => void;
   onOpenBug: (bug: BugSummary) => void;
+  /** Row actions (action column). */
+  onOpenWeb?: (url: string) => void;
+  onCopyLink?: (url: string) => void;
+  onAgentFix?: (bug: BugSummary) => void;
   refreshToken: number;
 };
 
 export function BugListView(props: Props) {
-  const { workspace, me, scope, onScopeChange, onOpenBug, refreshToken } = props;
+  const {
+    workspace,
+    me,
+    scope,
+    onScopeChange,
+    onOpenBug,
+    onOpenWeb,
+    onCopyLink,
+    onAgentFix,
+    refreshToken,
+  } = props;
 
   const [statusFilter, setStatusFilter] = useState<string[]>([]);
   const [priority, setPriority] = useState("");
@@ -315,16 +334,19 @@ export function BugListView(props: Props) {
         ) : null}
 
         {!error && page && page.bugs.length > 0 ? (
-          <table className="w-full border-collapse text-left">
-            <thead className="sticky top-0 z-10 bg-slate-50 text-[11px] uppercase tracking-wide text-slate-500">
+          <table className="w-full min-w-[1040px] border-collapse text-left">
+            <thead className="sticky top-0 z-20 bg-slate-50 text-[11px] uppercase tracking-wide text-slate-500">
               <tr>
-                <th className="px-5 py-2.5 font-medium">标题</th>
-                <th className="w-24 px-3 py-2.5 font-medium">状态</th>
-                <th className="w-20 px-3 py-2.5 font-medium">优先级</th>
-                <th className="w-20 px-3 py-2.5 font-medium">严重程度</th>
-                <th className="w-24 px-3 py-2.5 font-medium">处理人</th>
-                <th className="w-24 px-3 py-2.5 font-medium">创建人</th>
-                <th className="w-32 px-5 py-2.5 font-medium">创建时间</th>
+                <th className="min-w-[320px] px-4 py-2.5 font-medium">标题</th>
+                <th className="w-[92px] px-3 py-2.5 font-medium">状态</th>
+                <th className="w-[76px] px-3 py-2.5 font-medium">优先级</th>
+                <th className="w-[100px] px-3 py-2.5 font-medium">严重程度</th>
+                <th className="w-[104px] px-3 py-2.5 font-medium">处理人</th>
+                <th className="w-[88px] px-3 py-2.5 font-medium">创建人</th>
+                <th className="w-[136px] px-4 py-2.5 font-medium">创建时间</th>
+                <th className="sticky right-0 z-30 w-[124px] border-l border-slate-200/70 bg-slate-50 px-3 py-2.5 text-right font-medium">
+                  操作
+                </th>
               </tr>
             </thead>
             <tbody className={clsx("divide-y divide-slate-100", loading && "opacity-60")}>
@@ -332,39 +354,44 @@ export function BugListView(props: Props) {
                 <tr
                   key={bug.id}
                   onClick={() => onOpenBug(bug)}
-                  className="cursor-pointer bg-white text-xs transition hover:bg-sky-50/60"
+                  className="group cursor-pointer bg-white text-xs transition hover:bg-sky-50/60"
                 >
-                  <td className="max-w-0 px-5 py-2.5">
+                  <td className="min-w-[320px] max-w-0 px-4 py-2.5">
                     <div className="flex items-center gap-2">
                       <span className="shrink-0 rounded bg-rose-50 px-1.5 py-0.5 text-[10px] font-bold text-rose-600">
                         BUG
                       </span>
-                      <span className="truncate font-medium text-slate-800" title={bug.title}>
+                      <span
+                        className="min-w-0 flex-1 truncate font-medium text-slate-800"
+                        title={bug.title}
+                      >
                         {bug.title}
                       </span>
                     </div>
-                    <div className="mt-0.5 flex items-center gap-2 pl-9 text-[10px] text-slate-400">
-                      <span className="font-mono">#{bug.shortId || bug.id.slice(-7)}</span>
-                      {bug.versionReport ? <span>发现版本 {bug.versionReport}</span> : null}
+                    <div className="mt-0.5 flex items-center gap-2 overflow-hidden pl-9 text-[10px] text-slate-400">
+                      <span className="shrink-0 font-mono">#{bug.shortId || bug.id.slice(-7)}</span>
+                      {bug.versionReport ? (
+                        <span className="shrink-0">发现版本 {bug.versionReport}</span>
+                      ) : null}
                       {bug.iterationName ? <span className="truncate">{bug.iterationName}</span> : null}
                     </div>
                   </td>
-                  <td className="px-3 py-2.5">
+                  <td className="whitespace-nowrap px-3 py-2.5">
                     <Badge tone={STATUS_TONES[bug.status] ?? "neutral"}>
                       {bug.statusLabel || bug.status}
                     </Badge>
                   </td>
-                  <td className="px-3 py-2.5">
+                  <td className="whitespace-nowrap px-3 py-2.5">
                     <Badge tone={PRIORITY_TONES[bug.priority] ?? "neutral"}>
                       {bug.priorityLabel || bug.priority || "—"}
                     </Badge>
                   </td>
-                  <td className="px-3 py-2.5">
+                  <td className="whitespace-nowrap px-3 py-2.5">
                     <Badge tone={SEVERITY_TONES[bug.severity] ?? "neutral"} dot>
                       {bug.severityLabel || bug.severity || "—"}
                     </Badge>
                   </td>
-                  <td className="px-3 py-2.5">
+                  <td className="whitespace-nowrap px-3 py-2.5">
                     <div className="flex items-center gap-1.5 text-slate-600">
                       <span className="grid h-5 w-5 shrink-0 place-items-center rounded-full bg-slate-100 text-[9px] font-medium text-slate-500">
                         {initials(bug.owner)}
@@ -372,11 +399,44 @@ export function BugListView(props: Props) {
                       <span className="truncate">{bug.owner || "—"}</span>
                     </div>
                   </td>
-                  <td className="px-3 py-2.5 text-slate-500">
+                  <td className="whitespace-nowrap px-3 py-2.5 text-slate-500">
                     <span className="line-clamp-1">{bug.creator || "—"}</span>
                   </td>
-                  <td className="px-5 py-2.5 font-mono text-[11px] text-slate-400">
+                  <td className="whitespace-nowrap px-4 py-2.5 font-mono text-[11px] text-slate-400">
                     {formatTs(bug.created)}
+                  </td>
+                  <td
+                    className="sticky right-0 z-10 border-l border-slate-100 bg-white px-2 py-2.5 group-hover:bg-sky-50"
+                    onClick={(event) => event.stopPropagation()}
+                  >
+                    <div className="flex items-center justify-end gap-0.5">
+                      <RowAction
+                        label="查看详情"
+                        onClick={() => onOpenBug(bug)}
+                        icon={<Eye size={13} />}
+                      />
+                      {onOpenWeb ? (
+                        <RowAction
+                          label="在 TAPD 中打开"
+                          onClick={() => onOpenWeb(bug.bugUrl)}
+                          icon={<ExternalLink size={13} />}
+                        />
+                      ) : null}
+                      {onCopyLink ? (
+                        <RowAction
+                          label="复制链接"
+                          onClick={() => onCopyLink(bug.bugUrl)}
+                          icon={<Copy size={13} />}
+                        />
+                      ) : null}
+                      {onAgentFix ? (
+                        <RowAction
+                          label="用 Agent 修复"
+                          onClick={() => onAgentFix(bug)}
+                          icon={<Sparkles size={13} />}
+                        />
+                      ) : null}
+                    </div>
                   </td>
                 </tr>
               ))}
@@ -414,6 +474,23 @@ export function BugListView(props: Props) {
         </div>
       ) : null}
     </div>
+  );
+}
+
+function RowAction(props: { label: string; icon: ReactNode; onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      title={props.label}
+      aria-label={props.label}
+      onClick={(event) => {
+        event.stopPropagation();
+        props.onClick();
+      }}
+      className="grid h-6 w-6 place-items-center rounded-md text-slate-400 transition hover:bg-white hover:text-slate-700 hover:shadow-sm"
+    >
+      {props.icon}
+    </button>
   );
 }
 

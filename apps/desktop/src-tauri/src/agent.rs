@@ -1283,8 +1283,9 @@ fn open_console_window(app: &AppHandle) -> Result<WebviewWindow, String> {
         WebviewUrl::App("index.html".into()),
     )
     .title("Agent 控制台")
-    .inner_size(1120.0, 760.0)
-    .min_inner_size(760.0, 480.0)
+    // Compact by default: this is a side console, not a second main window.
+    .inner_size(860.0, 560.0)
+    .min_inner_size(600.0, 400.0)
     .build()
     .map_err(|error| error.to_string())?;
 

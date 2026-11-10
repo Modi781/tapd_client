@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import clsx from "clsx";
 import { Check, Eye, Loader2, X } from "lucide-react";
 
@@ -30,6 +30,10 @@ export function IslandWindow() {
   const [snapshot, setSnapshot] = useState<NotificationStateSnapshot | null>(null);
   const [busy, setBusy] = useState<Busy>(null);
   const [errors, setErrors] = useState<Record<string, string>>({});
+  // Click vs double-click: a single click waits briefly so a double-click can
+  // open the main window instead.
+  const clickTimer = useRef<number | null>(null);
+  const dragStart = useRef<{ x: number; y: number } | null>(null);
 
   // The island window is transparent: drop the app's light background and
   // scrollbars that only make sense in the main window.
@@ -90,6 +94,7 @@ export function IslandWindow() {
       unlistenShow?.();
       unlistenLayout?.();
       window.clearInterval(timer);
+      if (clickTimer.current !== null) window.clearTimeout(clickTimer.current);
     };
   }, [refreshStatus]);
 
@@ -136,12 +141,42 @@ export function IslandWindow() {
       <div className="grid h-full w-full place-items-center overflow-hidden">
         <button
           type="button"
-          onClick={() => {
-            if (items.length > 0) void notificationApi.expandIsland(true);
-            else void notificationApi.openMain();
+          onMouseDown={(event) => {
+            if (event.button === 0) dragStart.current = { x: event.clientX, y: event.clientY };
           }}
-          title={items.length > 0 ? "展开通知" : "打开 TAPD 客户端"}
-          className="island-pill group flex items-center gap-2 rounded-full bg-slate-900/90 px-3 py-1.5 text-[11px] text-slate-200 shadow-lg shadow-black/25 ring-1 ring-white/10 backdrop-blur-xl transition hover:bg-slate-900/95"
+          onMouseMove={(event) => {
+            const start = dragStart.current;
+            if (!start) return;
+            if (Math.hypot(event.clientX - start.x, event.clientY - start.y) < 4) return;
+            dragStart.current = null;
+            // Hand the drag to the window manager; the final position is
+            // persisted by the Rust side once the drag settles.
+            void notificationApi.startDrag().catch(() => undefined);
+          }}
+          onMouseUp={() => {
+            dragStart.current = null;
+          }}
+          onClick={() => {
+            if (clickTimer.current !== null) return;
+            clickTimer.current = window.setTimeout(() => {
+              clickTimer.current = null;
+              if (items.length > 0) void notificationApi.expandIsland(true);
+              else void notificationApi.openMain();
+            }, 240);
+          }}
+          onDoubleClick={() => {
+            if (clickTimer.current !== null) {
+              window.clearTimeout(clickTimer.current);
+              clickTimer.current = null;
+            }
+            void notificationApi.openMain();
+          }}
+          title={
+            items.length > 0
+              ? "单击展开通知 · 双击打开客户端 · 可拖动"
+              : "双击打开客户端 · 可拖动"
+          }
+          className="island-pill group flex cursor-grab items-center gap-2 rounded-full bg-slate-900/90 px-3 py-1.5 text-[11px] text-slate-200 shadow-lg shadow-black/25 ring-1 ring-white/10 backdrop-blur-xl transition hover:bg-slate-900/95 active:cursor-grabbing"
         >
           <StatusDot tone={tone} />
           <span className="font-semibold tracking-wide text-slate-100">TAPD</span>
