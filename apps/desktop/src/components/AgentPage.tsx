@@ -52,8 +52,8 @@ type Props = {
 type Tab = "run" | "history";
 
 /**
- * Agent workspace: "运行" (embedded opencode TUI + queue/review actions) and
- * "历史" (execution records, logs and bug links).
+ * Agent workspace: "运行" (active queue, review, logs/resume) and "历史"
+ * (terminal execution records, logs and bug links).
  */
 export function AgentPage({ focusTaskId, onOpenBug, toast }: Props) {
   const [tasksState, setTasksState] = useState<AgentTasksState | null>(null);
@@ -153,7 +153,7 @@ export function AgentPage({ focusTaskId, onOpenBug, toast }: Props) {
     runTasks[0]?.id ??
     null;
   const runTask = runTasks.find((task) => task.id === selectedId) ?? null;
-  /** The PTY log file exists once the TUI is actually running. */
+  /** The PTY log file exists once the task is actually running. */
   const logReady =
     runTask !== null &&
     (runTask.status === "running" || runTask.status === "waiting_review");
@@ -551,8 +551,8 @@ export function AgentPage({ focusTaskId, onOpenBug, toast }: Props) {
                   </p>
                   <p className="mt-1 max-w-md text-[11px] leading-5 text-slate-500">
                     {runTask.status === "queued" || runTask.status === "preparing"
-                      ? "任务开始后，opencode 的 IO 输出会写入本地日志；可在此查看日志或在 Terminal 中恢复会话。"
-                      : "界面不再渲染 TUI，避免 ANSI/换行被终端宽度破坏。可以查看保留换行的日志，或在 Terminal 中恢复这个 opencode 会话继续操作。"}
+                      ? "任务开始后，输出会写入本地日志；可查看日志或在 Terminal 中恢复会话。"
+                      : "查看保留换行的日志，或在 Terminal 中恢复会话继续操作。"}
                   </p>
                   <p className="mt-2 break-all font-mono text-[10px] text-slate-400">
                     {runTask.logPath}

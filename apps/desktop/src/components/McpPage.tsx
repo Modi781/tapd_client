@@ -139,7 +139,7 @@ export function McpPage({ onCopy, toast }: Props) {
               MCP 服务
             </h2>
             <p className="mt-1 text-xs leading-5 text-slate-500">
-              AI 客户端通过 stdio 启动随应用分发的 tapd-mcp，读取当前账号可见的缺陷；修复完成后可追加评论、更新状态。
+              把 TAPD 缺陷接入 AI 客户端，支持查询、导出与修复后回写。
             </p>
           </div>
           <div className="flex shrink-0 items-center gap-2">
@@ -179,7 +179,7 @@ export function McpPage({ onCopy, toast }: Props) {
         </div>
 
         <div className="mt-4 space-y-2">
-          <PathRow label="sidecar 路径" value={mcp.commandPath} onCopy={onCopy} />
+          <PathRow label="MCP 程序路径" value={mcp.commandPath} onCopy={onCopy} />
           <PathRow
             label="opencode 配置"
             value={mcp.configPath ?? "未找到 opencode 配置目录"}
@@ -208,7 +208,7 @@ export function McpPage({ onCopy, toast }: Props) {
               一键导入 opencode
             </h2>
             <p className="mt-1 text-xs leading-5 text-slate-500">
-              将 tapd 写入 opencode 全局配置的 mcp.servers，保留其他已有配置；改动前自动备份，重复导入不会重复写入。
+              自动写入 opencode 全局配置；改动前备份，重复导入不会重复写入。
             </p>
           </div>
           <Badge tone={mcp.imported ? "green" : "amber"}>
@@ -222,8 +222,7 @@ export function McpPage({ onCopy, toast }: Props) {
             {mcp.configPath ?? "未找到 opencode 配置目录"}
           </div>
           <p className="mt-2 text-[10px] leading-5 text-slate-400">
-            写入 <span className="font-mono text-slate-600">mcp.servers.tapd</span>，command
-            指向 sidecar 路径。若配置文件含注释（JSONC）而无法安全解析，会直接报错并保持原文件不变。
+            无法安全解析配置时会保留原文件并提示。
           </p>
         </div>
 
@@ -283,7 +282,7 @@ export function McpPage({ onCopy, toast }: Props) {
             接入其他 AI 客户端
           </h2>
           <p className="mt-1 text-xs leading-5 text-slate-500">
-            复制对应的命令或配置，填入实际的 sidecar 路径即可；所有客户端都通过 stdio 启动 tapd-mcp。
+            复制对应的命令或配置，替换为实际程序路径即可。
           </p>
         </div>
 

@@ -78,7 +78,7 @@ export function AgentSettings({ toast }: SettingsSectionProps) {
               Agent 修复
             </h2>
             <p className="mt-1 text-xs leading-5 text-slate-500">
-              在本地仓库启动 opencode 完整 TUI，自动注入缺陷任务；队列严格串行（并发 1）。
+              为缺陷创建 Agent 修复任务，按队列串行执行。
             </p>
           </div>
           <div className="flex shrink-0 items-center gap-2">
@@ -107,11 +107,7 @@ export function AgentSettings({ toast }: SettingsSectionProps) {
                 </label>
                 {version ? (
                   <Badge tone="green">{version}</Badge>
-                ) : (
-                  <span className="text-[10px] text-slate-400">
-                    可填相对命令名（走 PATH）或绝对路径
-                  </span>
-                )}
+                ) : null}
               </div>
               <input
                 value={config.binaryPath}
@@ -154,28 +150,31 @@ export function AgentSettings({ toast }: SettingsSectionProps) {
                 ))}
               </div>
               <p className="mt-1.5 text-[10px] leading-4 text-slate-400">
-                仓库文件夹和项目规则在「项目」卡片里配置；模板含{" "}
-                <code className="rounded bg-slate-100 px-1 font-mono">{"{{project_rule}}"}</code>{" "}
-                时按位置插入，否则追加到末尾。
+                变量会替换为缺陷信息；<code className="rounded bg-slate-100 px-1 font-mono">{"{{project_rule}}"}</code> 来自项目设置。
               </p>
             </div>
 
-            <div className="grid gap-3 sm:grid-cols-2">
-              <NumberField
-                label="就绪静默（ms）"
-                hint="输出静默达到该时长后注入任务"
-                value={config.readyQuietMs}
-                onChange={(value) => patchConfig({ readyQuietMs: value })}
-                onCommit={() => void commit()}
-              />
-              <NumberField
-                label="就绪超时（ms）"
-                hint="超时后强制注入并记录 warning"
-                value={config.readyTimeoutMs}
-                onChange={(value) => patchConfig({ readyTimeoutMs: value })}
-                onCommit={() => void commit()}
-              />
-            </div>
+            <details className="rounded-xl border border-slate-100 bg-slate-50/50">
+              <summary className="cursor-pointer select-none px-3 py-2 text-[11px] text-slate-500">
+                高级
+              </summary>
+              <div className="grid gap-3 p-3 pt-0 sm:grid-cols-2">
+                <NumberField
+                  label="就绪静默（ms）"
+                  hint="输出静默达到该时长后注入任务"
+                  value={config.readyQuietMs}
+                  onChange={(value) => patchConfig({ readyQuietMs: value })}
+                  onCommit={() => void commit()}
+                />
+                <NumberField
+                  label="就绪超时（ms）"
+                  hint="超时后强制注入"
+                  value={config.readyTimeoutMs}
+                  onChange={(value) => patchConfig({ readyTimeoutMs: value })}
+                  onCommit={() => void commit()}
+                />
+              </div>
+            </details>
           </div>
         )}
       </section>

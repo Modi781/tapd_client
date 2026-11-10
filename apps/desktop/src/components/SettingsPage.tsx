@@ -1,16 +1,20 @@
+import { useState } from "react";
 import {
   Copy,
+  FileJson,
   FolderOpen,
   KeyRound,
-  LogIn,
   LogOut,
   RefreshCw,
+  LogIn,
   ShieldCheck,
+  X,
 } from "lucide-react";
 
 import type { AppInfo, SessionStatus, WorkspaceContext } from "../lib/api";
 import type { SettingsSectionProps } from "../lib/feature";
 import { AgentSettings } from "./AgentSettings";
+import { CapturesPage } from "./CapturesPage";
 import { ProjectSettings } from "./ProjectSettings";
 import { NotificationSettings } from "./NotificationSettings";
 import { Button } from "./ui";
@@ -43,6 +47,7 @@ export function SettingsPage(props: Props) {
     onSetWorkspaceVisible,
     toast,
   } = props;
+  const [capturesOpen, setCapturesOpen] = useState(false);
 
   const paths: Array<[string, string]> = info
     ? [
@@ -64,9 +69,6 @@ export function SettingsPage(props: Props) {
               <KeyRound size={15} className="text-slate-400" />
               账户与会话
             </h2>
-            <p className="mt-1 text-xs text-slate-500">
-              登录态保存在隐藏 WebView 的 Cookie 中，不写入配置文件。
-            </p>
           </div>
           <Button size="sm" onClick={onRefresh} icon={<RefreshCw size={13} />}>
             刷新状态
@@ -146,9 +148,54 @@ export function SettingsPage(props: Props) {
         </div>
       </section>
 
-      <p className="px-1 text-[11px] leading-5 text-slate-400">
-        当前里程碑：登录会话、项目/缺陷列表、筛选与详情。SQLite 缓存、MD 导出、通知窗口与 opencode 队列在后续接入。
-      </p>
+      <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <h2 className="flex items-center gap-2 text-sm font-semibold text-slate-900">
+              <FileJson size={15} className="text-slate-400" />
+              接口抓包
+            </h2>
+            <p className="mt-1 text-xs text-slate-500">
+              记录 TAPD 接口请求，便于排查问题。
+            </p>
+          </div>
+          <Button
+            size="sm"
+            variant="secondary"
+            onClick={() => setCapturesOpen(true)}
+            icon={<FileJson size={13} />}
+          >
+            打开抓包
+          </Button>
+        </div>
+      </section>
+
+      {capturesOpen ? (
+        <div
+          className="fixed inset-0 z-[80] flex items-center justify-center bg-slate-900/30 p-6 backdrop-blur-[1px]"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) setCapturesOpen(false);
+          }}
+        >
+          <div className="flex h-[min(82vh,760px)] w-[min(1180px,94vw)] flex-col overflow-hidden rounded-2xl bg-white shadow-2xl ring-1 ring-black/10">
+            <header className="flex shrink-0 items-center gap-2 border-b border-slate-100 px-4 py-3">
+              <FileJson size={15} className="text-slate-400" />
+              <h2 className="text-[13px] font-semibold text-slate-900">接口抓包</h2>
+              <button
+                type="button"
+                aria-label="关闭抓包"
+                onClick={() => setCapturesOpen(false)}
+                className="ml-auto grid h-8 w-8 place-items-center rounded-lg text-slate-400 transition hover:bg-slate-100 hover:text-slate-700"
+              >
+                <X size={16} />
+              </button>
+            </header>
+            <div className="min-h-0 flex-1 overflow-y-auto p-4">
+              <CapturesPage toast={toast} onOpenPath={onOpenPath} />
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

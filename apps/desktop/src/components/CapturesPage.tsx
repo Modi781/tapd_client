@@ -199,8 +199,8 @@ export function CapturesPage({ toast, onOpenPath }: Props) {
             title={loaded ? "还没有匹配的请求" : "正在读取抓包…"}
             description={
               loaded
-                ? "在 TAPD 中浏览项目或缺陷详情，接口会记录在隐藏 WebView 内存里。"
-                : "从隐藏的 TAPD WebView 拉取请求记录。"
+                ? "在 TAPD 中操作时，这里会记录接口请求。"
+                : "正在读取请求记录…"
             }
           />
         ) : (

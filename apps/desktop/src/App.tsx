@@ -7,7 +7,6 @@ import {
   Bot,
   Bug,
   CheckCircle2,
-  FileJson,
   Loader2,
   PanelLeftClose,
   PanelLeftOpen,
@@ -43,7 +42,6 @@ import { AgentPage } from "./components/AgentPage";
 import { BugDetailDrawer } from "./components/BugDetailDrawer";
 import { FolderPicker } from "./components/FolderPicker";
 import { BugListView } from "./components/BugListView";
-import { CapturesPage } from "./components/CapturesPage";
 import { LoginGate } from "./components/LoginGate";
 import { McpPage } from "./components/McpPage";
 import { SettingsPage } from "./components/SettingsPage";
@@ -51,7 +49,7 @@ import { ScrollingName } from "./components/ScrollingName";
 import { SkeletonRows } from "./components/Skeleton";
 import { Button } from "./components/ui";
 
-type View = "bugs" | "captures" | "agent" | "mcp" | "settings";
+type View = "bugs" | "agent" | "mcp" | "settings";
 type Scope = "mine" | "all";
 type Toast = { kind: "ok" | "error"; text: string };
 
@@ -85,7 +83,6 @@ const defaultSidebarWidth = (viewport: number): number =>
 
 const NAV: Array<{ id: View; label: string; icon: ReactNode }> = [
   { id: "bugs", label: "缺陷", icon: <Bug size={15} /> },
-  { id: "captures", label: "接口抓包", icon: <FileJson size={15} /> },
   { id: "agent", label: "Agent", icon: <Bot size={15} /> },
   { id: "mcp", label: "MCP", icon: <Plug size={15} /> },
   { id: "settings", label: "设置", icon: <SettingsIcon size={15} /> },
@@ -850,25 +847,21 @@ export default function App() {
   const title =
     view === "bugs"
       ? workspace?.name ?? "缺陷"
-      : view === "captures"
-        ? "接口抓包"
-        : view === "agent"
-          ? "Agent"
-          : view === "mcp"
-            ? "MCP"
-            : "设置";
+      : view === "agent"
+        ? "Agent"
+        : view === "mcp"
+          ? "MCP"
+          : "设置";
   const subtitle =
     view === "bugs"
       ? workspace
         ? `项目 ${workspace.id} · ${scope === "mine" ? "我负责的" : "全部缺陷"}`
         : "选择左侧项目开始"
-      : view === "captures"
-        ? "查看隐藏 WebView 捕获的 TAPD 接口"
-        : view === "agent"
-          ? "运行 opencode、审核权限与查看执行历史"
-          : view === "mcp"
-            ? "接入 AI 客户端与一键导入 opencode"
-            : "账户、项目与本地数据";
+      : view === "agent"
+        ? "运行 opencode、审核权限与查看执行历史"
+        : view === "mcp"
+          ? "接入 AI 客户端与一键导入 opencode"
+          : "账户、项目与本地数据";
 
   return (
     <div
@@ -1130,10 +1123,7 @@ export default function App() {
             </div>
           ) : (
             <div className="min-h-0 flex-1 overflow-y-auto p-5">
-              {view === "captures" ? (
-                <CapturesPage toast={showToast} onOpenPath={openPath} />
-              ) : (
-                <SettingsPage
+              <SettingsPage
                   info={info}
                   status={status}
                   context={context}
@@ -1154,7 +1144,6 @@ export default function App() {
                   onSetWorkspaceVisible={setWorkspaceVisible}
                   toast={showToast}
                 />
-              )}
             </div>
           )}
         </main>

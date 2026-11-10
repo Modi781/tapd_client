@@ -416,7 +416,7 @@ function BugListViewImpl(props: Props) {
                 <tr
                   key={bug.id}
                   onClick={() => onOpenBug(bug)}
-                  className="group cursor-pointer bg-white text-xs transition hover:bg-sky-50/60"
+                  className="group cursor-pointer bg-white text-xs transition hover:bg-sky-50"
                 >
                   <td className="min-w-[320px] max-w-0 px-4 py-2.5">
                     <div className="flex items-center gap-2">

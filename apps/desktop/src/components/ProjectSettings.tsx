@@ -154,9 +154,7 @@ export function ProjectSettings(props: {
         项目
       </h2>
       <p className="mt-1 text-xs text-slate-500">
-        点击左侧项目切换。每个项目在这里设置本地文件夹和项目规则，Agent
-        修复时直接使用；文件夹可以拖进卡片，或点「选择」。改动失焦即保存。
-        眼睛图标控制该项目是否出现在左侧列表（只影响本机显示）。
+        每个项目可设置本地文件夹、项目规则和是否显示在左侧列表；改动自动保存。
       </p>
 
       <div className="mt-3 grid gap-2 sm:grid-cols-2">
