@@ -1,16 +1,15 @@
 import { useState, type ReactNode } from "react";
 import {
-  ArrowLeft,
   ArrowRight,
   Bell,
   Bot,
   Bug,
-  FolderOpen,
+  Check,
   Loader2,
   Plug,
-  QrCode,
   ShieldCheck,
   Sparkles,
+  Workflow,
 } from "lucide-react";
 
 import appIcon from "../assets/app-icon.png";
@@ -159,24 +158,6 @@ const FEATURES: Array<{
   },
 ];
 
-const QUICK_START = [
-  {
-    icon: <QrCode size={18} />,
-    title: "扫码登录",
-    hint: "企业微信扫一扫",
-  },
-  {
-    icon: <FolderOpen size={18} />,
-    title: "选择项目",
-    hint: "从左侧项目栏开始",
-  },
-  {
-    icon: <Plug size={18} />,
-    title: "按需接入",
-    hint: "MCP / Agent tab",
-  },
-];
-
 export function Onboarding({ info, onDone }: Props) {
   const [step, setStep] = useState(0);
   const [busy, setBusy] = useState(false);
@@ -216,10 +197,12 @@ export function Onboarding({ info, onDone }: Props) {
                 TAPD Client · V{info.version}
               </div>
               <h2 className="mt-0.5 text-[21px] font-semibold tracking-tight text-slate-900">
-                {step === 0 ? "把 TAPD 变成工作台" : "一分钟开始使用"}
+                {step === 0 ? "你的工作从未如此轻松" : "安全，默认在本地"}
               </h2>
               <p className="mt-0.5 text-[11px] text-slate-500">
-                {step === 0 ? "四个每天都会用到的能力" : "扫码、选项目，然后开工"}
+                {step === 0
+                  ? "像微信聊天一样处理你的事物"
+                  : "登录态、缓存和写操作都在本机闭环"}
               </p>
             </div>
           </div>
@@ -244,24 +227,64 @@ export function Onboarding({ info, onDone }: Props) {
               ))}
             </div>
           ) : (
-            <div className="grid gap-3 sm:grid-cols-3">
-              {QUICK_START.map((item, index) => (
-                <div
-                  key={item.title}
-                  className="relative rounded-2xl border border-slate-100 bg-slate-50/70 p-4"
-                >
-                  <span className="absolute right-3 top-3 text-[10px] font-medium text-slate-300">
-                    0{index + 1}
-                  </span>
-                  <span className="grid h-8 w-8 place-items-center rounded-lg bg-white text-sky-500 shadow-sm ring-1 ring-slate-100">
-                    {item.icon}
-                  </span>
-                  <div className="mt-3 text-[13px] font-semibold text-slate-900">
-                    {item.title}
+            <div className="space-y-3">
+              <div className="grid gap-3 sm:grid-cols-2">
+                <div className="rounded-2xl border border-slate-100 bg-white p-4">
+                  <div className="flex items-center gap-2 text-[13px] font-semibold text-slate-900">
+                    <ShieldCheck size={16} className="text-emerald-500" />
+                    安全
                   </div>
-                  <div className="mt-0.5 text-[11px] text-slate-500">{item.hint}</div>
+                  <ul className="mt-3 space-y-2 text-[11px] leading-5 text-slate-600">
+                    <li className="flex gap-2">
+                      <Check size={12} className="mt-0.5 shrink-0 text-emerald-500" />
+                      Cookie 只存在隐藏 WebView，不上传。
+                    </li>
+                    <li className="flex gap-2">
+                      <Check size={12} className="mt-0.5 shrink-0 text-emerald-500" />
+                      MCP 只监听 127.0.0.1，token 每次启动轮换。
+                    </li>
+                    <li className="flex gap-2">
+                      <Check size={12} className="mt-0.5 shrink-0 text-emerald-500" />
+                      写操作可关闭、逐条审计，不记录正文。
+                    </li>
+                  </ul>
                 </div>
-              ))}
+
+                <div className="rounded-2xl border border-slate-100 bg-white p-4">
+                  <div className="flex items-center gap-2 text-[13px] font-semibold text-slate-900">
+                    <Workflow size={16} className="text-sky-500" />
+                    实现方式
+                  </div>
+                  <ul className="mt-3 space-y-2 text-[11px] leading-5 text-slate-600">
+                    <li className="flex gap-2">
+                      <Check size={12} className="mt-0.5 shrink-0 text-sky-500" />
+                      WebView 复用登录态 → SQLite 快照 → 界面。
+                    </li>
+                    <li className="flex gap-2">
+                      <Check size={12} className="mt-0.5 shrink-0 text-sky-500" />
+                      MCP sidecar ↔ 本地回环 ↔ 桌面客户端。
+                    </li>
+                    <li className="flex gap-2">
+                      <Check size={12} className="mt-0.5 shrink-0 text-sky-500" />
+                      Agent 在本机 opencode 执行，权限手动批准。
+                    </li>
+                  </ul>
+                </div>
+              </div>
+
+              <div className="flex flex-wrap items-center justify-center gap-1.5 rounded-xl bg-slate-50 px-3 py-2 text-[10px] text-slate-400">
+                <span className="rounded-full bg-white px-2 py-0.5">TAPD WebView</span>
+                <ArrowRight size={10} />
+                <span className="rounded-full bg-white px-2 py-0.5">SQLite</span>
+                <ArrowRight size={10} />
+                <span className="rounded-full bg-white px-2 py-0.5">界面</span>
+                <span className="mx-1 h-3 w-px bg-slate-200" />
+                <span className="rounded-full bg-white px-2 py-0.5">AI</span>
+                <ArrowRight size={10} />
+                <span className="rounded-full bg-white px-2 py-0.5">MCP</span>
+                <ArrowRight size={10} />
+                <span className="rounded-full bg-white px-2 py-0.5">本机 App</span>
+              </div>
             </div>
           )}
 
@@ -299,7 +322,7 @@ export function Onboarding({ info, onDone }: Props) {
           </div>
 
           <div className="flex items-center gap-2">
-            {step > 0 ? (
+            {/* {step > 0 ? (
               <button
                 type="button"
                 onClick={() => setStep(0)}
@@ -309,7 +332,7 @@ export function Onboarding({ info, onDone }: Props) {
                 <ArrowLeft size={12} />
                 回看卖点
               </button>
-            ) : null}
+            ) : null} */}
             {step === 0 ? (
               <button
                 type="button"

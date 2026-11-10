@@ -13,6 +13,8 @@
     "typecheck": "pnpm -C apps/desktop typecheck",
     "check:rust": "pnpm build:sidecar:debug && cargo check --workspace",
     "build:mcp": "cargo build -p tapd-mcp",
+    "release": "bash scripts/release.sh",
+    "changelog": "node scripts/changelog.mjs",
     "test:rust": "pnpm build:sidecar:debug && cargo test --workspace"
   }
 }

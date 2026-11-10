@@ -4,6 +4,7 @@ import type { MouseEvent as ReactMouseEvent, ReactNode } from "react";
 import clsx from "clsx";
 import {
   AlertTriangle,
+  ArrowUpCircle,
   Bot,
   Bug,
   CheckCircle2,
@@ -36,6 +37,12 @@ import {
   getRefreshing,
   subscribeRefresh,
 } from "./lib/refresh";
+import {
+  formatCheckTime,
+  getUpdateSnapshot,
+  startUpdateStore,
+  subscribeUpdate,
+} from "./lib/update";
 import { AgentPage } from "./components/AgentPage";
 import { AccountPage } from "./components/AccountPage";
 import { Avatar } from "./components/Avatar";
@@ -47,6 +54,7 @@ import { McpPage } from "./components/McpPage";
 import { Onboarding } from "./components/Onboarding";
 import { ProjectSettings } from "./components/ProjectSettings";
 import { SettingsPage } from "./components/SettingsPage";
+import { UpdatePanel } from "./components/UpdatePanel";
 import { ScrollingName } from "./components/ScrollingName";
 import { SkeletonRows } from "./components/Skeleton";
 import { Button } from "./components/ui";
@@ -141,6 +149,17 @@ export default function App() {
     getRefreshing,
     getRefreshing,
   );
+  /** Background update state (checked hourly by the Rust side). */
+  const updateState = useSyncExternalStore(
+    subscribeUpdate,
+    getUpdateSnapshot,
+    getUpdateSnapshot,
+  );
+  const [updateDialogOpen, setUpdateDialogOpen] = useState(false);
+
+  useEffect(() => {
+    startUpdateStore();
+  }, []);
 
   // Load hidden projects once from config.json. The UI is the source of truth
   // afterwards, so a background `app_info` refresh cannot revert a fresh toggle.
@@ -917,19 +936,85 @@ export default function App() {
         (resizingSidebar || resizingDetail) && "select-none",
       )}
     >
-      {/* macOS traffic lights live over this strip; whole strip drags the window. */}
+      {/* macOS traffic lights live over this strip; the strip itself drags the
+          window. The update button below has no drag attribute, so clicking it
+          still opens the panel instead of moving the window. */}
       <div
         className="relative flex h-11 shrink-0 items-center gap-2 px-4"
         data-tauri-drag-region
       >
-        {/* No window title: the strip only hosts the traffic lights + drag. */}
-        <span className="ml-[62px] flex-1" data-tauri-drag-region />
+        <span className="ml-[62px] h-full flex-1" data-tauri-drag-region />
         {refreshing ? (
           <div className="pointer-events-none absolute inset-x-0 flex items-center justify-center gap-1.5 text-[11px] text-slate-400">
             <Loader2 size={12} className="animate-spin" />
             更新中
           </div>
         ) : null}
+
+        {/* Update icon: hover shows the latest release notes. */}
+        <div className="group relative shrink-0">
+          <button
+            type="button"
+            onClick={() => setUpdateDialogOpen(true)}
+            title={
+              updateState?.available
+                ? `发现新版本 v${updateState.available.version}`
+                : "检查更新"
+            }
+            className={clsx(
+              "grid h-7 w-7 place-items-center rounded-lg transition",
+              updateState?.available
+                ? "text-emerald-600 hover:bg-emerald-50"
+                : "text-slate-400 hover:bg-black/[0.04] hover:text-slate-600",
+            )}
+          >
+            {updateState?.phase === "checking" ? (
+              <Loader2 size={15} className="animate-spin" />
+            ) : updateState?.available ? (
+              <span className="relative">
+                <ArrowUpCircle size={16} />
+                <span className="absolute -right-1 -top-1 h-1.5 w-1.5 rounded-full bg-emerald-500 ring-2 ring-[#f4f4f2]" />
+              </span>
+            ) : (
+              <RefreshCw size={14} />
+            )}
+          </button>
+
+          <div className="pointer-events-none invisible absolute right-0 top-9 z-50 w-80 translate-y-1 rounded-xl bg-slate-900/95 p-3 text-slate-200 opacity-0 shadow-2xl ring-1 ring-white/10 backdrop-blur-xl transition-all duration-150 group-hover:visible group-hover:translate-y-0 group-hover:opacity-100">
+            {updateState?.available ? (
+              <>
+                <div className="flex items-center gap-2 text-[11px]">
+                  <ArrowUpCircle size={13} className="text-emerald-400" />
+                  <span className="font-semibold text-slate-100">
+                    新版本 v{updateState.available.version}
+                  </span>
+                  <span className="ml-auto text-[10px] text-slate-400">更新日志</span>
+                </div>
+                <p className="mt-2 max-h-56 overflow-y-auto whitespace-pre-line text-[11px] leading-5 text-slate-300">
+                  {updateState.available.notes}
+                </p>
+                <p className="mt-2 border-t border-white/10 pt-2 text-[10px] text-slate-400">
+                  点击查看详情并更新
+                </p>
+              </>
+            ) : (
+              <>
+                <div className="flex items-center gap-2 text-[11px]">
+                  <RefreshCw size={12} className="text-slate-400" />
+                  <span className="font-semibold text-slate-100">
+                    {updateState?.phase === "checking"
+                      ? "正在检查更新…"
+                      : `已是最新版本 v${updateState?.currentVersion ?? "—"}`}
+                  </span>
+                </div>
+                <p className="mt-1.5 text-[10px] leading-4 text-slate-400">
+                  上次检查 {formatCheckTime(updateState?.checkedAt ?? null)} · 每小时自动检查
+                </p>
+                <p className="mt-1.5 text-[10px] text-slate-400">点击查看版本与更新说明</p>
+              </>
+            )}
+          </div>
+        </div>
       </div>
 
       <div className="flex min-h-0 flex-1">
@@ -1274,6 +1359,7 @@ export default function App() {
                   void refreshBase();
                   void loadContext();
                 }}
+                toast={showToast}
               />
             </div>
           ) : (
@@ -1399,6 +1485,33 @@ export default function App() {
 
       {!info.onboarded ? (
         <Onboarding info={info} onDone={() => void refreshBase()} />
+      ) : null}
+
+      {updateDialogOpen ? (
+        <div
+          className="fixed inset-0 z-[75] flex items-center justify-center bg-slate-900/30 p-6 backdrop-blur-[1px]"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) setUpdateDialogOpen(false);
+          }}
+        >
+          <div className="w-[min(680px,94vw)] overflow-hidden rounded-2xl bg-white p-5 shadow-2xl ring-1 ring-black/10">
+            <div className="mb-3 flex items-center gap-2">
+              <h2 className="text-[13px] font-semibold text-slate-900">更新与版本</h2>
+              <span className="font-mono text-[10px] text-slate-400">
+                v{info.version}
+              </span>
+              <button
+                type="button"
+                aria-label="关闭更新面板"
+                onClick={() => setUpdateDialogOpen(false)}
+                className="ml-auto grid h-8 w-8 place-items-center rounded-lg text-slate-400 transition hover:bg-slate-100 hover:text-slate-700"
+              >
+                <X size={16} />
+              </button>
+            </div>
+            <UpdatePanel toast={showToast} bare />
+          </div>
+        </div>
       ) : null}
 
       {toastNode}

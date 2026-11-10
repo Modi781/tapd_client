@@ -15,6 +15,7 @@ import type { SettingsSectionProps } from "../lib/feature";
 import { AgentSettings } from "./AgentSettings";
 import { CapturesPage } from "./CapturesPage";
 import { NotificationSettings } from "./NotificationSettings";
+import { UpdatePanel } from "./UpdatePanel";
 import { Button } from "./ui";
 
 type Props = {
@@ -72,6 +73,8 @@ export function SettingsPage(props: Props) {
 
   return (
     <div className="mx-auto max-w-4xl space-y-4">
+      <UpdatePanel toast={toast} />
+
       <NotificationSettings toast={toast} />
 
       <AgentSettings toast={toast} />

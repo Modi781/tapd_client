@@ -81,11 +81,6 @@ pub fn client_config_path(client: &str) -> Option<PathBuf> {
     }
 }
 
-/// Whether the client's user-scope config already registers this sidecar.
-pub fn client_imported(client: &str, command_path: &str) -> bool {
-    client_config_path(client).is_some_and(|path| imported_in_path(client, &path, command_path))
-}
-
 /// Whether the config file at `path` already registers this sidecar.
 pub fn imported_in_path(client: &str, path: &Path, command_path: &str) -> bool {
     match client {

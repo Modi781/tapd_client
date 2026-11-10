@@ -418,12 +418,7 @@ async fn resolve_me(
         return Ok(None);
     }
 
-    let snapshot = {
-        let mut config = state.config.lock().expect("config lock");
-        config.me = Some(nick.clone());
-        config.clone()
-    };
-    let _ = state.save_config(&snapshot);
+    let _ = state.update_config(|config| config.me = Some(nick.clone()));
 
     Ok(Some(nick))
 }

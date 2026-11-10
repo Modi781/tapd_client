@@ -278,15 +278,13 @@ pub fn session_cache_avatar(
         return Ok(());
     };
 
-    let snapshot = {
-        let mut config = state.config.lock().expect("config lock");
-        if config.me_avatar.as_deref() == Some(url.as_str()) {
-            return Ok(());
-        }
-        config.me_avatar = Some(url);
-        config.clone()
-    };
-    state.save_config(&snapshot).map_err(|error| error.to_string())
+    state
+        .update_config(|config| {
+            if config.me_avatar.as_deref() != Some(url.as_str()) {
+                config.me_avatar = Some(url);
+            }
+        })
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -295,19 +293,17 @@ pub fn session_mark_logged_in(
     state: State<'_, SharedState>,
     nick: Option<String>,
 ) -> Result<(), String> {
-    let snapshot = {
-        let mut config = state.config.lock().expect("config lock");
-        config.logged_in = true;
-        if let Some(nick) = nick {
-            let trimmed = nick.trim();
-            if !trimmed.is_empty() {
-                config.me = Some(trimmed.to_string());
+    state
+        .update_config(|config| {
+            config.logged_in = true;
+            if let Some(nick) = nick {
+                let trimmed = nick.trim();
+                if !trimmed.is_empty() {
+                    config.me = Some(trimmed.to_string());
+                }
             }
-        }
-        config.clone()
-    };
-
-    state.save_config(&snapshot).map_err(|error| error.to_string())?;
+        })
+        .map_err(|error| error.to_string())?;
 
     if let Some(window) = app.get_webview_window(session::SESSION_LABEL) {
         let _ = window.hide();
@@ -321,15 +317,14 @@ pub async fn session_logout(
     app: AppHandle,
     state: State<'_, SharedState>,
 ) -> Result<(), String> {
-    let snapshot = {
-        let mut config = state.config.lock().expect("config lock");
-        config.logged_in = false;
-        config.me = None;
-        config.me_avatar = None;
-        config.last_session_url = None;
-        config.clone()
-    };
-    state.save_config(&snapshot).map_err(|error| error.to_string())?;
+    state
+        .update_config(|config| {
+            config.logged_in = false;
+            config.me = None;
+            config.me_avatar = None;
+            config.last_session_url = None;
+        })
+        .map_err(|error| error.to_string())?;
 
     // Drop cached user/project/bug data: it belongs to the session being ended.
     // Best effort — a broken cache must never block logging out.
@@ -640,22 +635,16 @@ pub(crate) fn sidecar_command_path() -> String {
 
 #[tauri::command]
 pub fn reset_onboarding(state: State<'_, SharedState>) -> Result<(), String> {
-    let snapshot = {
-        let mut config = state.config.lock().expect("config lock");
-        config.onboarded = false;
-        config.clone()
-    };
-    state.save_config(&snapshot).map_err(|error| error.to_string())
+    state
+        .update_config(|config| config.onboarded = false)
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
 pub fn complete_onboarding(state: State<'_, SharedState>) -> Result<(), String> {
-    let snapshot = {
-        let mut config = state.config.lock().expect("config lock");
-        config.onboarded = true;
-        config.clone()
-    };
-    state.save_config(&snapshot).map_err(|error| error.to_string())
+    state
+        .update_config(|config| config.onboarded = true)
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -669,12 +658,9 @@ pub fn mcp_policy_set(
     policy: McpPolicy,
 ) -> Result<McpPolicy, String> {
     let policy = policy.normalized();
-    let snapshot = {
-        let mut config = state.config.lock().expect("config lock");
-        config.mcp_policy = policy.clone();
-        config.clone()
-    };
-    state.save_config(&snapshot).map_err(|error| error.to_string())?;
+    state
+        .update_config(|config| config.mcp_policy = policy.clone())
+        .map_err(|error| error.to_string())?;
     Ok(policy)
 }
 
@@ -809,15 +795,14 @@ pub fn set_current_user(
     state: State<'_, SharedState>,
     nick: String,
 ) -> Result<(), String> {
-    let snapshot = {
-        let mut config = state.config.lock().expect("config lock");
-        let trimmed = nick.trim();
-        if !trimmed.is_empty() {
-            config.me = Some(trimmed.to_string());
-        }
-        config.clone()
-    };
-    state.save_config(&snapshot).map_err(|error| error.to_string())
+    state
+        .update_config(|config| {
+            let trimmed = nick.trim();
+            if !trimmed.is_empty() {
+                config.me = Some(trimmed.to_string());
+            }
+        })
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -832,12 +817,9 @@ pub fn set_hidden_workspaces(
             normalized.push(id);
         }
     }
-    let snapshot = {
-        let mut config = state.config.lock().expect("config lock");
-        config.hidden_workspace_ids = normalized;
-        config.clone()
-    };
-    state.save_config(&snapshot).map_err(|error| error.to_string())
+    state
+        .update_config(|config| config.hidden_workspace_ids = normalized)
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -845,12 +827,9 @@ pub fn set_last_workspace(
     state: State<'_, SharedState>,
     workspace_id: String,
 ) -> Result<(), String> {
-    let snapshot = {
-        let mut config = state.config.lock().expect("config lock");
-        config.last_workspace_id = Some(workspace_id);
-        config.clone()
-    };
-    state.save_config(&snapshot).map_err(|error| error.to_string())
+    state
+        .update_config(|config| config.last_workspace_id = Some(workspace_id))
+        .map_err(|error| error.to_string())
 }
 
 pub(crate) async fn session_request_json(
@@ -1185,13 +1164,10 @@ pub fn set_open_target(
     id: String,
 ) -> Result<(), String> {
     let kind = open_with::normalize_kind(&kind).to_string();
-    let snapshot = {
-        let mut config = state.config.lock().expect("config lock");
-        config.open_with.insert(kind, id);
-        config.clone()
-    };
     state
-        .save_config(&snapshot)
+        .update_config(|config| {
+            config.open_with.insert(kind, id);
+        })
         .map_err(|error| error.to_string())
 }
 

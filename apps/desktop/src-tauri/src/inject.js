@@ -300,8 +300,6 @@
     lastSwitch: 0,
     lastLinkClick: 0,
     lastRefresh: 0,
-    qrShownAt: 0,
-    sawQr: false,
     sawScan: false,
     badLoginAt: 0,
   };
@@ -489,8 +487,6 @@
     try {
       var qrImg = document.querySelector(".wwLogin_qrcode_img");
       if (isShown(qrImg)) {
-        if (!loginBridge.sawQr) loginBridge.qrShownAt = Date.now();
-        loginBridge.sawQr = true;
         state.qrUrl = absoluteAsset(qrImg.currentSrc || qrImg.src);
         var tip = compactText(document.querySelector(".wwLogin_qrcode_tips_cnt h4"));
         if (tip.indexOf("过期") !== -1) {
@@ -520,13 +516,10 @@
         state.corp = corp || null;
         state.avatarUrl = avatarEl ? sizedAvatar(avatarEl.src) : null;
 
-        // The desktop quick-login panel can appear either before a scan (the
-        // WeCom desktop account) or after one. Only the latter may continue:
-        // a real scan leaves the "扫码成功" tip behind, and a QR that has been
-        // on screen for a while means the user had time to scan.
-        var canContinue =
-          loginBridge.sawScan ||
-          (loginBridge.sawQr && Date.now() - loginBridge.qrShownAt > 10000);
+        // The desktop quick-login panel also appears before any scan (the
+        // desktop WeCom account). Only continue after a real scan, which is
+        // signalled by the "扫码成功" tip; otherwise force the QR view back.
+        var canContinue = loginBridge.sawScan;
 
         if (!canContinue) {
           // WeCom desktop offered its own quick login before any scan. Force
@@ -534,8 +527,6 @@
           state.phase = "loading";
           state.message = "正在加载二维码";
           state.qrUrl = null;
-          loginBridge.sawQr = false;
-          loginBridge.qrShownAt = 0;
           var switcher = quick.querySelector(".wwLogin_quick_switch");
           if (switcher && Date.now() - loginBridge.lastSwitch > 1600) {
             loginBridge.lastSwitch = Date.now();

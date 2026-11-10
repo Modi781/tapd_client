@@ -39,8 +39,19 @@ impl AppState {
         self.config.lock().expect("config lock").clone()
     }
 
-    pub fn save_config(&self, config: &AppConfig) -> std::io::Result<()> {
-        self.config_store.save(config)
+    /// Mutates the config under its lock and persists before releasing it.
+    ///
+    /// Every writer must go through this helper: cloning under the lock and
+    /// saving afterwards lets concurrent writers persist stale snapshots (for
+    /// example flipping `loggedIn` back to false mid-login).
+    pub fn update_config<T>(
+        &self,
+        mutate: impl FnOnce(&mut AppConfig) -> T,
+    ) -> std::io::Result<T> {
+        let mut config = self.config.lock().expect("config lock");
+        let output = mutate(&mut config);
+        self.config_store.save(&config)?;
+        Ok(output)
     }
 
     pub fn runtime_info(&self) -> Option<RuntimeInfo> {

@@ -24,7 +24,7 @@
 - Windows / Linux（架构预留，后续补）。
 - 多 agent 并行、多任务并发（硬性串行）。
 - AI 写 TAPD（评论 / 改状态 / 指派）仅预留接口，默认关闭且 v1 不实现真实写操作。
-- 系统通知、自动更新、云同步、多人协作。
+- 系统通知、云同步、多人协作。（自动更新已在 M9 补齐，改为 GitHub Releases + Tauri updater。）
 - TAPD Open API 通道（按决策只做网页会话；适配器接口保留，后续可加）。
 
 ---
@@ -538,7 +538,7 @@ exporter: "tapd-client/1.0"
 - 多 agent CLI（Claude Code、Codex）与并发队列。
 - 写回 TAPD：修复完成后自动评论、流转状态（带白名单与审批）。
 - 缺陷变更历史时间线与相似缺陷检索（FTS5 / 向量）。
-- 自动更新、团队共享策略模板。
+- 团队共享策略模板。
 
 
 ---
@@ -558,6 +558,7 @@ exporter: "tapd-client/1.0"
 | M6 通知 | ✅ | 可配置范围（我的/项目、新建/转移/重新打开）、顶部胶囊卡片、忽略/查看、处理=改派+接受；「我的」跨项目增量轮询 |
 | M7 Agent | ✅ | Agent tab（运行/审核/历史）、串行队列、server 事件完成/审核、胶囊状态、日志与 Terminal 恢复 |
 | M8 打包 | ✅ | `tapd-mcp` 作为 externalBin 打进 App；`pnpm build:arm64` 本地出 arm64 dmg；`main` 合并进 `release` 后由 GitHub Actions 出 arm64 dmg 与 artifact，tag 额外发 Release。MCP 策略/审计 UI、首启引导、诊断包已补齐 |
+| M9 自动更新 | ✅ | Tauri updater + GitHub Releases（`latest.json`）；启动后检查、每小时轮询并持久化检查时间；标题栏更新图标 hover 展示日志；主窗口/账户页查看更新说明；更新时隐藏主窗口、胶囊 4 倍显示下载/解包进度；失败可手动下载或取消返回；`scripts/release.sh` 统一版本、日志、合并 `release` 与打 tag |
 
 ### 与计划的偏差
 

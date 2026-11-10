@@ -82,7 +82,7 @@ export const DEFAULT_NOTIFICATION_SETTINGS: NotificationSettings = {
   enabled: true,
   scope: "mine",
   includeNew: true,
-  includeTransferred: false,
+  includeTransferred: true,
   includeReopened: true,
   pollIntervalSecs: 60,
   quietHours: { enabled: false, start: "22:00", end: "09:00" },

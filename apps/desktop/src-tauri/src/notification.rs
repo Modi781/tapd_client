@@ -144,7 +144,7 @@ impl Default for NotificationSettings {
             enabled: true,
             scope: NotificationScope::Mine,
             include_new: true,
-            include_transferred: false,
+            include_transferred: true,
             include_reopened: true,
             poll_interval_secs: 60,
             quiet_hours: QuietHours::default(),
@@ -769,12 +769,10 @@ impl NotificationService {
             .to_string();
 
         if !nick.is_empty() && cached.as_deref() != Some(nick.as_str()) {
-            let snapshot = {
-                let mut config = self.state.config.lock().expect("config lock");
-                config.me = Some(nick.clone());
-                config.clone()
-            };
-            if let Err(error) = self.state.save_config(&snapshot) {
+            let persisted = self
+                .state
+                .update_config(|config| config.me = Some(nick.clone()));
+            if let Err(error) = persisted {
                 tracing::warn!(%error, "failed to persist current user");
             }
         }
@@ -1156,6 +1154,35 @@ static LAST_SET_POSITION: Mutex<(i32, i32)> = Mutex::new((0, 0));
 static ANIMATING_UNTIL: AtomicU64 = AtomicU64::new(0);
 /// Debounce token for persisting a user drag.
 static MOVE_SEQ: AtomicU64 = AtomicU64::new(0);
+/// While an update owns the capsule, ordinary notification layouts must not
+/// resize it back to pill/card size.
+static UPDATE_MODE: AtomicBool = AtomicBool::new(false);
+/// The update panel is the collapsed capsule at 4x.
+const UPDATE_WIDTH: f64 = PILL_WIDTH * 4.0;
+const UPDATE_HEIGHT: f64 = PILL_HEIGHT * 4.0;
+
+/// Enters/leaves the update-owned capsule. Call `refresh_island_layout`
+/// afterwards to apply the matching size.
+pub fn set_update_mode(active: bool) {
+    UPDATE_MODE.store(active, Ordering::SeqCst);
+}
+
+/// Re-applies the correct island layout: 4x update panel while an update owns
+/// the screen, otherwise the notification pill/cards.
+pub fn refresh_island_layout(app: &AppHandle, state: &SharedState) {
+    if UPDATE_MODE.load(Ordering::SeqCst) {
+        apply_island_sized(app, state, UPDATE_WIDTH, UPDATE_HEIGHT, true, 0, true);
+        return;
+    }
+
+    let (expanded, count) = service()
+        .map(|service| {
+            let (items, _quiet) = service.pending_payload();
+            (!items.is_empty(), items.len())
+        })
+        .unwrap_or((false, 0));
+    apply_island(app, state, expanded, count, true);
+}
 
 fn ensure_window(app: &AppHandle, state: &SharedState) -> Result<WebviewWindow, String> {
     if let Some(window) = app.get_webview_window(WINDOW_LABEL) {
@@ -1218,12 +1245,9 @@ fn ensure_window(app: &AppHandle, state: &SharedState) -> Result<WebviewWindow, 
                         return;
                     };
                     let anchor = (position.x + size.width as i32 / 2, position.y);
-                    let snapshot = {
-                        let mut config = state.config.lock().expect("config lock");
-                        config.island_anchor = Some(anchor);
-                        config.clone()
-                    };
-                    if let Err(error) = state.save_config(&snapshot) {
+                    if let Err(error) =
+                        state.update_config(|config| config.island_anchor = Some(anchor))
+                    {
                         tracing::warn!(%error, "failed to persist island position");
                     }
                 });
@@ -1353,7 +1377,24 @@ fn apply_island(
     count: usize,
     animated: bool,
 ) {
+    // An update owns the capsule: polling, notification expansion and user
+    // clicks must not shrink it back.
+    if UPDATE_MODE.load(Ordering::SeqCst) {
+        return;
+    }
     let (width, height) = island_size(expanded, count);
+    apply_island_sized(app, state, width, height, expanded, count, animated);
+}
+
+fn apply_island_sized(
+    app: &AppHandle,
+    state: &SharedState,
+    width: f64,
+    height: f64,
+    expanded: bool,
+    count: usize,
+    animated: bool,
+) {
     let Some((x, y, w, h)) = island_rect(app, state, width, height) else {
         return;
     };
@@ -1408,12 +1449,18 @@ fn apply_island(
             "width": width,
             "height": height,
             "count": count,
+            "mode": if UPDATE_MODE.load(Ordering::SeqCst) { "update" } else { "notifications" },
         }),
     );
 }
 
 /// Brings the main window to the front (capsule click without pending items).
 fn focus_main_window(app: &AppHandle) {
+    // While an update owns the screen the main window is deliberately
+    // unreachable; the capsule must stay on the progress/error panel.
+    if crate::update::is_updating() {
+        return;
+    }
     if let Some(main) = app.get_webview_window("main") {
         let _ = main.show();
         let _ = main.unminimize();
@@ -1774,12 +1821,9 @@ async fn resolve_me(
         return Ok(nick);
     }
 
-    let snapshot = {
-        let mut config = state.config.lock().expect("config lock");
-        config.me = Some(nick.clone());
-        config.clone()
-    };
-    state.save_config(&snapshot).map_err(|error| error.to_string())?;
+    state
+        .update_config(|config| config.me = Some(nick.clone()))
+        .map_err(|error| error.to_string())?;
     Ok(nick)
 }
 

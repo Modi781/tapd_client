@@ -36,6 +36,8 @@ pub struct AppConfig {
     pub hidden_workspace_ids: Vec<String>,
     /// Capability boundary enforced for every MCP tool call.
     pub mcp_policy: McpPolicy,
+    /// RFC 3339 time of the last successful update check (GitHub Releases).
+    pub last_update_check_at: Option<String>,
 }
 
 /// Policy for the MCP sidecar bridge. Filters can only narrow access; TAPD's
@@ -120,6 +122,7 @@ impl Default for AppConfig {
             island_anchor: None,
             hidden_workspace_ids: Vec::new(),
             mcp_policy: McpPolicy::default(),
+            last_update_check_at: None,
         }
     }
 }

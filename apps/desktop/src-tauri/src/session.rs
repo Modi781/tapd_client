@@ -191,9 +191,7 @@ pub fn spawn_session_watcher(app: AppHandle, state: SharedState) {
 
             let mut login_changed = false;
             let mut open_login = false;
-            let snapshot = {
-                let mut config = state.config.lock().expect("config lock");
-                let url_changed = config.last_session_url.as_deref() != Some(url_string.as_str());
+            let persisted = state.update_config(|config| {
                 config.last_session_url = Some(url_string.clone());
 
                 // A logout just cleared cookies and is still navigating: don't
@@ -216,18 +214,9 @@ pub fn spawn_session_watcher(app: AppHandle, state: SharedState) {
                 if !suppress_login && !config.logged_in && is_bare_tapd_home(&url_string) {
                     open_login = true;
                 }
-
-                if login_changed || url_changed {
-                    Some(config.clone())
-                } else {
-                    None
-                }
-            };
-
-            if let Some(snapshot) = snapshot {
-                if let Err(error) = state.save_config(&snapshot) {
-                    tracing::warn!(%error, "failed to persist session state");
-                }
+            });
+            if let Err(error) = persisted {
+                tracing::warn!(%error, "failed to persist session state");
             }
 
             if open_login && now_millis() > LOGIN_BOUNCE_UNTIL.load(Ordering::SeqCst) {

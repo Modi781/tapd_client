@@ -14,6 +14,7 @@ mod reset;
 mod server;
 mod session;
 mod state;
+mod update;
 
 use std::sync::Arc;
 
@@ -57,6 +58,7 @@ pub fn run() {
     let setup_state = state.clone();
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(state.clone())
         .invoke_handler(tauri::generate_handler![
             commands::app_info,
@@ -99,6 +101,11 @@ pub fn run() {
             commands::list_dirs,
             commands::open_targets,
             commands::set_open_target,
+            update::update_state,
+            update::update_check,
+            update::update_install,
+            update::update_cancel,
+            update::update_open_manual,
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
@@ -133,6 +140,8 @@ pub fn run() {
 
             notification::init(&handle, state.clone());
             agent::init(&handle, state.clone());
+            // Check GitHub Releases shortly after launch, then hourly.
+            update::init(&handle, state.clone());
             session::spawn_session_watcher(handle, state);
 
             Ok(())
@@ -145,9 +154,13 @@ pub fn run() {
                     RuntimeInfo::clear(&state.paths.runtime_file);
                 }
             }
-            // macOS: clicking the Dock icon brings the hidden main window back.
+            // macOS: clicking the Dock icon brings the hidden main window back,
+            // unless an update owns the screen (then it must stay hidden).
             #[cfg(target_os = "macos")]
             RunEvent::Reopen { .. } => {
+                if update::is_updating() {
+                    return;
+                }
                 if let Some(window) = app.get_webview_window("main") {
                     let _ = window.show();
                     let _ = window.set_focus();
