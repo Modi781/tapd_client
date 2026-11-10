@@ -1,136 +1,390 @@
-import { useState } from "react";
-import { Bug, CheckCircle2, ExternalLink, Loader2, RefreshCw, ShieldCheck } from "lucide-react";
+import { useEffect, useState, type CSSProperties, type ReactNode } from "react";
+import {
+  Bell,
+  Bug,
+  CheckCircle2,
+  Loader2,
+  MessageSquare,
+  Plus,
+  QrCode,
+  RefreshCw,
+  ShieldCheck,
+  Smartphone,
+  Video,
+} from "lucide-react";
 
-import { api, type AppInfo, type SessionStatus } from "../lib/api";
-import { Badge, Button } from "./ui";
+import { api, type AppInfo, type LoginQrState } from "../lib/api";
+import { CodeRain } from "./CodeRain";
 
 type Props = {
   info: AppInfo | null;
-  status: SessionStatus | null;
   onRefresh: () => void;
   onToast: (kind: "ok" | "error", text: string) => void;
 };
 
-export function LoginGate({ info, status, onRefresh, onToast }: Props) {
-  const [busy, setBusy] = useState<string | null>(null);
-  const [nick, setNick] = useState(info?.me ?? "");
+const EMPTY_STATE: LoginQrState = {
+  phase: "loading",
+  qrUrl: null,
+  name: null,
+  avatarUrl: null,
+  corp: null,
+  message: "正在连接隐藏会话窗口",
+};
 
-  const run = async (name: string, action: () => Promise<string>) => {
-    setBusy(name);
+/** Soft floating app glyphs on the brand side. */
+const FLOATING_CHIPS: Array<{
+  icon: ReactNode;
+  position: string;
+  tone: string;
+  delay: string;
+  rotate: string;
+}> = [
+  {
+    icon: <Bug size={18} />,
+    position: "left-[18%] top-[12%]",
+    tone: "text-amber-500",
+    delay: "0s",
+    rotate: "-9deg",
+  },
+  {
+    icon: <Video size={18} />,
+    position: "left-[63%] top-[18%]",
+    tone: "text-sky-500",
+    delay: "1.4s",
+    rotate: "7deg",
+  },
+  {
+    icon: <MessageSquare size={17} />,
+    position: "left-[13%] top-[33%]",
+    tone: "text-emerald-500",
+    delay: "2.6s",
+    rotate: "5deg",
+  },
+  {
+    icon: <Bell size={17} />,
+    position: "left-[8%] top-[49%]",
+    tone: "text-violet-500",
+    delay: "0.8s",
+    rotate: "10deg",
+  },
+  {
+    icon: <QrCode size={18} />,
+    position: "left-[77%] top-[47%]",
+    tone: "text-slate-700",
+    delay: "3.4s",
+    rotate: "-6deg",
+  },
+  {
+    icon: <Plus size={18} />,
+    position: "left-[84%] top-[27%]",
+    tone: "text-cyan-500",
+    delay: "2s",
+    rotate: "12deg",
+  },
+];
+
+function phaseCopy(state: LoginQrState, refreshing: boolean): { title: string; hint: string } {
+  if (refreshing) {
+    return { title: "正在刷新二维码", hint: "马上就好，请稍候" };
+  }
+
+  switch (state.phase) {
+    case "scanned":
+      return {
+        title: "已扫码，正在登录",
+        hint: "正在浏览器中建立 TAPD 会话",
+      };
+    case "expired":
+      return {
+        title: "二维码已过期",
+        hint: "正在自动为你刷新二维码",
+      };
+    case "error":
+      return {
+        title: "登录页暂时不可用",
+        hint: state.message ?? "请重新加载登录页后重试",
+      };
+    case "qr":
+      return {
+        title: "请使用企业微信扫码登录",
+        hint: "扫描后在手机上确认即可",
+      };
+    default:
+      return {
+        title: "正在接入 TAPD 登录",
+        hint: state.message ?? "正在加载企业微信二维码",
+      };
+  }
+}
+
+export function LoginGate({ info, onRefresh, onToast }: Props) {
+  const [state, setState] = useState<LoginQrState>(EMPTY_STATE);
+  const [refreshing, setRefreshing] = useState(false);
+  const [avatarBroken, setAvatarBroken] = useState(false);
+  const avatar = state.avatarUrl;
+  const displayName = state.name?.trim();
+
+  useEffect(() => {
+    setAvatarBroken(false);
+  }, [avatar]);
+
+  useEffect(() => {
+    let alive = true;
+    let timer: number | null = null;
+
+    const poll = async () => {
+      try {
+        const next = await api.loginState();
+        if (!alive) return;
+        setState(next);
+      } catch {
+        // The hidden webview is navigating; keep the last projected state.
+      }
+      if (alive) {
+        timer = window.setTimeout(poll, 900);
+      }
+    };
+
+    void poll();
+
+    return () => {
+      alive = false;
+      if (timer !== null) window.clearTimeout(timer);
+    };
+  }, []);
+
+  const refresh = async () => {
+    if (refreshing) return;
+    setRefreshing(true);
     try {
-      const message = await action();
-      onToast("ok", message);
+      await api.reloadLogin();
     } catch (error) {
       onToast("error", String(error));
     } finally {
-      setBusy(null);
-      onRefresh();
+      window.setTimeout(() => setRefreshing(false), 1400);
     }
   };
 
+  const showQr = !refreshing && state.phase === "qr" && Boolean(state.qrUrl);
+  const showScanned = !refreshing && state.phase === "scanned";
+  const copy = phaseCopy(state, refreshing);
+
   return (
-    <div className="flex h-full items-center justify-center bg-gradient-to-br from-slate-100 via-white to-sky-50 p-6">
-      <div className="w-full max-w-2xl overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-xl">
-        <div className="flex items-center gap-4 border-b border-slate-100 px-7 py-6">
-          <div className="grid h-12 w-12 place-items-center rounded-2xl bg-gradient-to-br from-sky-400 to-emerald-400 text-slate-900 shadow-lg shadow-sky-500/20">
-            <Bug size={26} strokeWidth={2.4} />
-          </div>
-          <div>
-            <h1 className="text-lg font-semibold text-slate-900">TAPD Client</h1>
-            <p className="mt-0.5 text-xs text-slate-500">
-              登录一次，之后在后台保留会话；界面与数据都来自你自己的权限。
-            </p>
-          </div>
-          <Badge tone="blue" className="ml-auto">
-            M0 · 会话桥
-          </Badge>
+    <div className="relative flex h-full overflow-hidden bg-white text-slate-900">
+      {/* macOS traffic lights live over this strip; the whole strip drags. */}
+      <div data-tauri-drag-region className="absolute inset-x-0 top-0 z-30 h-11" />
+
+      {/* Brand pane */}
+      <aside className="relative hidden w-[45%] min-w-[340px] shrink-0 flex-col overflow-hidden border-r border-slate-100 bg-[#f3f6fa] md:flex">
+        <div className="pointer-events-none absolute inset-0">
+          <div className="absolute -left-28 top-8 h-80 w-80 rounded-full bg-sky-200/60 blur-3xl" />
+          <div className="absolute -right-24 bottom-10 h-80 w-80 rounded-full bg-emerald-200/50 blur-3xl" />
+          <div className="login-breathe absolute left-1/2 top-1/3 h-64 w-64 -translate-x-1/2 rounded-full bg-white/80 blur-2xl" />
         </div>
 
-        <div className="space-y-4 px-7 py-6">
-          <div className="rounded-2xl border border-amber-200 bg-amber-50/60 p-4">
-            <div className="text-sm font-semibold text-amber-900">需要先登录 TAPD</div>
-            <p className="mt-1 text-xs leading-6 text-amber-800/80">
-              点击下方按钮打开 TAPD 登录窗口，完成公司账号或 SSO 登录。登录成功后窗口会自动隐藏，只作为后台数据桥使用。
-            </p>
-            <div className="mt-3 flex flex-wrap gap-2">
-              <Button
-                variant="primary"
-                loading={busy === "open"}
-                icon={<ExternalLink size={14} />}
-                onClick={() => void run("open", async () => {
-                  await api.sessionShow();
-                  return "已打开 TAPD 登录窗口";
-                })}
-              >
-                打开登录窗口
-              </Button>
-              <Button
-                variant="secondary"
-                loading={busy === "refresh"}
-                icon={<RefreshCw size={14} />}
-                onClick={() => void run("refresh", async () => {
-                  const status = await api.sessionStatus();
-                  return status.url ? `当前页面：${status.url}` : "会话窗口尚未创建";
-                })}
-              >
-                重新检测
-              </Button>
+        <div className="pointer-events-none absolute inset-0">
+          {FLOATING_CHIPS.map((chip) => (
+            <div
+              key={chip.position}
+              className={`login-float absolute grid h-12 w-12 place-items-center rounded-2xl bg-white/95 shadow-[0_14px_34px_-16px_rgba(15,23,42,0.4)] ring-1 ring-black/5 ${chip.position}`}
+              style={
+                {
+                  animationDelay: chip.delay,
+                  "--rot": chip.rotate,
+                } as CSSProperties
+              }
+            >
+              <span className={chip.tone}>{chip.icon}</span>
+            </div>
+          ))}
+        </div>
+
+        <div className="relative z-10 flex flex-1 items-center justify-center px-10 pt-16">
+          <div className="relative -translate-y-2">
+            <div className="login-breathe absolute -inset-20 rounded-full bg-sky-100/50 blur-2xl" />
+            <div className="relative -rotate-3 rounded-[26px] bg-[#0b1220] px-7 py-4 shadow-[0_24px_50px_-24px_rgba(2,6,23,0.65)]">
+              <span className="absolute -left-4 top-2 font-serif text-4xl leading-none text-[#0b1220]">
+                “
+              </span>
+              <span className="relative text-[22px] font-semibold tracking-tight text-white">
+                Hello!
+              </span>
+              <span className="absolute -bottom-3 -right-4 font-serif text-4xl leading-none text-[#0b1220]">
+                ”
+              </span>
+            </div>
+            <div className="mt-8 flex items-center justify-center gap-2 text-[11px] text-slate-400">
+              <span className="h-1 w-1 rounded-full bg-slate-300" />
+              让缺陷、需求与研发进度保持同步
+              <span className="h-1 w-1 rounded-full bg-slate-300" />
             </div>
           </div>
+        </div>
 
-          <div className="grid gap-3 sm:grid-cols-2">
-            <div className="rounded-xl border border-slate-100 bg-slate-50/70 p-3">
-              <div className="text-[10px] uppercase tracking-wide text-slate-400">会话窗口</div>
-              <div className="mt-1 text-sm text-slate-700">
-                {status?.exists ? (status.visible ? "显示中" : "已隐藏（后台桥）") : "未创建"}
+        <div className="relative z-10 px-10 pb-10">
+          <div className="flex items-center gap-3">
+            <div className="grid h-11 w-11 place-items-center rounded-2xl bg-gradient-to-br from-sky-400 to-emerald-400 text-slate-900 shadow-lg shadow-sky-500/20">
+              <Bug size={22} strokeWidth={2.3} />
+            </div>
+            <div>
+              <div className="text-[17px] font-semibold tracking-tight text-slate-900">
+                欢迎来到 TAPD 客户端
+              </div>
+              <div className="mt-0.5 text-[11px] text-slate-500">
+                一站式查看项目、缺陷与 AI Agent 工作流
               </div>
             </div>
-            <div className="rounded-xl border border-slate-100 bg-slate-50/70 p-3">
-              <div className="text-[10px] uppercase tracking-wide text-slate-400">当前地址</div>
-              <div className="mt-1 truncate font-mono text-[11px] text-slate-600" title={status?.url ?? ""}>
-                {status?.url || info?.sessionUrl || "—"}
+          </div>
+        </div>
+      </aside>
+
+      {/* Login pane */}
+      <section className="relative flex min-w-0 flex-1 overflow-y-auto px-6 pb-6 pt-12">
+        <div className="m-auto w-full max-w-[394px]">
+          <header className="text-center">
+            <h1 className="text-[26px] font-semibold tracking-tight text-slate-900">
+              TAPD 桌面端
+            </h1>
+            <p className="mt-2 text-[13px] text-slate-500">
+              使用企业微信扫码，登录态只保存在本机
+            </p>
+          </header>
+
+          <div className="relative mt-6 flex justify-center">
+            <div className="absolute -inset-5 rounded-[36px] bg-gradient-to-br from-sky-100/80 via-white to-emerald-50/80 blur-xl" />
+
+            <div className="relative rounded-[28px] bg-gradient-to-br from-sky-200/80 via-white to-emerald-100/80 p-[1.5px] shadow-[0_28px_70px_-34px_rgba(2,132,199,0.6)]">
+              <div className="rounded-[26.5px] bg-white p-3">
+                <div className="relative aspect-square w-[clamp(190px,30vh,248px)] overflow-hidden rounded-[18px] bg-[#06111c] ring-1 ring-slate-900/5">
+                  {showQr ? (
+                    <img
+                      key={state.qrUrl ?? "qr"}
+                      src={state.qrUrl ?? ""}
+                      alt="企业微信登录二维码"
+                      draggable={false}
+                      className="h-full w-full select-none object-contain bg-white p-1.5"
+                    />
+                  ) : showScanned ? (
+                    <div className="flex h-full flex-col items-center justify-center gap-4 bg-white px-5 text-center">
+                      <div className="relative">
+                        <div className="absolute -inset-2 animate-ping rounded-full bg-sky-200/50" />
+                        {avatar && !avatarBroken ? (
+                          <img
+                            src={avatar}
+                            alt={displayName ?? "扫码用户"}
+                            draggable={false}
+                            onError={() => setAvatarBroken(true)}
+                            className="relative h-[68px] w-[68px] rounded-full object-cover shadow-lg ring-4 ring-white"
+                          />
+                        ) : (
+                          <div className="relative grid h-[68px] w-[68px] place-items-center rounded-full bg-sky-50 text-sky-500 ring-4 ring-white shadow">
+                            <CheckCircle2 size={30} />
+                          </div>
+                        )}
+                      </div>
+                      <div>
+                        <div className="truncate text-[15px] font-semibold text-slate-900">
+                          {displayName || "扫码成功"}
+                        </div>
+                        {state.corp ? (
+                          <div className="mt-0.5 truncate text-[11px] text-slate-400">
+                            {state.corp}
+                          </div>
+                        ) : null}
+                      </div>
+                      <div className="flex items-center gap-1.5 text-[11px] font-medium text-sky-600">
+                        <Loader2 size={13} className="animate-spin" />
+                        正在完成登录…
+                      </div>
+                    </div>
+                  ) : (
+                    <>
+                      <CodeRain className="absolute inset-0 h-full w-full" active />
+                      <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_50%_38%,transparent_18%,rgba(2,8,16,0.62)_100%)]" />
+                      <div className="pointer-events-none absolute inset-0 grid place-items-center px-5">
+                        <div className="rounded-2xl border border-sky-300/15 bg-black/30 px-4 py-3 text-center backdrop-blur-sm">
+                          <div className="flex items-center justify-center gap-1.5 text-[11.5px] font-medium text-sky-100">
+                            <Loader2 size={12} className="animate-spin" />
+                            {copy.title}
+                          </div>
+                          <div className="mt-1 font-mono text-[9px] uppercase tracking-[0.16em] text-sky-200/45">
+                            securing session
+                          </div>
+                        </div>
+                      </div>
+                    </>
+                  )}
+                </div>
               </div>
             </div>
-          </div>
 
-          <div className="rounded-xl border border-slate-100 p-4">
-            <div className="flex items-center gap-2 text-xs font-medium text-slate-700">
-              <ShieldCheck size={14} className="text-emerald-500" />
-              登录态自动识别
-            </div>
-            <p className="mt-1 text-[11px] leading-5 text-slate-500">
-              页面进入 <span className="font-mono">/tapd_fe/&lt;项目&gt;/</span> 后会自动标记登录。若识别失败，可填写昵称并手动确认。
-            </p>
-            <div className="mt-3 flex flex-wrap items-end gap-2">
-              <label className="text-[11px] text-slate-500">
-                我的 TAPD 昵称（可选）
-                <input
-                  value={nick}
-                  onChange={(event) => setNick(event.target.value)}
-                  placeholder="例如：郭俊宏"
-                  className="mt-1 block w-52 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-sm text-slate-800 outline-none focus:border-sky-400 focus:ring-2 focus:ring-sky-100"
-                />
-              </label>
-              <Button
-                variant="secondary"
-                loading={busy === "mark"}
-                icon={<CheckCircle2 size={14} />}
-                onClick={() => void run("mark", async () => {
-                  await api.markLoggedIn(nick.trim() || undefined);
-                  return "已标记登录成功";
-                })}
-              >
-                已完成登录
-              </Button>
-              {busy === "mark" ? <Loader2 size={14} className="animate-spin text-slate-400" /> : null}
+            <div className="absolute -bottom-3 right-4 flex items-center gap-1 rounded-full border border-slate-200 bg-white px-2.5 py-1 text-[10px] font-medium text-slate-500 shadow-sm">
+              <QrCode size={11} className="text-sky-500" />
+              企业微信
             </div>
           </div>
-        </div>
 
-        <div className="border-t border-slate-100 bg-slate-50/60 px-7 py-3 text-[11px] text-slate-400">
-          数据只在本机处理；Cookie 不出 WebView，请求日志不记录 Cookie。
+          <div className="mt-5 text-center">
+            <div className="flex items-center justify-center gap-1.5 text-[13.5px] font-medium text-slate-700">
+              {state.phase === "error" ? (
+                <ShieldCheck size={14} className="text-rose-400" />
+              ) : state.phase === "scanned" ? (
+                <CheckCircle2 size={14} className="text-emerald-500" />
+              ) : (
+                <Smartphone size={14} className="text-sky-500" />
+              )}
+              {copy.title}
+            </div>
+            <div className="mt-1 text-[11px] text-slate-400">{copy.hint}</div>
+          </div>
+
+          <div className="mt-4 rounded-2xl bg-slate-50/90 px-5 py-3.5 ring-1 ring-slate-100">
+            <ol className="space-y-1.5 text-[12.5px] leading-6 text-slate-600">
+              <li className="flex gap-2">
+                <span className="w-3 shrink-0 text-slate-400">1.</span>
+                打开手机「企业微信」，扫描上方二维码
+              </li>
+              <li className="flex gap-2">
+                <span className="w-3 shrink-0 text-slate-400">2.</span>
+                在手机上确认登录
+              </li>
+              <li className="flex gap-2">
+                <span className="w-3 shrink-0 text-slate-400">3.</span>
+                登录完成后自动进入客户端
+              </li>
+            </ol>
+          </div>
+
+          <div className="mt-4 flex items-center justify-center gap-4 text-[11px]">
+            <button
+              type="button"
+              onClick={() => void refresh()}
+              disabled={refreshing}
+              className="inline-flex items-center gap-1 font-medium text-sky-600 transition hover:text-sky-700 disabled:opacity-50"
+            >
+              <RefreshCw size={12} className={refreshing ? "animate-spin" : undefined} />
+              刷新二维码
+            </button>
+            <span className="h-3 w-px bg-slate-200" />
+            <button
+              type="button"
+              onClick={onRefresh}
+              className="text-slate-400 transition hover:text-slate-600"
+            >
+              重新检测登录状态
+            </button>
+          </div>
+
+          <div className="mt-6 flex items-center justify-center gap-2 text-[10px] text-slate-300">
+            <span className="h-px w-8 bg-slate-200" />
+            V{info?.version ?? "0.1.0"}
+            <span className="h-px w-8 bg-slate-200" />
+          </div>
+          <p className="mt-2 text-center text-[10px] leading-5 text-slate-400">
+            Cookie 仅保存在本机隐藏 WebView 中，不会上传到任何服务器
+          </p>
         </div>
-      </div>
+      </section>
     </div>
   );
 }

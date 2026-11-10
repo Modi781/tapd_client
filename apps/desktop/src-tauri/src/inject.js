@@ -275,6 +275,346 @@
     window.XMLHttpRequest = WrappedXHR;
   }
 
+  /* ------------------------------------------------------------------
+   * Login page bridge
+   *
+   * The desktop login screen does not open a separate window. Instead it
+   * mirrors the QR code of the hidden TAPD login page:
+   *
+   *  - the tapd.cn frame activates the "企业微信登录" tab;
+   *  - the login.work.weixin.qq.com iframe publishes the QR image, the
+   *    scanned user and the expired state to the top frame;
+   *  - after a scan, the WeCom panel offers "在企业微信桌面端打开" and
+   *    "继续在浏览器中登录访问". We always pick the browser so the login
+   *    finishes in the hidden webview instead of handing off to the app.
+   *
+   * Only UI state (QR URL, public avatar URL, name) crosses frames; the
+   * session cookies never leave the webview.
+   * ------------------------------------------------------------------ */
+
+  var wecomHost = /(^|\.)work\.weixin\.qq\.com$/i.test(window.location.hostname);
+  var tapdHost = isTapdHost(window.location.hostname);
+
+  var loginBridge = {
+    lastTabClick: 0,
+    lastSwitch: 0,
+    lastLinkClick: 0,
+    lastRefresh: 0,
+    qrShownAt: 0,
+    sawQr: false,
+  };
+
+  function compactText(node) {
+    return String((node && node.textContent) || "")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  function isShown(node) {
+    if (!node) return false;
+    var rect = node.getBoundingClientRect();
+    if (rect.width <= 1 || rect.height <= 1) return false;
+    var style = window.getComputedStyle(node);
+    return style.display !== "none" && style.visibility !== "hidden" && style.opacity !== "0";
+  }
+
+  function absoluteAsset(raw) {
+    try {
+      var resolved = new URL(String(raw || ""), window.location.href).href;
+      // The main window renders these images directly; avoid mixed content.
+      return resolved.indexOf("http://") === 0
+        ? "https://" + resolved.slice("http://".length)
+        : resolved;
+    } catch (_) {
+      return "";
+    }
+  }
+
+  function isAuthPath(raw) {
+    var lower = String(raw || "").toLowerCase();
+    return (
+      lower.indexOf("/login") !== -1 ||
+      lower.indexOf("/signin") !== -1 ||
+      lower.indexOf("cloud_logins") !== -1 ||
+      lower.indexOf("/register") !== -1
+    );
+  }
+
+  function publishLogin(state) {
+    state = state || {};
+    state.at = Date.now();
+    if (isTopFrame) {
+      window.__TAPDCB_LOGIN__ = state;
+      return;
+    }
+    try {
+      window.top.postMessage({ __tapdcb: "login", state: state }, "*");
+    } catch (_) {
+      /* cross-origin top: ignore */
+    }
+  }
+
+  var loadingLoginState = {
+    phase: "loading",
+    qrUrl: null,
+    name: null,
+    avatarUrl: null,
+    corp: null,
+    message: "正在准备登录页",
+    host: "",
+    at: 0,
+  };
+
+  function scanTopLoginPage() {
+    if (!isTopFrame || !tapdHost) return;
+    if (!isAuthPath(window.location.href)) return;
+
+    var tab = document.querySelector(".login-tab-qy");
+    if (!tab) {
+      var form = document.querySelector("#login_cn_form, .login-form");
+      if (!form) {
+        // The WeCom/OAuth callback page is not the login form; a login is
+        // already in flight and will land on the workspace shortly.
+        publishLogin({
+          phase: "loading",
+          qrUrl: null,
+          name: null,
+          avatarUrl: null,
+          corp: null,
+          message: "正在完成登录",
+          host: "tapd.cn",
+        });
+        return;
+      }
+      publishLogin({
+        phase: "error",
+        qrUrl: null,
+        name: null,
+        avatarUrl: null,
+        corp: null,
+        message: "当前登录页未提供企业微信扫码登录",
+        host: "tapd.cn",
+      });
+      return;
+    }
+
+    var container = document.querySelector("#ww-login-container");
+    var hasPanel = !!(container && container.children.length > 0);
+
+    if (!hasPanel) {
+      publishLogin({
+        phase: "loading",
+        qrUrl: null,
+        name: null,
+        avatarUrl: null,
+        corp: null,
+        message: "正在准备企业微信二维码",
+        host: "tapd.cn",
+      });
+      if (Date.now() - loginBridge.lastTabClick > 1800) {
+        loginBridge.lastTabClick = Date.now();
+        try {
+          tab.click();
+        } catch (_) {
+          /* ignore */
+        }
+      }
+      return;
+    }
+
+    var current = window.__TAPDCB_LOGIN__;
+    var iframeFresh =
+      current &&
+      current.host === "work.weixin.qq.com" &&
+      Date.now() - (current.at || 0) < 20000;
+
+    if (!iframeFresh) {
+      publishLogin({
+        phase: "loading",
+        qrUrl: null,
+        name: null,
+        avatarUrl: null,
+        corp: null,
+        message: "正在加载企业微信二维码",
+        host: "tapd.cn",
+      });
+    }
+  }
+
+  function scanWecomPanel() {
+    if (!wecomHost) return;
+    // Only the frame that actually hosts the panel publishes state.
+    if (!document.querySelector(".wwLogin_box, .wwLogin_qrcode, .wwLogin_quick_confirm")) {
+      return;
+    }
+
+    var state = {
+      phase: "loading",
+      qrUrl: null,
+      name: null,
+      avatarUrl: null,
+      corp: null,
+      message: "正在等待二维码",
+      host: "work.weixin.qq.com",
+    };
+
+    try {
+      var qrImg = document.querySelector(".wwLogin_qrcode_img");
+      if (isShown(qrImg)) {
+        if (!loginBridge.sawQr) loginBridge.qrShownAt = Date.now();
+        loginBridge.sawQr = true;
+        state.qrUrl = absoluteAsset(qrImg.currentSrc || qrImg.src);
+        var tip = compactText(document.querySelector(".wwLogin_qrcode_tips_cnt h4"));
+        if (tip.indexOf("过期") !== -1) {
+          state.phase = "expired";
+          state.message = "二维码已过期";
+        } else if (tip.indexOf("成功") !== -1 || tip.indexOf("确认") !== -1) {
+          state.phase = "scanned";
+          state.message = tip || "扫码成功，请在手机上确认";
+        } else {
+          state.phase = "qr";
+          state.message = null;
+        }
+      }
+
+      var quick = document.querySelector(".wwLogin_quick_confirm");
+      if (isShown(quick)) {
+        var nameEl = quick.querySelector(".wwLogin_quick_name");
+        var corpEl = nameEl ? nameEl.querySelector(".wwLogin_quick_name_orange") : null;
+        var corp = corpEl ? compactText(corpEl).replace(/^@/, "") : "";
+        var name = compactText(nameEl);
+        if (corp) name = name.replace("@" + corp, "").trim();
+        if (name.indexOf("@") !== -1) name = name.split("@")[0].trim();
+
+        var avatarEl = quick.querySelector(".wwLogin_quick_userAvatar");
+        state.name = name || null;
+        state.corp = corp || null;
+        state.avatarUrl = avatarEl ? absoluteAsset(avatarEl.src) : null;
+
+        if (!loginBridge.sawQr) {
+          // WeCom desktop is running and offered its own quick login before
+          // any QR was displayed. Force the QR view so the user scans.
+          state.phase = "loading";
+          state.message = "正在加载二维码";
+          state.qrUrl = null;
+          var switcher = quick.querySelector(".wwLogin_quick_switch");
+          if (switcher && Date.now() - loginBridge.lastSwitch > 1600) {
+            loginBridge.lastSwitch = Date.now();
+            try {
+              switcher.click();
+            } catch (_) {
+              /* ignore */
+            }
+          }
+        } else {
+          state.phase = "scanned";
+          state.message = "已扫码，正在浏览器中完成登录";
+          var browserLink = quick.querySelector("a.wwLogin_quick_open_wecom");
+          if (
+            browserLink &&
+            /浏览器/.test(compactText(browserLink)) &&
+            Date.now() - loginBridge.qrShownAt > 2500 &&
+            Date.now() - loginBridge.lastLinkClick > 3500
+          ) {
+            loginBridge.lastLinkClick = Date.now();
+            // Never hand off to the installed WeCom desktop app.
+            window.setTimeout(function () {
+              try {
+                browserLink.click();
+              } catch (_) {
+                /* ignore */
+              }
+            }, 800);
+          }
+        }
+      }
+
+      if (state.phase === "expired") {
+        var refresh = document.querySelector(".wwLogin_qrcode_tips_cnt a");
+        if (refresh && Date.now() - loginBridge.lastRefresh > 2500) {
+          loginBridge.lastRefresh = Date.now();
+          try {
+            refresh.click();
+          } catch (_) {
+            /* ignore */
+          }
+        }
+      }
+    } catch (_) {
+      /* transient DOM state while Vue re-renders: report loading next tick */
+    }
+
+    publishLogin(state);
+  }
+
+  function refreshLogin() {
+    if (!isTopFrame || !tapdHost) return false;
+
+    var container = document.querySelector("#ww-login-container");
+    var frame = container ? container.querySelector("iframe") : null;
+    if (frame && frame.contentWindow) {
+      try {
+        frame.contentWindow.postMessage({ __tapdcb: "cmd", cmd: "refreshQr" }, "*");
+        return true;
+      } catch (_) {
+        /* fall through to a tab click */
+      }
+    }
+
+    var tab = document.querySelector(".login-tab-qy");
+    if (tab) {
+      loginBridge.lastTabClick = 0;
+      try {
+        tab.click();
+      } catch (_) {
+        /* ignore */
+      }
+      return true;
+    }
+    return false;
+  }
+
+  if (isTopFrame) {
+    window.addEventListener("message", function (event) {
+      var data = event.data;
+      if (data && data.__tapdcb === "login" && data.state) {
+        window.__TAPDCB_LOGIN__ = data.state;
+      }
+    });
+    window.setInterval(scanTopLoginPage, 700);
+  }
+
+  if (wecomHost) {
+    window.addEventListener("message", function (event) {
+      var data = event.data;
+      if (!data || data.__tapdcb !== "cmd" || data.cmd !== "refreshQr") return;
+      var refresh = document.querySelector(".wwLogin_qrcode_tips_cnt a");
+      if (refresh) {
+        try {
+          refresh.click();
+          return;
+        } catch (_) {
+          /* ignore */
+        }
+      }
+      var switcher = document.querySelector(".wwLogin_quick_switch");
+      if (switcher) {
+        try {
+          switcher.click();
+          return;
+        } catch (_) {
+          /* ignore */
+        }
+      }
+      try {
+        window.location.reload();
+      } catch (_) {
+        /* ignore */
+      }
+    });
+    window.setInterval(scanWecomPanel, 600);
+  }
+
   var api = {
     version: 1,
 
@@ -301,6 +641,22 @@
       totalBytes = 0;
       seq = 0;
       return true;
+    },
+
+    loginState: function () {
+      var state = window.__TAPDCB_LOGIN__ || loadingLoginState;
+      return {
+        phase: state.phase || "loading",
+        qrUrl: state.qrUrl || null,
+        name: state.name || null,
+        avatarUrl: state.avatarUrl || null,
+        corp: state.corp || null,
+        message: state.message || null,
+      };
+    },
+
+    refreshLogin: function () {
+      return refreshLogin();
     },
 
     request: async function (options) {

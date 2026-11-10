@@ -6,7 +6,7 @@ import {
   KeyRound,
   LogOut,
   RefreshCw,
-  LogIn,
+  RotateCcw,
   ShieldCheck,
   X,
 } from "lucide-react";
@@ -23,7 +23,7 @@ type Props = {
   info: AppInfo | null;
   status: SessionStatus | null;
   context: WorkspaceContext | null;
-  onShowLogin: () => void;
+  onReloadLogin: () => void;
   onLogout: () => void;
   onRefresh: () => void;
   onOpenPath: (path: string) => void;
@@ -38,7 +38,7 @@ export function SettingsPage(props: Props) {
     info,
     status,
     context,
-    onShowLogin,
+    onReloadLogin,
     onLogout,
     onRefresh,
     onOpenPath,
@@ -86,8 +86,13 @@ export function SettingsPage(props: Props) {
         </div>
 
         <div className="mt-3 flex flex-wrap gap-2">
-          <Button size="sm" variant="primary" onClick={onShowLogin} icon={<LogIn size={13} />}>
-            打开 TAPD 窗口
+          <Button
+            size="sm"
+            variant="primary"
+            onClick={onReloadLogin}
+            icon={<RotateCcw size={13} />}
+          >
+            重新加载登录页
           </Button>
           <Button size="sm" variant="danger" onClick={onLogout} icon={<LogOut size={13} />}>
             退出登录并清除数据

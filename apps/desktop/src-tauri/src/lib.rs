@@ -47,6 +47,9 @@ pub fn run() {
             commands::session_status,
             commands::session_show,
             commands::session_hide,
+            commands::session_login_state,
+            commands::session_refresh_qr,
+            commands::session_reload_login,
             commands::session_mark_logged_in,
             commands::session_logout,
             commands::session_ping,
@@ -83,8 +86,9 @@ pub fn run() {
                 }
             });
 
-            let visible = !state.config_snapshot().logged_in;
-            if let Err(error) = session::ensure_session_window(&handle, &state, visible) {
+            // The TAPD webview is a background session holder only. The login
+            // screen mirrors its QR code, so it must never be shown at boot.
+            if let Err(error) = session::ensure_session_window(&handle, &state, false) {
                 tracing::error!(%error, "failed to create TAPD session window");
             }
 

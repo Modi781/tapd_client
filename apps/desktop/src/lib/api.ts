@@ -58,6 +58,16 @@ export type BridgePing = {
   userAgent: string;
 };
 
+/** Login-page state mirrored from the hidden TAPD webview. */
+export type LoginQrState = {
+  phase: "loading" | "qr" | "scanned" | "expired" | "error" | "logged_in";
+  qrUrl: string | null;
+  name: string | null;
+  avatarUrl: string | null;
+  corp: string | null;
+  message: string | null;
+};
+
 export type UserProfile = {
   nick: string;
   userId: string;
@@ -259,6 +269,9 @@ export const api = {
   sessionStatus: () => invoke<SessionStatus>("session_status"),
   sessionShow: () => invoke<void>("session_show"),
   sessionHide: () => invoke<void>("session_hide"),
+  loginState: () => invoke<LoginQrState>("session_login_state"),
+  refreshLoginQr: () => invoke<void>("session_refresh_qr"),
+  reloadLogin: () => invoke<void>("session_reload_login"),
   markLoggedIn: (nick?: string) =>
     invoke<void>("session_mark_logged_in", { nick: nick ?? null }),
   logout: () => invoke<void>("session_logout"),

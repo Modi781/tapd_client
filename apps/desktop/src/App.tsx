@@ -835,7 +835,6 @@ export default function App() {
       <>
         <LoginGate
           info={info}
-          status={status}
           onRefresh={() => void refreshBase()}
           onToast={showToast}
         />
@@ -1127,10 +1126,10 @@ export default function App() {
                   info={info}
                   status={status}
                   context={context}
-                  onShowLogin={() => {
+                  onReloadLogin={() => {
                     void api
-                      .sessionShow()
-                      .then(() => showToast("ok", "已打开 TAPD 窗口"))
+                      .reloadLogin()
+                      .then(() => showToast("ok", "已重新加载登录页"))
                       .catch((error) => showToast("error", String(error)));
                   }}
                   onLogout={handleLogout}

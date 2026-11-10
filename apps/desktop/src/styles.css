@@ -80,3 +80,41 @@ body {
 .island-pill {
   animation: island-pill 160ms ease-out;
 }
+
+/* Login screen: soft floating glyphs and a breathing brand glow. */
+@keyframes login-float {
+  0%,
+  100% {
+    transform: translateY(0) rotate(var(--rot, 0deg));
+  }
+  50% {
+    transform: translateY(-11px) rotate(var(--rot, 0deg));
+  }
+}
+
+.login-float {
+  animation: login-float 9s ease-in-out infinite;
+}
+
+@keyframes login-breathe {
+  0%,
+  100% {
+    opacity: 0.55;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.95;
+    transform: scale(1.07);
+  }
+}
+
+.login-breathe {
+  animation: login-breathe 7s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .login-float,
+  .login-breathe {
+    animation: none;
+  }
+}

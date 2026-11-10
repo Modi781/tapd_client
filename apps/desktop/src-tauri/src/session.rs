@@ -170,7 +170,6 @@ pub fn spawn_session_watcher(app: AppHandle, state: SharedState) {
             let auth_page = looks_like_auth_page(&url_string);
 
             let mut login_changed = false;
-            let mut show_window = false;
             let snapshot = {
                 let mut config = state.config.lock().expect("config lock");
                 config.last_session_url = Some(url_string.clone());
@@ -184,9 +183,10 @@ pub fn spawn_session_watcher(app: AppHandle, state: SharedState) {
                     login_changed = true;
                 } else if !logged_in && config.logged_in && auth_page {
                     // The session expired and TAPD bounced us to the login page.
+                    // The login screen picks it up from the hidden webview; the
+                    // window itself must never pop up on its own.
                     config.logged_in = false;
                     login_changed = true;
-                    show_window = true;
                 }
 
                 if login_changed {
@@ -203,12 +203,9 @@ pub fn spawn_session_watcher(app: AppHandle, state: SharedState) {
             }
 
             if login_changed {
-                if show_window {
-                    let _ = window.show();
-                    let _ = window.set_focus();
-                } else {
-                    let _ = window.hide();
-                }
+                // The background window never pops up on its own: the login
+                // screen mirrors the QR code and the successful login hides it.
+                let _ = window.hide();
                 let _ = app.emit("session://changed", ());
             }
 
@@ -246,6 +243,18 @@ pub async fn eval_sync_json(
     }
 
     Err(last_error)
+}
+
+/// Evaluates a synchronous expression exactly once.
+///
+/// Polling callers (the login screen) would otherwise stall for the full
+/// timeout on every retry while the page is navigating.
+pub async fn eval_sync_json_once(
+    window: &WebviewWindow,
+    expression: &str,
+    timeout: Duration,
+) -> Result<serde_json::Value, String> {
+    eval_sync_once(window, expression, timeout).await
 }
 
 async fn eval_sync_once(

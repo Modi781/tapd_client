@@ -60,6 +60,60 @@ pub struct SessionStatus {
     logged_in: bool,
 }
 
+/// What the hidden TAPD webview is currently showing on its login page.
+///
+/// The login screen mirrors this state directly, so the QR code and the
+/// WeCom "scanned" confirmation are rendered in-app without a second window.
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct LoginQrState {
+    /// `loading` | `qr` | `scanned` | `expired` | `error` | `logged_in`.
+    phase: String,
+    qr_url: Option<String>,
+    name: Option<String>,
+    avatar_url: Option<String>,
+    corp: Option<String>,
+    message: Option<String>,
+}
+
+impl LoginQrState {
+    fn loading(message: &str) -> Self {
+        Self {
+            phase: "loading".to_string(),
+            qr_url: None,
+            name: None,
+            avatar_url: None,
+            corp: None,
+            message: Some(message.to_string()),
+        }
+    }
+
+    fn from_bridge(value: Value) -> Self {
+        let text = |key: &str| {
+            value
+                .get(key)
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|item| !item.is_empty())
+                .map(str::to_string)
+        };
+
+        let mut phase = text("phase").unwrap_or_else(|| "loading".to_string());
+        if phase == "idle" || phase == "connecting" {
+            phase = "loading".to_string();
+        }
+
+        Self {
+            phase,
+            qr_url: text("qrUrl"),
+            name: text("name"),
+            avatar_url: text("avatarUrl"),
+            corp: text("corp"),
+            message: text("message"),
+        }
+    }
+}
+
 #[tauri::command]
 pub fn app_info(state: State<'_, SharedState>) -> AppInfo {
     let config = state.config_snapshot();
@@ -113,6 +167,74 @@ pub fn session_hide(app: AppHandle) -> Result<(), String> {
         let _ = window.hide();
     }
     Ok(())
+}
+
+/// Reads the login page state that the injected bridge publishes.
+#[tauri::command]
+pub async fn session_login_state(
+    app: AppHandle,
+    state: State<'_, SharedState>,
+) -> Result<LoginQrState, String> {
+    let logged_in = {
+        let config = state.config.lock().expect("config lock");
+        config.logged_in
+    };
+
+    if logged_in {
+        return Ok(LoginQrState {
+            phase: "logged_in".to_string(),
+            qr_url: None,
+            name: None,
+            avatar_url: None,
+            corp: None,
+            message: None,
+        });
+    }
+
+    let Some(window) = app.get_webview_window(session::SESSION_LABEL) else {
+        return Ok(LoginQrState::loading("正在启动隐藏会话窗口"));
+    };
+
+    let expression = "(window.__TAPDCB__ && typeof window.__TAPDCB__.loginState === 'function') ? window.__TAPDCB__.loginState() : null";
+    let state = match session::eval_sync_json_once(
+        &window,
+        expression,
+        Duration::from_millis(1500),
+    )
+    .await
+    {
+        Ok(Value::Null) => LoginQrState::loading("正在连接 TAPD 登录页"),
+        Ok(value) => LoginQrState::from_bridge(value),
+        Err(_) => LoginQrState::loading("正在等待登录页响应"),
+    };
+    Ok(state)
+}
+
+/// Asks the hidden login page for a fresh QR code.
+#[tauri::command]
+pub async fn session_refresh_qr(app: AppHandle) -> Result<(), String> {
+    let window = app
+        .get_webview_window(session::SESSION_LABEL)
+        .ok_or_else(|| "会话窗口尚未创建".to_string())?;
+
+    session::eval_sync_json_once(
+        &window,
+        "(window.__TAPDCB__ && typeof window.__TAPDCB__.refreshLogin === 'function') ? window.__TAPDCB__.refreshLogin() : false",
+        Duration::from_secs(2),
+    )
+    .await
+    .map(|_| ())
+}
+
+/// Reloads the hidden webview, used when the login page is stuck.
+#[tauri::command]
+pub fn session_reload_login(
+    app: AppHandle,
+    state: State<'_, SharedState>,
+) -> Result<(), String> {
+    let window = session::ensure_session_window(&app, state.inner(), false)?;
+    let url = tauri::Url::parse(session::TAPD_HOME).map_err(|error| error.to_string())?;
+    window.navigate(url).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -195,8 +317,8 @@ pub async fn session_logout(
             if let Ok(home) = tauri::Url::parse(session::TAPD_HOME) {
                 let _ = window_for_reload.navigate(home);
             }
-            let _ = window_for_reload.show();
-            let _ = window_for_reload.set_focus();
+            // Stay hidden: the login screen shows the new QR code in place.
+            let _ = window_for_reload.hide();
             let _ = app_for_emit.emit("session://changed", ());
         });
 
@@ -214,7 +336,7 @@ pub async fn session_ping(
 ) -> Result<BridgePing, String> {
     let window = app
         .get_webview_window(session::SESSION_LABEL)
-        .ok_or_else(|| "会话窗口尚未创建，请先打开登录窗口".to_string())?;
+        .ok_or_else(|| "会话窗口尚未创建，请稍后重试".to_string())?;
 
     let value = session::eval_sync_json(
         &window,
@@ -238,7 +360,7 @@ pub async fn session_http(
 ) -> Result<BridgeHttpResult, String> {
     let window = app
         .get_webview_window(session::SESSION_LABEL)
-        .ok_or_else(|| "会话窗口尚未创建，请先打开登录窗口".to_string())?;
+        .ok_or_else(|| "会话窗口尚未创建，请稍后重试".to_string())?;
 
     let payload = serde_json::json!({
         "method": method,
@@ -601,7 +723,7 @@ pub(crate) async fn session_request_text(
 ) -> Result<BridgeHttpResult, String> {
     let window = app
         .get_webview_window(session::SESSION_LABEL)
-        .ok_or_else(|| "会话窗口尚未创建，请先打开登录窗口".to_string())?;
+        .ok_or_else(|| "会话窗口尚未创建，请稍后重试".to_string())?;
 
     let payload = serde_json::json!({
         "method": method,
