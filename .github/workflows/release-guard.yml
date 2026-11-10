@@ -1,0 +1,25 @@
+name: Release guard
+
+# `release` is a release-only branch: it only accepts merges from `main`.
+# Direct pushes cannot be blocked here, so also enable branch protection in
+# GitHub settings if the team needs it.
+on:
+  pull_request:
+    branches: [release]
+
+permissions:
+  contents: read
+
+jobs:
+  from-main:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Allow merges from main
+        if: github.head_ref == 'main'
+        run: echo "release <- main is allowed"
+
+      - name: Reject other source branches
+        if: github.head_ref != 'main'
+        run: |
+          echo "::error::release 只接受来自 main 的合并；当前来源分支是 '${{ github.head_ref }}'。"
+          exit 1

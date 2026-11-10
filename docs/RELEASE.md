@@ -22,7 +22,7 @@ git tag v0.1.0
 git push origin v0.1.0
 ```
 
-> 若 `main` 上还有未合并的改动，先合并 `main`，不要反过来把 `release` 的提交挑回 `main`。
+> 若 `main` 上还有未合并的改动，先合并 `main`，不要反过来把 `release` 的提交挑回 `main`。仓库里的 `Release guard` workflow 会拒绝非 `main` 来源的 PR 合入 `release`。
 
 ## 2. 本地打包
 
