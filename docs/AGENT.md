@@ -47,7 +47,7 @@
 
 - 文件：`agent-tasks.json`（任务）、`agent-logs/`（TUI 与服务日志）、`agent-events/`（server 事件 JSONL，用于版本适配排障）。
 - 状态：`queued | preparing | running | waiting_review | succeeded | failed | canceled`
-- 「历史」子页：按项目 / 状态 / 关键词筛选执行记录，查看错误、prompt、退出码、日志尾部，并可跳转到关联缺陷。
+- 「历史」子页：按项目 / 状态 / 关键词筛选执行记录，查看错误、prompt、退出码、日志尾部；「打开缺陷」只在右侧详情面板展开/切换该缺陷，不跳转项目缺陷列表。
 - 客户端重启时，遗留的 `preparing/running/waiting_review` 会标记为 failed（“客户端重启”），`queued` 任务继续执行。
 - 取消会先尝试 `POST /session/{id}/abort`，再 kill TUI + server 进程组；开放的其他子进程仍可能残留。
 

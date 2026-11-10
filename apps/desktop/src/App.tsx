@@ -107,6 +107,8 @@ export default function App() {
   const [sidebarWidth, setSidebarWidth] = useState(() => defaultSidebarWidth(1280));
   const [sidebarSized, setSidebarSized] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  /** Temporarily reveals the project list even when the window is too narrow. */
+  const [sidebarPeek, setSidebarPeek] = useState(false);
   const [resizingSidebar, setResizingSidebar] = useState(false);
   /** Set when the user asks for an Agent fix without a configured folder. */
   const [pendingAgent, setPendingAgent] = useState<AgentTarget | null>(null);
@@ -131,12 +133,6 @@ export default function App() {
     setSidebarWidth(defaultSidebarWidth(viewportWidth));
   }, [viewportWidth, sidebarSized]);
 
-  // Never let the sidebar eat the content area on a narrow window.
-  const effectiveSidebarWidth = Math.max(
-    180,
-    Math.min(sidebarCollapsed ? 0 : sidebarWidth, viewportWidth - MIN_CONTENT_WIDTH),
-  );
-
   const [detailOpen, setDetailOpen] = useState(false);
   const [detail, setDetail] = useState<BugDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
@@ -151,20 +147,51 @@ export default function App() {
     Math.min(detailWidth, DETAIL_MAX_WIDTH),
   );
 
+  /** Sidebar width the user chose (or the default), before auto-collapse. */
+  const expandedSidebarWidth = Math.max(
+    MIN_SIDEBAR_WIDTH,
+    Math.min(sidebarWidth, MAX_SIDEBAR_WIDTH),
+  );
+
+  // On narrow windows the project list yields instead of squeezing the bug
+  // list. This is derived state: the list comes back when there is room again.
+  const autoCollapseSidebar =
+    viewportWidth <
+    52 +
+      MIN_SIDEBAR_WIDTH +
+      (detailOpen ? DETAIL_CONTENT_MIN + effectiveDetailWidth : MIN_CONTENT_WIDTH) +
+      LAYOUT_GUTTER;
+  const sidebarHidden = sidebarPeek
+    ? false
+    : sidebarCollapsed || autoCollapseSidebar;
+
+  // Drop the temporary reveal once the window is wide enough again.
+  useEffect(() => {
+    if (!autoCollapseSidebar) setSidebarPeek(false);
+  }, [autoCollapseSidebar]);
+
+  // Never let the sidebar eat the content area on a narrow window.
+  const effectiveSidebarWidth = sidebarHidden
+    ? 0
+    : Math.max(180, Math.min(sidebarWidth, viewportWidth - MIN_CONTENT_WIDTH));
+
   const infoRef = useRef<AppInfo | null>(null);
   infoRef.current = info;
 
   /** Detail pane visibility, readable from stable callbacks. */
   const detailOpenRef = useRef(false);
   detailOpenRef.current = detailOpen;
-  /** Window width needed for sidebar + bug list + detail pane. */
-  const detailMinWidthRef = useRef(0);
-  detailMinWidthRef.current =
-    52 +
-    (sidebarCollapsed ? 0 : effectiveSidebarWidth) +
-    DETAIL_CONTENT_MIN +
-    effectiveDetailWidth +
-    LAYOUT_GUTTER;
+  /** Layout values readable from the stable `loadBugDetail` callback. */
+  const layoutRef = useRef({
+    viewportWidth,
+    sidebarWidth: expandedSidebarWidth,
+    detailWidth: effectiveDetailWidth,
+  });
+  layoutRef.current = {
+    viewportWidth,
+    sidebarWidth: expandedSidebarWidth,
+    detailWidth: effectiveDetailWidth,
+  };
 
   const showToast = useCallback((kind: Toast["kind"], text: string) => {
     setToast({ kind, text });
@@ -174,16 +201,34 @@ export default function App() {
   const detailSeq = useRef(0);
 
   /**
-   * Opens the detail drawer cache-first: an existing snapshot renders
-   * immediately (no skeleton), then the live request refreshes it.
+   * Opens the detail pane cache-first. Opening it does not refresh the list and
+   * does not show the global "updating" indicator — only list refreshes do.
    */
   const loadBugDetail = useCallback((targetWorkspaceId: string, bugId: string) => {
     const seq = ++detailSeq.current;
-    // Codex-style pane: make room first (grow the window leftwards if needed),
-    // then animate the pane in. Already-open panes switch bugs instantly.
+    // Codex-style pane: make room first (collapse the project list on narrow
+    // windows, then grow the window leftwards if needed), then animate in.
     if (!detailOpenRef.current) {
+      const layout = layoutRef.current;
+      const requiredWithSidebar =
+        52 +
+        layout.sidebarWidth +
+        DETAIL_CONTENT_MIN +
+        layout.detailWidth +
+        LAYOUT_GUTTER;
+      const collapseSidebar = layout.viewportWidth < requiredWithSidebar;
+      if (collapseSidebar) {
+        setSidebarCollapsed(true);
+        setSidebarPeek(false);
+      }
+      const required =
+        52 +
+        (collapseSidebar ? 0 : layout.sidebarWidth) +
+        DETAIL_CONTENT_MIN +
+        layout.detailWidth +
+        LAYOUT_GUTTER;
       void api
-        .ensureWindowWidth(detailMinWidthRef.current)
+        .ensureWindowWidth(required)
         .catch(() => 0)
         .finally(() => {
           if (seq === detailSeq.current) setDetailOpen(true);
@@ -193,7 +238,6 @@ export default function App() {
     setDetailError(null);
     setLastExport(null);
     setDetailLoading(true);
-    const done = beginRefresh();
 
     void (async () => {
       let hasCache = false;
@@ -207,10 +251,7 @@ export default function App() {
       } catch {
         // Cache misses are not errors.
       }
-      if (seq !== detailSeq.current) {
-        done();
-        return;
-      }
+      if (seq !== detailSeq.current) return;
       try {
         const next = await api.bugDetail(targetWorkspaceId, bugId);
         if (seq !== detailSeq.current) return;
@@ -222,7 +263,6 @@ export default function App() {
         }
       } finally {
         if (seq === detailSeq.current) setDetailLoading(false);
-        done();
       }
     })();
   }, []);
@@ -384,11 +424,8 @@ export default function App() {
     loadBugDetail(bug.workspaceId, bug.id);
   };
 
-  /** Opens a bug from an agent history row: select its workspace first. */
+  /** Opens/switches the right-side detail pane without leaving the current view. */
   const openBugById = (workspaceId: string, bugId: string) => {
-    setView("bugs");
-    setWorkspaceId(workspaceId);
-    void api.setLastWorkspace(workspaceId);
     loadBugDetail(workspaceId, bugId);
   };
 
@@ -577,7 +614,7 @@ export default function App() {
       // A wider pane may need a wider window; grow leftwards if necessary.
       const required =
         52 +
-        (sidebarCollapsed ? 0 : effectiveSidebarWidth) +
+        effectiveSidebarWidth +
         DETAIL_CONTENT_MIN +
         nextWidth +
         LAYOUT_GUTTER;
@@ -724,7 +761,7 @@ export default function App() {
             "relative flex shrink-0 flex-col overflow-hidden",
             !resizingSidebar && "transition-[width] duration-200 ease-out",
           )}
-          style={{ width: sidebarCollapsed ? 0 : effectiveSidebarWidth }}
+          style={{ width: effectiveSidebarWidth }}
         >
           <div className="flex min-h-0 flex-1 flex-col px-2 pb-2">
             <div
@@ -820,12 +857,23 @@ export default function App() {
           <header className="flex h-12 shrink-0 items-center gap-1.5 px-2" data-tauri-drag-region>
             <button
               type="button"
-              aria-label={sidebarCollapsed ? "展开项目列表" : "收起项目列表"}
-              title={sidebarCollapsed ? "展开项目列表" : "收起项目列表"}
-              onClick={() => setSidebarCollapsed((current) => !current)}
+              aria-label={sidebarHidden ? "展开项目列表" : "收起项目列表"}
+              title={
+                autoCollapseSidebar
+                  ? sidebarPeek
+                    ? "收起项目列表"
+                    : "展开项目列表（窗口过窄，会自动收起）"
+                  : sidebarHidden
+                    ? "展开项目列表"
+                    : "收起项目列表"
+              }
+              onClick={() => {
+                if (autoCollapseSidebar) setSidebarPeek((current) => !current);
+                else setSidebarCollapsed((current) => !current);
+              }}
               className="grid h-8 w-8 shrink-0 place-items-center rounded-lg text-slate-400 transition hover:bg-black/[0.05] hover:text-slate-700"
             >
-              {sidebarCollapsed ? <PanelLeftOpen size={15} /> : <PanelLeftClose size={15} />}
+              {sidebarHidden ? <PanelLeftOpen size={15} /> : <PanelLeftClose size={15} />}
             </button>
 
             <div className="min-w-0 flex-1 px-1">
