@@ -5,6 +5,7 @@ use serde_json::Value;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tapd_core::{
     bridge::{BridgeHttpResult, BridgePing, CapturedRequest},
+    config::McpPolicy,
     tapd::{
         api::{
             bug_detail_body, bug_detail_url, bug_list_url, parse_bug_detail, parse_bug_list,
@@ -15,6 +16,7 @@ use tapd_core::{
 };
 
 use crate::{
+    mcp_audit::McpAuditEntry,
     open_with, session,
     state::SharedState,
 };
@@ -41,6 +43,7 @@ pub struct AppInfo {
     paths: tapd_core::paths::AppPaths,
     logged_in: bool,
     me: Option<String>,
+    me_avatar: Option<String>,
     last_workspace_id: Option<String>,
     poll_interval_secs: u64,
     runtime_port: Option<u16>,
@@ -49,6 +52,7 @@ pub struct AppInfo {
     media_token: Option<String>,
     session_url: Option<String>,
     hidden_workspace_ids: Vec<String>,
+    onboarded: bool,
 }
 
 #[derive(Serialize)]
@@ -123,6 +127,7 @@ pub fn app_info(state: State<'_, SharedState>) -> AppInfo {
         paths: state.paths.clone(),
         logged_in: config.logged_in,
         me: config.me,
+        me_avatar: config.me_avatar,
         last_workspace_id: config.last_workspace_id,
         poll_interval_secs: config.poll_interval_secs,
         runtime_port: runtime.as_ref().map(|runtime| runtime.port),
@@ -130,6 +135,7 @@ pub fn app_info(state: State<'_, SharedState>) -> AppInfo {
         media_token: runtime.map(|runtime| runtime.media_token),
         session_url: config.last_session_url,
         hidden_workspace_ids: config.hidden_workspace_ids,
+        onboarded: config.onboarded,
     }
 }
 
@@ -261,6 +267,29 @@ pub async fn session_reload_login(
 }
 
 #[tauri::command]
+pub fn session_cache_avatar(
+    state: State<'_, SharedState>,
+    avatar_url: Option<String>,
+) -> Result<(), String> {
+    let Some(url) = avatar_url
+        .map(|value| value.trim().to_string())
+        .filter(|value| value.starts_with("https://") || value.starts_with("http://"))
+    else {
+        return Ok(());
+    };
+
+    let snapshot = {
+        let mut config = state.config.lock().expect("config lock");
+        if config.me_avatar.as_deref() == Some(url.as_str()) {
+            return Ok(());
+        }
+        config.me_avatar = Some(url);
+        config.clone()
+    };
+    state.save_config(&snapshot).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 pub fn session_mark_logged_in(
     app: AppHandle,
     state: State<'_, SharedState>,
@@ -296,6 +325,7 @@ pub async fn session_logout(
         let mut config = state.config.lock().expect("config lock");
         config.logged_in = false;
         config.me = None;
+        config.me_avatar = None;
         config.last_session_url = None;
         config.clone()
     };
@@ -601,6 +631,66 @@ pub(crate) fn sidecar_command_path() -> String {
 }
 
 #[tauri::command]
+pub fn complete_onboarding(state: State<'_, SharedState>) -> Result<(), String> {
+    let snapshot = {
+        let mut config = state.config.lock().expect("config lock");
+        config.onboarded = true;
+        config.clone()
+    };
+    state.save_config(&snapshot).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn mcp_policy_get(state: State<'_, SharedState>) -> McpPolicy {
+    state.config_snapshot().mcp_policy
+}
+
+#[tauri::command]
+pub fn mcp_policy_set(
+    state: State<'_, SharedState>,
+    policy: McpPolicy,
+) -> Result<McpPolicy, String> {
+    let policy = policy.normalized();
+    let snapshot = {
+        let mut config = state.config.lock().expect("config lock");
+        config.mcp_policy = policy.clone();
+        config.clone()
+    };
+    state.save_config(&snapshot).map_err(|error| error.to_string())?;
+    Ok(policy)
+}
+
+#[tauri::command]
+pub fn mcp_audit_list(
+    state: State<'_, SharedState>,
+    limit: Option<usize>,
+) -> Vec<McpAuditEntry> {
+    state.mcp_audit.list(limit.unwrap_or(200))
+}
+
+#[tauri::command]
+pub fn mcp_audit_clear(state: State<'_, SharedState>) -> Result<(), String> {
+    state
+        .mcp_audit
+        .clear()
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn mcp_audit_export(state: State<'_, SharedState>) -> Result<String, String> {
+    std::fs::create_dir_all(&state.paths.exports_dir).map_err(|error| error.to_string())?;
+    let path = state.paths.exports_dir.join(format!(
+        "mcp-audit-{}.json",
+        chrono::Local::now().format("%Y%m%d-%H%M%S")
+    ));
+    state
+        .mcp_audit
+        .export(&path)
+        .map_err(|error| error.to_string())?;
+    Ok(path.to_string_lossy().to_string())
+}
+
+#[tauri::command]
 pub async fn mcp_config(
     state: State<'_, SharedState>,
 ) -> Result<McpConfigInfo, String> {
@@ -639,7 +729,7 @@ pub async fn mcp_config(
         command_path: command_path.clone(),
         snippet,
         transport: "stdio".to_string(),
-        read_only: false,
+        read_only: !state.config_snapshot().mcp_policy.writes_enabled,
         tools: vec![
             "tapd_whoami",
             "tapd_list_projects",

@@ -33,7 +33,7 @@
 6. server 事件 `session.idle`（注入后带 ~2s 宽限）→ `succeeded`，自动回收 TUI/server 并继续下一个任务；`session.execution.failed` → `failed`。
 7. 若 server/SSE 不可用，回退为仅 TUI + 进程退出码语义（任务日志会记录降级原因）。
 
-严格串行：同一时间只有一个任务占用 worker；`preparing/running/waiting_review` 都算运行态，后续任务排队。
+严格串行：同一时间只有一个任务占用 worker；`preparing/running/waiting_review` 都算运行态，后续任务排队。并发数固定为 1 是刻意约束（同一仓库不接受多个 opencode 同时改写），不提供配置项。Agent 的任务面板就是 Agent tab，不再额外创建常驻浮窗。
 
 ## 3. Agent tab
 

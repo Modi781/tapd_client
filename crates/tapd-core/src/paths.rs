@@ -38,18 +38,30 @@ impl AppPaths {
         let runtime_file = data_dir.join("runtime.json");
         let config_file = data_dir.join("config.json");
 
-        for dir in [&data_dir, &logs_dir, &captures_dir, &exports_dir] {
-            std::fs::create_dir_all(dir)?;
-        }
-
-        Ok(Self {
+        let paths = Self {
             data_dir,
             logs_dir,
             captures_dir,
             exports_dir,
             runtime_file,
             config_file,
-        })
+        };
+        paths.ensure_dirs()?;
+        Ok(paths)
+    }
+
+    /// Creates the directories this app writes to. Safe to call repeatedly;
+    /// used after a reset wipes the data directory.
+    pub fn ensure_dirs(&self) -> std::io::Result<()> {
+        for dir in [
+            &self.data_dir,
+            &self.logs_dir,
+            &self.captures_dir,
+            &self.exports_dir,
+        ] {
+            std::fs::create_dir_all(dir)?;
+        }
+        Ok(())
     }
 }
 

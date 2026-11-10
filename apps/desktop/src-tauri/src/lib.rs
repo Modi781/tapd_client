@@ -1,13 +1,16 @@
 mod agent;
 mod cache;
 mod commands;
+mod diagnostics;
 mod export;
 mod feature_router;
 mod mcp;
+mod mcp_audit;
 mod mcp_import;
 mod notification;
 mod open_with;
 mod opencode;
+mod reset;
 mod server;
 mod session;
 mod state;
@@ -33,7 +36,20 @@ pub fn run() {
         }
     };
 
+    // A reset requested from settings must happen before logging or SQLite
+    // opens anything in the data directory.
+    let reset_applied = match reset::apply_pending(&paths) {
+        Ok(applied) => applied,
+        Err(error) => {
+            eprintln!("failed to clear local data: {error}");
+            false
+        }
+    };
+
     init_tracing(&paths);
+    if reset_applied {
+        tracing::info!("local data directory cleared on startup");
+    }
 
     let config_store = ConfigStore::new(paths.config_file.clone());
     let config = config_store.load();
@@ -50,6 +66,7 @@ pub fn run() {
             commands::session_login_state,
             commands::session_refresh_qr,
             commands::session_reload_login,
+            commands::session_cache_avatar,
             commands::session_mark_logged_in,
             commands::session_logout,
             commands::session_ping,
@@ -61,12 +78,20 @@ pub fn run() {
             commands::set_current_user,
             commands::ensure_window_width,
             commands::mcp_config,
+            commands::complete_onboarding,
+            commands::mcp_policy_get,
+            commands::mcp_policy_set,
+            commands::mcp_audit_list,
+            commands::mcp_audit_clear,
+            commands::mcp_audit_export,
+            diagnostics::export_diagnostics,
             feature_router::feature_command,
             commands::set_last_workspace,
             commands::set_hidden_workspaces,
             commands::capture_snapshot,
             commands::capture_clear,
             commands::capture_export,
+            commands::clear_app_data,
             commands::open_path,
             commands::open_media,
             commands::media_endpoint,

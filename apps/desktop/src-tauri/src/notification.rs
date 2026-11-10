@@ -29,10 +29,14 @@ use tauri::{
     WebviewWindowBuilder,
 };
 use tapd_core::{
+    config::AppConfig,
     store::{read_json, write_json_atomic},
-    tapd::api::{
-        bug_detail_body, bug_detail_url, bug_list_url, parse_bug_detail, parse_bug_list,
-        parse_workspaces, user_workspace_url, BugQuery,
+    tapd::{
+        api::{
+            bug_detail_body, bug_detail_url, bug_list_url, parse_bug_detail, parse_bug_list,
+            parse_workspaces, user_workspace_url, BugQuery,
+        },
+        Workspace,
     },
 };
 
@@ -722,22 +726,17 @@ impl NotificationService {
         apply_island(&self.app, &self.state, !items.is_empty() && !quiet, items.len(), true);
     }
 
-    async fn ensure_identity(&self, workspace_id: &str) -> Result<Option<String>, String> {
+    /// Resolves the signed-in user plus the accessible workspaces in one call.
+    async fn ensure_identity(
+        &self,
+        workspace_id: &str,
+    ) -> Result<(Option<String>, Vec<Workspace>), String> {
         let cached = self
             .state
             .config_snapshot()
             .me
             .map(|me| me.trim().to_string())
             .filter(|me| !me.is_empty());
-        let names_known = self
-            .workspace_names
-            .lock()
-            .expect("workspace names lock")
-            .contains_key(workspace_id);
-
-        if cached.is_some() && names_known {
-            return Ok(cached);
-        }
 
         let root = session_request_json(
             &self.app,
@@ -748,16 +747,17 @@ impl NotificationService {
         )
         .await?;
 
-        if let Ok(workspaces) = parse_workspaces(&root) {
-            if let Some(first) = workspaces.first() {
-                *self
-                    .default_workspace
-                    .lock()
-                    .expect("default workspace lock") = Some(first.id.clone());
-            }
+        let workspaces = parse_workspaces(&root).unwrap_or_default();
+        if let Some(first) = workspaces.first() {
+            *self
+                .default_workspace
+                .lock()
+                .expect("default workspace lock") = Some(first.id.clone());
+        }
+        {
             let mut names = self.workspace_names.lock().expect("workspace names lock");
-            for workspace in workspaces {
-                names.insert(workspace.id, workspace.name);
+            for workspace in &workspaces {
+                names.insert(workspace.id.clone(), workspace.name.clone());
             }
         }
 
@@ -779,7 +779,8 @@ impl NotificationService {
             }
         }
 
-        Ok(if nick.is_empty() { cached } else { Some(nick) })
+        let resolved = if nick.is_empty() { cached } else { Some(nick) };
+        Ok((resolved, workspaces))
     }
 
     async fn poll_once(self: &Arc<Self>) {
@@ -836,47 +837,62 @@ impl NotificationService {
             return Ok(());
         }
 
-        let mut workspace_id = config
-            .last_workspace_id
-            .clone()
-            .unwrap_or_default()
-            .trim()
-            .to_string();
-        if workspace_id.is_empty() {
-            // The session watcher knows the last TAPD workspace page even
-            // before the UI persists `lastWorkspaceId`.
-            workspace_id = config
-                .last_session_url
-                .as_deref()
-                .and_then(workspace_from_session_url)
-                .unwrap_or_default();
-        }
-        if workspace_id.is_empty() {
-            self.ensure_identity("0").await?;
-            workspace_id = self
-                .default_workspace
-                .lock()
-                .expect("default workspace lock")
-                .clone()
-                .unwrap_or_default();
-        }
-        if workspace_id.is_empty() {
+        let (me, workspaces) = self.ensure_identity("0").await?;
+        let Some(me) = me else {
+            return Ok(());
+        };
+        if me.trim().is_empty() || workspaces.is_empty() {
             return Ok(());
         }
 
-        let Some(me) = self.ensure_identity(&workspace_id).await? else {
-            return Ok(());
+        // "Mine" polls every accessible project. "Project" keeps the previous
+        // single-project behaviour, otherwise one busy project floods the queue.
+        let workspace_ids: Vec<String> = if settings.scope == NotificationScope::Mine {
+            workspaces
+                .iter()
+                .map(|workspace| workspace.id.clone())
+                .collect()
+        } else {
+            current_workspace_id(&config, &workspaces)
+                .into_iter()
+                .collect()
         };
-        if me.trim().is_empty() {
+        if workspace_ids.is_empty() {
             return Ok(());
         }
 
         let now = Local::now().naive_local();
+        let mut first_error: Option<String> = None;
+        for workspace_id in workspace_ids {
+            if let Err(error) = self
+                .poll_workspace(&workspace_id, &me, &settings, now)
+                .await
+            {
+                tracing::warn!(%workspace_id, %error, "notification poll failed");
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+            }
+        }
+
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+
+    async fn poll_workspace(
+        &self,
+        workspace_id: &str,
+        me: &str,
+        settings: &NotificationSettings,
+        now: NaiveDateTime,
+    ) -> Result<(), String> {
         let (baseline, cursor) = {
             let store = self.store.lock().expect("notification store lock");
             (
-                !store.baseline_done.contains_key(&workspace_id),
-                store.cursors.get(&workspace_id).cloned(),
+                !store.baseline_done.contains_key(workspace_id),
+                store.cursors.get(workspace_id).cloned(),
             )
         };
 
@@ -892,12 +908,12 @@ impl NotificationService {
             ))
         };
 
-        let mut query = BugQuery::new(&workspace_id);
+        let mut query = BugQuery::new(workspace_id);
         query.page = 1;
         query.perpage = POLL_PAGE_SIZE;
         query.modified_after = modified_after;
         if settings.scope == NotificationScope::Mine {
-            query.owner = Some(me.clone());
+            query.owner = Some(me.to_string());
         }
 
         let root = session_request_json(
@@ -1028,11 +1044,11 @@ impl NotificationService {
                     kinds.push(kind.as_str().to_string());
                     store.items.push(NotificationItem {
                         id: uuid::Uuid::new_v4().to_string(),
-                        workspace_id: bug.workspace_id.clone(),
+                        workspace_id: bug.workspace_id.to_string(),
                         workspace_name: names
                             .get(&bug.workspace_id)
                             .cloned()
-                            .unwrap_or_else(|| bug.workspace_id.clone()),
+                            .unwrap_or_else(|| bug.workspace_id.to_string()),
                         bug_id: bug.id.clone(),
                         title: bug.title.clone(),
                         kind,
@@ -1061,11 +1077,11 @@ impl NotificationService {
             if baseline {
                 store
                     .baseline_done
-                    .insert(workspace_id.clone(), format_tapd_time(now));
+                    .insert(workspace_id.to_string(), format_tapd_time(now));
             }
             store
                 .cursors
-                .insert(workspace_id.clone(), format_tapd_time(now));
+                .insert(workspace_id.to_string(), format_tapd_time(now));
             if store.items.len() > MAX_ITEMS {
                 let excess = store.items.len() - MAX_ITEMS;
                 store.items.drain(0..excess);
@@ -1075,6 +1091,28 @@ impl NotificationService {
         self.persist();
         Ok(())
     }
+}
+
+/// The project used for `project`-scope polling: last selected, then the URL.
+fn current_workspace_id(config: &AppConfig, workspaces: &[Workspace]) -> Option<String> {
+    let known = |id: &str| workspaces.iter().any(|workspace| workspace.id == id);
+
+    if let Some(id) = config.last_workspace_id.as_deref().map(str::trim) {
+        if !id.is_empty() && known(id) {
+            return Some(id.to_string());
+        }
+    }
+    if let Some(id) = config
+        .last_session_url
+        .as_deref()
+        .and_then(workspace_from_session_url)
+    {
+        if known(&id) {
+            return Some(id);
+        }
+    }
+
+    workspaces.first().map(|workspace| workspace.id.clone())
 }
 
 /// Whether this `(workspace, bug, kind)` de-dup key was already emitted.

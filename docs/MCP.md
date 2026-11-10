@@ -99,7 +99,29 @@ opencode mcp list
 - `tapd_update_bug_status` 的 `comment` 会先追加评论，再进行状态流转；状态流转失败时评论仍保留，便于追溯。
 - 如果需要填流转必填字段，可传 `fields` 数组，原样透传给 TAPD（通常留空）。
 
-## 5. 导出产物
+## 5. 策略与审计
+
+MCP tab 的「MCP 策略」与「调用审计」是客户端的第二层权限边界：sidecar 只负责转发，所有策略都在 App 内执行，AI 无法绕过。
+
+### 5.1 策略
+
+| 策略 | 默认 | 说明 |
+| --- | --- | --- |
+| 允许写操作 | 开 | 关闭后 `tapd_add_bug_comment` / `tapd_update_bug_status` 直接拒绝，查询与导出不受影响 |
+| 允许访问的项目 | 全部 | 选择项目后，工具只能访问这些 workspace；未显式传 `workspace_id` 时也只会在白名单内回退 |
+| 允许的目标状态 | 不限制 | 逗号分隔的状态 key 或中文名；为空时完全交给 TAPD 工作流 |
+| 记录调用审计 | 开 | 关闭后只写应用日志，不落 `mcp-audit.json` |
+
+策略只会收窄范围，不会扩大 TAPD 账号本身的权限。
+
+### 5.2 审计
+
+- 文件：`~/Library/Application Support/com.tapdclient.desktop/mcp-audit.json`，最多保留 500 条。
+- 字段：时间、工具、客户端、决策（允许 / 拒绝 / 失败）、耗时、项目 ID、缺陷 ID、错误摘要、参数摘要。
+- 不保存：评论正文、请求/响应正文、Cookie、token。参数摘要只记录 id、status、limit 等标量与评论长度。
+- MCP tab 支持按「全部 / 被拒绝 / 失败」筛选，导出为 `~/Documents/TAPDClient/exports/mcp-audit-<时间>.json`，也可清空。
+
+## 6. 导出产物
 
 `tapd_export_bug_md` 返回：
 
@@ -124,15 +146,15 @@ opencode mcp list
 
 图片以内联 Markdown 引用，视频以链接引用；下载失败时保留 TAPD 原始 URL 并在 `warnings` 中说明。
 
-## 6. 安全与边界
+## 7. 安全与边界
 
 - sidecar 只能访问 `127.0.0.1` 上的客户端，使用每次启动轮换的 Bearer token（`runtime.json`，权限 0600）。
 - Cookie 不写入文件、不返回给 AI；资源下载在客户端进程内完成。
 - 写回仅开放「追加评论」和「更新状态」，不提供删除、改处理人、批量操作等工具。
 - 写操作使用当前 TAPD 会话 Cookie + `dsc-token`，受 TAPD 工作流与权限约束；非法流转会被拒绝并把允许的下一步返回给 AI。
-- 所有工具调用（含写操作）记录在客户端日志（数据目录 `logs/`），包含工具名、客户端、耗时与结果；写操作额外记录 bug id。
+- 所有工具调用（含写操作）记录在客户端日志（数据目录 `logs/`）与 MCP 审计（`mcp-audit.json`）；审计包含工具名、客户端、策略决策、耗时、项目/缺陷与错误摘要，不保存评论正文。
 
-## 7. 常见问题
+## 8. 常见问题
 
 **`TAPD Client 未运行`**
 启动桌面客户端，确认已登录，然后重试。开发模式需先 `pnpm dev`。

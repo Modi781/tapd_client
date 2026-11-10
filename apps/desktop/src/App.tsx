@@ -44,6 +44,7 @@ import { FolderPicker } from "./components/FolderPicker";
 import { BugListView } from "./components/BugListView";
 import { LoginGate } from "./components/LoginGate";
 import { McpPage } from "./components/McpPage";
+import { Onboarding } from "./components/Onboarding";
 import { SettingsPage } from "./components/SettingsPage";
 import { ScrollingName } from "./components/ScrollingName";
 import { SkeletonRows } from "./components/Skeleton";
@@ -1170,7 +1171,11 @@ export default function App() {
             />
           ) : view === "mcp" ? (
             <div className="min-h-0 flex-1 overflow-y-auto p-5">
-              <McpPage onCopy={copy} toast={showToast} />
+              <McpPage
+                workspaces={context?.workspaces ?? []}
+                onCopy={copy}
+                toast={showToast}
+              />
             </div>
           ) : view === "account" ? (
             <div className="min-h-0 flex-1 overflow-y-auto p-5">
@@ -1304,6 +1309,10 @@ export default function App() {
             在设置中管理项目
           </button>
         </div>
+      ) : null}
+
+      {!info.onboarded ? (
+        <Onboarding info={info} onDone={() => void refreshBase()} />
       ) : null}
 
       {toastNode}

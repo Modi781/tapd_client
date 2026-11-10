@@ -306,50 +306,6 @@
     badLoginAt: 0,
   };
 
-  /// The WeCom panel offers an automatic "quick login" when the desktop app is
-  /// running. Disable it so the QR code is the only entry point and the login
-  /// always finishes in the hidden webview (the browser redirect).
-  function disableQuickLoginOnFrame(frame) {
-    if (!frame || !frame.getAttribute) return;
-    var src = frame.getAttribute("src") || "";
-    if (!src || src.indexOf("work.weixin.qq.com") === -1) return;
-    if (src.indexOf("disable_quick_login") !== -1) return;
-
-    var joiner = src.indexOf("?") === -1 ? "?" : "&";
-    frame.setAttribute("src", src + joiner + "disable_quick_login=true");
-  }
-
-  function patchWecomFrames() {
-    var frames = document.querySelectorAll('iframe[src*="work.weixin.qq.com"]');
-    for (var index = 0; index < frames.length; index += 1) {
-      disableQuickLoginOnFrame(frames[index]);
-    }
-  }
-
-  function observeWecomFrames() {
-    var root = document.documentElement || document;
-    if (!root) return;
-    var observer = new MutationObserver(function (mutations) {
-      for (var index = 0; index < mutations.length; index += 1) {
-        var added = mutations[index].addedNodes;
-        for (var nodeIndex = 0; nodeIndex < added.length; nodeIndex += 1) {
-          var node = added[nodeIndex];
-          if (!node || node.nodeType !== 1) continue;
-          if (node.tagName === "IFRAME") {
-            disableQuickLoginOnFrame(node);
-          } else if (node.querySelectorAll) {
-            var frames = node.querySelectorAll('iframe[src*="work.weixin.qq.com"]');
-            for (var frameIndex = 0; frameIndex < frames.length; frameIndex += 1) {
-              disableQuickLoginOnFrame(frames[frameIndex]);
-            }
-          }
-        }
-      }
-    });
-    observer.observe(root, { childList: true, subtree: true });
-    patchWecomFrames();
-  }
-
   function compactText(node) {
     return String((node && node.textContent) || "")
       .replace(/\s+/g, " ")
@@ -414,9 +370,6 @@
   function scanTopLoginPage() {
     if (!isTopFrame || !tapdHost) return;
     if (!isAuthPath(window.location.href)) return;
-    // Covers iframes whose src was assigned after insertion.
-    patchWecomFrames();
-
     var tab = document.querySelector(".login-tab-qy");
     if (!tab) {
       var form = document.querySelector("#login_cn_form, .login-form");
@@ -654,7 +607,6 @@
   }
 
   if (isTopFrame) {
-    observeWecomFrames();
     window.addEventListener("message", function (event) {
       var data = event.data;
       if (data && data.__tapdcb === "login" && data.state) {

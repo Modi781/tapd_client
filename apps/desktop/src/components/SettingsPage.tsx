@@ -1,7 +1,7 @@
 import { useState } from "react";
-import { Copy, FileJson, FolderOpen, ShieldCheck, X } from "lucide-react";
+import { Copy, FileJson, FolderOpen, PackageOpen, ShieldCheck, X } from "lucide-react";
 
-import type { AppInfo, WorkspaceContext } from "../lib/api";
+import { api, type AppInfo, type WorkspaceContext } from "../lib/api";
 import type { SettingsSectionProps } from "../lib/feature";
 import { AgentSettings } from "./AgentSettings";
 import { CapturesPage } from "./CapturesPage";
@@ -30,6 +30,23 @@ export function SettingsPage(props: Props) {
     toast,
   } = props;
   const [capturesOpen, setCapturesOpen] = useState(false);
+  const [diagnosing, setDiagnosing] = useState(false);
+
+  const exportDiagnostics = async () => {
+    setDiagnosing(true);
+    try {
+      const result = await api.exportDiagnostics();
+      toast(
+        "ok",
+        `诊断包已导出（${result.files} 个文件，${formatKilobytes(result.bytes)}）：${result.path}`,
+      );
+      onOpenPath(result.folder);
+    } catch (error) {
+      toast("error", String(error));
+    } finally {
+      setDiagnosing(false);
+    }
+  };
 
   const paths: Array<[string, string]> = info
     ? [
@@ -56,10 +73,24 @@ export function SettingsPage(props: Props) {
       <AgentSettings toast={toast} />
 
       <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-        <h2 className="flex items-center gap-2 text-sm font-semibold text-slate-900">
-          <ShieldCheck size={15} className="text-slate-400" />
-          运行信息
-        </h2>
+        <div className="flex items-center justify-between gap-3">
+          <h2 className="flex items-center gap-2 text-sm font-semibold text-slate-900">
+            <ShieldCheck size={15} className="text-slate-400" />
+            运行信息
+          </h2>
+          <Button
+            size="sm"
+            onClick={() => void exportDiagnostics()}
+            loading={diagnosing}
+            icon={<PackageOpen size={13} />}
+          >
+            导出诊断包
+          </Button>
+        </div>
+
+        <p className="mt-1 text-[11px] leading-5 text-slate-500">
+          打包版本、脱敏配置、最近日志与 MCP 审计；不含 Cookie、API token 和请求正文。
+        </p>
 
         <dl className="mt-3 space-y-1 text-xs">
           <PlainRow label="版本" value={info?.version ?? "—"} onCopy={onCopy} />
@@ -147,6 +178,12 @@ export function SettingsPage(props: Props) {
       ) : null}
     </div>
   );
+}
+
+function formatKilobytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
 function PlainRow(props: { label: string; value: string; onCopy: (text: string) => void }) {

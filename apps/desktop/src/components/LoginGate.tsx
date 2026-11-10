@@ -1,4 +1,4 @@
-import { useEffect, useState, type CSSProperties, type ReactNode } from "react";
+import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import {
   Bell,
   Bug,
@@ -124,10 +124,21 @@ export function LoginGate({ info, onRefresh, onToast }: Props) {
   const [avatarBroken, setAvatarBroken] = useState(false);
   const avatar = state.avatarUrl;
   const displayName = state.name?.trim();
+  const cachedAvatar = useRef<string | null>(null);
 
   useEffect(() => {
     setAvatarBroken(false);
   }, [avatar]);
+
+  // The WeCom scan panel exposes the signed-in user's avatar before TAPD
+  // finishes the login. Cache it so the account view and sidebar can show it
+  // immediately (and offline) after entering the app.
+  useEffect(() => {
+    const next = avatar?.trim();
+    if (!next || next === cachedAvatar.current || next === info?.meAvatar) return;
+    cachedAvatar.current = next;
+    void api.cacheAvatar(next).catch(() => undefined);
+  }, [avatar, info?.meAvatar]);
 
   useEffect(() => {
     let alive = true;
