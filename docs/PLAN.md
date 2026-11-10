@@ -483,7 +483,7 @@ exporter: "tapd-client/1.0"
 | **M5 MCP** | sidecar、stdio 协议、本地 HTTP、策略引擎、审计、自动拉起、客户端配置 | 2–3 天 | opencode 可列出我的未解决缺陷并导出 MD；越权调用被拒并留痕 |
 | **M6 通知** | 判定、去重、忽略、免打扰、自绘弹窗、托盘角标 | 1–2 天 | 模拟新分配 1 轮内弹窗；三按钮行为正确；忽略不再弹 |
 | **M7 Agent** | 仓库映射、PTY TUI、prompt 注入、队列、xterm 控制台、失败降级 | 3–4 天 | 点击处理 → 导出 → 排队 → 终端可见 → 完成/失败可重试；并发恒为 1 |
-| **M8 打包收尾** | universal dmg、sidecar 打包、首启引导、README、诊断包 | 1–2 天 | 新机器安装可用；MCP 配置照抄即可用 |
+| **M8 打包收尾** | arm64 dmg、sidecar 打包、首启引导、README、诊断包 | 1–2 天 | 新机器安装可用；MCP 配置照抄即可用 |
 
 合计约 15–22 人日（不含反复联调与 TAPD 改版应对）。
 
@@ -555,7 +555,7 @@ exporter: "tapd-client/1.0"
 | M5 MCP | ✅ | stdio sidecar、查询/导出 + 评论/状态写回共 9 个工具、opencode v2 联调通过；MCP tab 一键导入 |
 | M6 通知 | ✅ | 可配置范围（我的/项目、新建/转移/重新打开）、自绘弹窗、忽略/查看、处理=改派+接受 |
 | M7 Agent | ✅ | opencode TUI 内嵌 Agent tab、串行队列、server 事件完成/审核、胶囊状态、历史与日志 |
-| M8 打包 | ✅（打包链路） | `tapd-mcp` 作为 externalBin 打进 App；`pnpm build:universal` 本地出 dmg；push `release` 分支由 GitHub Actions 出 universal dmg 与 artifact，tag 额外发 Release。MCP 策略/审计 UI 尚未做 |
+| M8 打包 | ✅（打包链路） | `tapd-mcp` 作为 externalBin 打进 App；`pnpm build:arm64` 本地出 arm64 dmg；`main` 合并进 `release` 后由 GitHub Actions 出 arm64 dmg 与 artifact，tag 额外发 Release。MCP 策略/审计 UI 尚未做 |
 
 ### 与计划的偏差
 
@@ -569,7 +569,7 @@ exporter: "tapd-client/1.0"
 
 ### 已知待办
 
-- M8 剩余：MCP 策略设置与审计 UI、首启引导、诊断包（sidecar 打包与 universal dmg 已完成）。
+- M8 剩余：MCP 策略设置与审计 UI、首启引导、诊断包（arm64 dmg 与 sidecar 打包已完成）。
 - 跨项目增量轮询与离线搜索（缓存快照已支持当前查询）。
 - 通知历史视图、托盘角标、未读计数。
 - Agent 并发数配置（当前固定 1）、进程树彻底回收（已按进程组 kill）、更细粒度的事件适配。

@@ -9,7 +9,7 @@
     "build": "pnpm build:sidecar && pnpm -C apps/desktop tauri build",
     "build:sidecar": "bash scripts/build-sidecar.sh",
     "build:sidecar:debug": "bash scripts/build-sidecar.sh --debug",
-    "build:universal": "bash scripts/build-sidecar.sh universal-apple-darwin && pnpm -C apps/desktop tauri build --target universal-apple-darwin",
+    "build:arm64": "bash scripts/build-sidecar.sh aarch64-apple-darwin && pnpm -C apps/desktop tauri build --target aarch64-apple-darwin",
     "typecheck": "pnpm -C apps/desktop typecheck",
     "check:rust": "pnpm build:sidecar:debug && cargo check --workspace",
     "build:mcp": "cargo build -p tapd-mcp",

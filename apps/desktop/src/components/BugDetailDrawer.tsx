@@ -202,19 +202,23 @@ export function BugDetailDrawer(props: Props) {
     });
   };
 
-  if (!open) return null;
+  useEffect(() => {
+    if (!open) setPreviewIndex(null);
+  }, [open]);
 
   return (
-    <div className="fixed inset-0 z-40 flex justify-end">
-      <button
-        type="button"
-        aria-label="关闭详情"
-        onClick={onClose}
-        className="absolute inset-0 bg-slate-900/20 backdrop-blur-[1px]"
-      />
-
-      <aside className="relative flex h-full w-[640px] max-w-[94vw] flex-col border-l border-slate-200 bg-white shadow-2xl">
-        <div className="flex items-start justify-between gap-3 border-b border-slate-100 px-5 py-4">
+    <>
+      <aside
+        aria-hidden={!open}
+        className={clsx(
+          "flex h-full min-w-0 flex-col overflow-hidden rounded-xl bg-white shadow-[0_1px_3px_rgba(15,23,42,0.06)] ring-1 ring-black/[0.06] transition-[transform,opacity] duration-200 ease-out",
+          open ? "translate-x-0 opacity-100" : "pointer-events-none translate-x-4 opacity-0",
+        )}
+      >
+        <div
+          className="flex items-start justify-between gap-3 border-b border-slate-100 px-5 py-4"
+          data-tauri-drag-region
+        >
           <div className="min-w-0">
             <div className="flex flex-wrap items-center gap-2 text-[11px] text-slate-400">
               <span className="rounded bg-rose-50 px-1.5 py-0.5 font-bold text-rose-600">
@@ -250,6 +254,8 @@ export function BugDetailDrawer(props: Props) {
           <button
             type="button"
             onClick={onClose}
+            aria-label="关闭详情"
+            title="关闭详情"
             className="grid h-8 w-8 shrink-0 place-items-center rounded-lg text-slate-400 transition hover:bg-slate-100 hover:text-slate-700"
           >
             <X size={16} />
@@ -267,82 +273,6 @@ export function BugDetailDrawer(props: Props) {
 
           {detail ? (
             <div className="space-y-5">
-              <div className="flex flex-wrap gap-2">
-                <Button
-                  size="sm"
-                  variant="primary"
-                  icon={<ArrowUpRight size={13} />}
-                  onClick={() => onOpenWeb(detail.bugUrl)}
-                >
-                  在 TAPD 中打开
-                </Button>
-                <Button
-                  size="sm"
-                  variant="secondary"
-                  icon={<Bot size={13} />}
-                  disabled={exporting || loading}
-                  onClick={() => onAgentFix(detail)}
-                >
-                  用 Agent 修复
-                </Button>
-                <Button
-                  size="sm"
-                  variant="secondary"
-                  icon={<Copy size={13} />}
-                  onClick={() => onCopy(detail.bugUrl)}
-                >
-                  复制链接
-                </Button>
-                <Button
-                  size="sm"
-                  variant="secondary"
-                  icon={<Download size={13} />}
-                  loading={exporting}
-                  onClick={() => onExport(detail)}
-                >
-                  {exporting ? "导出中…" : "导出 MD"}
-                </Button>
-              </div>
-
-              {lastExport ? (
-                <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-[11px] text-emerald-900">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span className="font-semibold">
-                      已导出 {lastExport.assetCount} 个资源 ·{" "}
-                      {formatBytes(lastExport.downloadedBytes)}
-                    </span>
-                    <div className="ml-auto flex items-center gap-1.5">
-                      <button
-                        type="button"
-                        onClick={() => onOpenPath(lastExport.dir)}
-                        className="rounded border border-emerald-300 bg-white px-2 py-1 text-[10px]"
-                      >
-                        打开目录
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => onCopy(lastExport.markdownPath)}
-                        className="rounded border border-emerald-300 bg-white px-2 py-1 text-[10px]"
-                      >
-                        复制路径
-                      </button>
-                    </div>
-                  </div>
-                  <div className="mt-1 break-all font-mono text-[10px] text-emerald-700">
-                    {lastExport.markdownPath}
-                  </div>
-                  {lastExport.warnings.length > 0 ? (
-                    <ul className="mt-2 space-y-0.5 border-t border-emerald-200 pt-2 text-[10px] text-amber-700">
-                      {lastExport.warnings.slice(0, 4).map((warning) => (
-                        <li key={warning} className="break-all">
-                          · {warning}
-                        </li>
-                      ))}
-                    </ul>
-                  ) : null}
-                </div>
-              ) : null}
-
               <MetaGrid detail={detail} />
 
               <section>
@@ -501,6 +431,83 @@ export function BugDetailDrawer(props: Props) {
             </div>
           ) : null}
         </div>
+
+        {detail ? (
+          <div className="shrink-0 border-t border-slate-100 bg-white px-4 py-3">
+            {lastExport ? (
+              <div className="mb-2 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-[10px] leading-4 text-emerald-900">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="font-semibold">
+                    已导出 {lastExport.assetCount} 个资源 ·{" "}
+                    {formatBytes(lastExport.downloadedBytes)}
+                  </span>
+                  <div className="ml-auto flex items-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => onOpenPath(lastExport.dir)}
+                      className="rounded border border-emerald-300 bg-white px-1.5 py-0.5"
+                    >
+                      打开目录
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => onCopy(lastExport.markdownPath)}
+                      className="rounded border border-emerald-300 bg-white px-1.5 py-0.5"
+                    >
+                      复制路径
+                    </button>
+                  </div>
+                </div>
+                <div className="mt-0.5 truncate font-mono text-emerald-700" title={lastExport.markdownPath}>
+                  {lastExport.markdownPath}
+                </div>
+                {lastExport.warnings.length > 0 ? (
+                  <div className="mt-1 truncate text-amber-700" title={lastExport.warnings.join("；")}>
+                    {lastExport.warnings[0]}
+                    {lastExport.warnings.length > 1 ? ` 等 ${lastExport.warnings.length} 条` : ""}
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
+
+            <div className="flex flex-wrap gap-2">
+              <Button
+                size="sm"
+                variant="primary"
+                icon={<ArrowUpRight size={13} />}
+                onClick={() => onOpenWeb(detail.bugUrl)}
+              >
+                在 TAPD 中打开
+              </Button>
+              <Button
+                size="sm"
+                variant="secondary"
+                icon={<Bot size={13} />}
+                disabled={exporting || loading}
+                onClick={() => onAgentFix(detail)}
+              >
+                用 Agent 修复
+              </Button>
+              <Button
+                size="sm"
+                variant="secondary"
+                icon={<Copy size={13} />}
+                onClick={() => onCopy(detail.bugUrl)}
+              >
+                复制链接
+              </Button>
+              <Button
+                size="sm"
+                variant="secondary"
+                icon={<Download size={13} />}
+                loading={exporting}
+                onClick={() => onExport(detail)}
+              >
+                {exporting ? "导出中…" : "导出 MD"}
+              </Button>
+            </div>
+          </div>
+        ) : null}
       </aside>
 
       {previewIndex !== null && previewItems[previewIndex] ? (
@@ -514,25 +521,18 @@ export function BugDetailDrawer(props: Props) {
           }
         />
       ) : null}
-    </div>
+    </>
   );
 }
 
 /**
- * Placeholder that mirrors the drawer's loaded layout (actions, meta grid,
- * description, resources, comments) so content does not jump into place.
+ * Placeholder that mirrors the panel's loaded layout (meta grid, description,
+ * resources, comments) so content does not jump into place.
  */
 function DetailSkeleton() {
   return (
     <div role="status" aria-busy="true" className="space-y-5">
       <span className="sr-only">正在加载缺陷详情</span>
-
-      <div className="flex flex-wrap gap-2">
-        <SkeletonBlock className="h-7 w-[88px] rounded-lg" />
-        <SkeletonBlock className="h-7 w-[96px] rounded-lg" />
-        <SkeletonBlock className="h-7 w-[76px] rounded-lg" />
-        <SkeletonBlock className="h-7 w-[76px] rounded-lg" />
-      </div>
 
       <div className="grid grid-cols-2 gap-x-4 gap-y-3 rounded-xl border border-slate-100 bg-white p-3 sm:grid-cols-4">
         {Array.from({ length: 8 }, (_, index) => (

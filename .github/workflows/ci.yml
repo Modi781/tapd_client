@@ -41,6 +41,11 @@ jobs:
       - name: Typecheck frontend
         run: pnpm typecheck
 
+      # Tauri's build script validates externalBin during `cargo check/test`,
+      # so the sidecar must exist even for read-only Rust jobs.
+      - name: Build MCP sidecar (debug)
+        run: pnpm build:sidecar:debug
+
       - name: Check Rust workspace
         run: pnpm check:rust
 

@@ -285,6 +285,9 @@ export const api = {
     invoke<ExportResult>("export_bug_md", { workspaceId, bugId, workspaceName }),
   setCurrentUser: (nick: string) =>
     invoke<void>("set_current_user", { nick }),
+  /** Grows the window to `minWidth` (leftwards) if the detail panel needs room. */
+  ensureWindowWidth: (minWidth: number) =>
+    invoke<number>("ensure_window_width", { minWidth }),
   setLastWorkspace: (workspaceId: string) =>
     invoke<void>("set_last_workspace", { workspaceId }),
   mcpConfig: () => invoke<McpConfigInfo>("mcp_config"),

@@ -14,7 +14,6 @@
 #   scripts/build-sidecar.sh                          # host, release
 #   scripts/build-sidecar.sh --debug                  # host, debug
 #   scripts/build-sidecar.sh aarch64-apple-darwin     # one target, release
-#   scripts/build-sidecar.sh universal-apple-darwin   # lipo arm64 + x86_64
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -80,20 +79,6 @@ if [[ ${#TARGETS[@]} -eq 0 ]]; then
   build_one ""
 else
   for target in "${TARGETS[@]}"; do
-    case "$target" in
-      universal-apple-darwin)
-        build_one aarch64-apple-darwin
-        build_one x86_64-apple-darwin
-        lipo -create \
-          "$OUT_DIR/tapd-mcp-aarch64-apple-darwin" \
-          "$OUT_DIR/tapd-mcp-x86_64-apple-darwin" \
-          -output "$OUT_DIR/tapd-mcp-universal-apple-darwin"
-        chmod +x "$OUT_DIR/tapd-mcp-universal-apple-darwin"
-        lipo -info "$OUT_DIR/tapd-mcp-universal-apple-darwin"
-        ;;
-      *)
-        build_one "$target"
-        ;;
-    esac
+    build_one "$target"
   done
 fi

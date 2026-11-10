@@ -1,7 +1,8 @@
 name: Release
 
-# Pushes to the `release` branch produce a universal macOS dmg as a workflow
-# artifact; pushing a `v*` tag additionally publishes a GitHub release.
+# Pushes to the `release` branch produce an arm64 (Apple Silicon) dmg as a
+# workflow artifact; pushing a `v*` tag additionally publishes a GitHub release.
+# `release` only receives merges from `main` — develop there, not here.
 on:
   push:
     branches: [release]
@@ -16,7 +17,7 @@ permissions:
   contents: write
 
 jobs:
-  macos-universal:
+  macos-arm64:
     runs-on: macos-26
     timeout-minutes: 90
     steps:
@@ -35,7 +36,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-apple-darwin,x86_64-apple-darwin
+          targets: aarch64-apple-darwin
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -87,11 +88,11 @@ jobs:
       - name: Test Rust workspace
         run: pnpm test:rust
 
-      - name: Build universal MCP sidecar
-        run: bash scripts/build-sidecar.sh universal-apple-darwin
+      - name: Build arm64 MCP sidecar
+        run: bash scripts/build-sidecar.sh aarch64-apple-darwin
 
-      - name: Build universal app and dmg
-        run: pnpm -C apps/desktop tauri build --target universal-apple-darwin --bundles app,dmg
+      - name: Build arm64 app and dmg
+        run: pnpm -C apps/desktop tauri build --target aarch64-apple-darwin --bundles app,dmg
 
       - name: Collect artifacts
         id: meta
@@ -99,8 +100,8 @@ jobs:
           VERSION=$(node -p "require('./apps/desktop/src-tauri/tauri.conf.json').version")
           OUT=dist-release
           mkdir -p "$OUT"
-          cp target/universal-apple-darwin/release/bundle/dmg/*.dmg "$OUT"/
-          cp -R "target/universal-apple-darwin/release/bundle/macos/TAPD Client.app" "$OUT"/
+          cp target/aarch64-apple-darwin/release/bundle/dmg/*.dmg "$OUT"/
+          cp -R "target/aarch64-apple-darwin/release/bundle/macos/TAPD Client.app" "$OUT"/
           (cd "$OUT" && shasum -a 256 ./*.dmg > SHA256SUMS.txt)
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           find "$OUT" -maxdepth 1 -print
@@ -108,7 +109,7 @@ jobs:
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: tapd-client-${{ steps.meta.outputs.version }}-universal-${{ github.run_number }}
+          name: tapd-client-${{ steps.meta.outputs.version }}-arm64-${{ github.run_number }}
           path: dist-release
           if-no-files-found: error
 

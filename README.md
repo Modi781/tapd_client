@@ -4,7 +4,7 @@
 
 Tauri 2 桌面客户端：复用 TAPD 网页登录态，重建缺陷视图，支持按处理人/状态筛选、缺陷详情、MD 导出、可配置的新缺陷通知与 opencode 修复队列，并通过 MCP 服务把缺陷交给 AI：查询、详情、导出，以及修复后的评论与状态回写（已在 opencode v2.0.29 验证）。
 
-当前进度：**M0–M8 已完成**：`tapd-mcp` sidecar 随 App 打包，`release` 分支由 GitHub Actions 生成 universal dmg；SQLite 离线缓存、Agent tab（内嵌终端 / 审核 / 历史）与 MCP tab 已接入。
+当前进度：**M0–M8 已完成**：`tapd-mcp` sidecar 随 App 打包，`release` 分支（由 `main` 合并进入）由 GitHub Actions 生成 arm64 dmg；SQLite 离线缓存、Agent tab（内嵌终端 / 审核 / 历史）与 MCP tab 已接入。
 
 - 完整计划：[docs/PLAN.md](docs/PLAN.md)
 - 接口验证：[docs/spike.md](docs/spike.md)
@@ -20,7 +20,7 @@ Tauri 2 桌面客户端：复用 TAPD 网页登录态，重建缺陷视图，支
 - 离线优先：项目列表、缺陷列表与详情先渲染 SQLite 缓存（`cache.sqlite3`），再后台刷新；只有首次登录且无缓存时显示骨架屏。刷新期间标题栏居中显示「更新中」。
 - 缺陷表格：各列有最小宽度，窗口变窄时表格横向滚动；「操作」列固定在右侧（查看详情 / 在 TAPD 打开 / 复制链接 / Agent 修复）。
 - 主窗口外壳：无系统标题栏（macOS Overlay），左侧图标栏 + 可拖拽项目栏 + 浮起的白色内容面板；项目栏拖到最小宽度以下会自动收起，标题栏按钮可随时展开。
-- 缺陷详情抽屉：基本信息、描述、资源（附件 + 描述/评论内嵌图片视频，带缩略图）、变更记录、评论、自定义字段，可直接跳转 TAPD。
+- 缺陷详情右侧面板：Codex 风格的第三列（非遮罩抽屉），从右侧滑入并与内容区并排，左缘可拖动调整宽度；窗口过窄时先自动向左扩张再展开。顶部只有关闭按钮、底部固定操作、中间内容滚动，打开面板后标题栏仍可拖动窗口。内容含基本信息、描述、资源（附件 + 描述/评论内嵌图片视频，带缩略图）、变更记录、评论、自定义字段，可直接跳转 TAPD。
 - 资源查看：资源行有独立的「预览」按钮（缩放 / 左右切换 / 底部居中缩略图条 / Esc 关闭，图片与视频），「打开」按钮按已选的默认应用打开，下拉只负责切换默认应用。
 - 顶部状态胶囊：常驻胶囊展示通知状态；Agent 运行时切换为「Agent 运行中」，等待权限确认时变为「Agent 待审核」，空闲时不显示 Agent 状态。可拖动并记住位置，单击展开通知 / 打开 Agent 任务、双击打开主窗口。
 - 请求抓包：自动记录网页内部接口，支持查看与导出 JSON（M0 工具，保留）。
@@ -45,7 +45,7 @@ pnpm check:rust       # Rust 编译检查
 cargo test -p tapd-core
 cargo build -p tapd-mcp
 pnpm build            # 本机架构 app + dmg（自动先构建 sidecar）
-pnpm build:universal  # universal app + dmg（arm64 + x86_64）
+pnpm build:arm64      # 显式 arm64 app + dmg（与 release CI 一致）
 ```
 
 打包会把 `tapd-mcp` 放进 `TAPD Client.app/Contents/MacOS/`，设置页复制的 MCP 配置会直接指向该路径。发布流程见 [docs/RELEASE.md](docs/RELEASE.md)。

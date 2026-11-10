@@ -56,6 +56,7 @@ pub fn run() {
             commands::bug_detail,
             export::export_bug_md,
             commands::set_current_user,
+            commands::ensure_window_width,
             commands::mcp_config,
             feature_router::feature_command,
             commands::set_last_workspace,

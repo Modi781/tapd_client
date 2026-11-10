@@ -474,6 +474,42 @@ pub fn mcp_config(state: State<'_, SharedState>) -> McpConfigInfo {
 }
 
 #[tauri::command]
+pub fn ensure_window_width(app: AppHandle, min_width: f64) -> Result<f64, String> {
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| "主窗口尚未创建".to_string())?;
+    let scale = window.scale_factor().map_err(|error| error.to_string())?;
+    let size = window.inner_size().map_err(|error| error.to_string())?;
+    let current_width = size.width as f64 / scale;
+    let height = size.height as f64 / scale;
+
+    if !min_width.is_finite() || min_width <= current_width + 1.0 {
+        return Ok(current_width);
+    }
+
+    let mut target_width = min_width;
+    let mut min_x = 0.0f64;
+    if let Ok(Some(monitor)) = window.current_monitor() {
+        target_width = target_width.min(monitor.size().width as f64 / monitor.scale_factor());
+        min_x = monitor.position().x as f64 / monitor.scale_factor();
+    }
+
+    // Grow leftwards so the window's right edge (and the new detail panel)
+    // stays where the user put it.
+    if let Ok(position) = window.outer_position() {
+        let x = position.x as f64 / scale;
+        let y = position.y as f64 / scale;
+        let next_x = (x - (target_width - current_width)).max(min_x);
+        let _ = window.set_position(tauri::LogicalPosition::new(next_x, y));
+    }
+
+    window
+        .set_size(tauri::LogicalSize::new(target_width, height))
+        .map_err(|error| error.to_string())?;
+    Ok(target_width)
+}
+
+#[tauri::command]
 pub fn set_current_user(
     state: State<'_, SharedState>,
     nick: String,

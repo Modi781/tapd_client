@@ -69,6 +69,14 @@ const MIN_SIDEBAR_WIDTH = 208;
 const MAX_SIDEBAR_WIDTH = 420;
 /** Content area that must stay usable; the sidebar yields space below this. */
 const MIN_CONTENT_WIDTH = 460;
+/** Codex-style right detail pane. */
+const DETAIL_PANEL_WIDTH = 520;
+const DETAIL_MIN_WIDTH = 360;
+const DETAIL_MAX_WIDTH = 760;
+/** Minimum width the bug list keeps while the detail pane is open. */
+const DETAIL_CONTENT_MIN = 340;
+/** Rail + sidebar gap + panel margins (with a small resize buffer). */
+const LAYOUT_GUTTER = 32;
 
 /** Default sidebar width for the current window: ~20%, clamped. */
 const defaultSidebarWidth = (viewport: number): number =>
@@ -133,11 +141,30 @@ export default function App() {
   const [detail, setDetail] = useState<BugDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState<string | null>(null);
+  const [detailWidth, setDetailWidth] = useState(DETAIL_PANEL_WIDTH);
+  const [resizingDetail, setResizingDetail] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [lastExport, setLastExport] = useState<ExportResult | null>(null);
 
+  const effectiveDetailWidth = Math.max(
+    DETAIL_MIN_WIDTH,
+    Math.min(detailWidth, DETAIL_MAX_WIDTH),
+  );
+
   const infoRef = useRef<AppInfo | null>(null);
   infoRef.current = info;
+
+  /** Detail pane visibility, readable from stable callbacks. */
+  const detailOpenRef = useRef(false);
+  detailOpenRef.current = detailOpen;
+  /** Window width needed for sidebar + bug list + detail pane. */
+  const detailMinWidthRef = useRef(0);
+  detailMinWidthRef.current =
+    52 +
+    (sidebarCollapsed ? 0 : effectiveSidebarWidth) +
+    DETAIL_CONTENT_MIN +
+    effectiveDetailWidth +
+    LAYOUT_GUTTER;
 
   const showToast = useCallback((kind: Toast["kind"], text: string) => {
     setToast({ kind, text });
@@ -152,7 +179,16 @@ export default function App() {
    */
   const loadBugDetail = useCallback((targetWorkspaceId: string, bugId: string) => {
     const seq = ++detailSeq.current;
-    setDetailOpen(true);
+    // Codex-style pane: make room first (grow the window leftwards if needed),
+    // then animate the pane in. Already-open panes switch bugs instantly.
+    if (!detailOpenRef.current) {
+      void api
+        .ensureWindowWidth(detailMinWidthRef.current)
+        .catch(() => 0)
+        .finally(() => {
+          if (seq === detailSeq.current) setDetailOpen(true);
+        });
+    }
     setDetail(null);
     setDetailError(null);
     setLastExport(null);
@@ -339,6 +375,7 @@ export default function App() {
   const selectWorkspace = (id: string) => {
     setWorkspaceId(id);
     setView("bugs");
+    detailSeq.current += 1;
     setDetailOpen(false);
     void api.setLastWorkspace(id);
   };
@@ -438,6 +475,7 @@ export default function App() {
         await api.logout();
         setContext(null);
         setWorkspaceId("");
+        detailSeq.current += 1;
         setDetailOpen(false);
         showToast("ok", "已退出登录");
         await refreshBase();
@@ -517,6 +555,39 @@ export default function App() {
     window.addEventListener("mouseup", onUp);
   };
 
+  /** Drag the divider on the detail pane's left edge (like the sidebar). */
+  const startDetailResize = (event: ReactMouseEvent<HTMLButtonElement>) => {
+    event.preventDefault();
+    const startX = event.clientX;
+    let nextWidth = effectiveDetailWidth;
+    setResizingDetail(true);
+
+    const onMove = (move: MouseEvent) => {
+      nextWidth = Math.max(
+        DETAIL_MIN_WIDTH,
+        Math.min(DETAIL_MAX_WIDTH, effectiveDetailWidth - (move.clientX - startX)),
+      );
+      setDetailWidth(nextWidth);
+    };
+
+    const onUp = () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      setResizingDetail(false);
+      // A wider pane may need a wider window; grow leftwards if necessary.
+      const required =
+        52 +
+        (sidebarCollapsed ? 0 : effectiveSidebarWidth) +
+        DETAIL_CONTENT_MIN +
+        nextWidth +
+        LAYOUT_GUTTER;
+      void api.ensureWindowWidth(required).catch(() => 0);
+    };
+
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  };
+
   const toastNode = toast ? (
     <div
       className={clsx(
@@ -590,7 +661,7 @@ export default function App() {
     <div
       className={clsx(
         "flex h-full flex-col overflow-hidden bg-[#f4f4f2] text-slate-900",
-        resizingSidebar && "select-none",
+        (resizingSidebar || resizingDetail) && "select-none",
       )}
     >
       {/* macOS traffic lights live over this strip; whole strip drags the window. */}
@@ -842,23 +913,61 @@ export default function App() {
             </div>
           )}
         </main>
-      </div>
 
-      <BugDetailDrawer
-        open={detailOpen}
-        detail={detail}
-        loading={detailLoading}
-        error={detailError}
-        exporting={exporting}
-        lastExport={lastExport}
-        onClose={() => setDetailOpen(false)}
-        onOpenWeb={(url) => openPath(url)}
-        onCopy={(text) => void copy(text)}
-        onExport={(target) => void handleExport(target)}
-        onAgentFix={(target) => void handleAgentFix(target)}
-        onOpenPath={openPath}
-        onOpenMedia={(url, mode, kind, target) => void openMedia(url, mode, kind, target)}
-      />
+        {/* Right detail pane (Codex-style): part of the layout, so the top
+            drag strip stays reachable while it is open. */}
+        <div
+          aria-hidden={!detailOpen}
+          inert={!detailOpen}
+          className={clsx(
+            "relative h-full shrink-0 overflow-hidden",
+            !resizingDetail && "transition-[width] duration-200 ease-out",
+          )}
+          style={{ width: detailOpen ? effectiveDetailWidth : 0 }}
+        >
+          <div
+            className="flex h-full flex-col pb-2 pr-2"
+            style={{ width: effectiveDetailWidth }}
+          >
+            <BugDetailDrawer
+              open={detailOpen}
+              detail={detail}
+              loading={detailLoading}
+              error={detailError}
+              exporting={exporting}
+              lastExport={lastExport}
+              onClose={() => {
+                // Cancel any pending "reveal after resize" callback.
+                detailSeq.current += 1;
+                setDetailOpen(false);
+              }}
+              onOpenWeb={(url) => openPath(url)}
+              onCopy={(text) => void copy(text)}
+              onExport={(target) => void handleExport(target)}
+              onAgentFix={(target) => void handleAgentFix(target)}
+              onOpenPath={openPath}
+              onOpenMedia={(url, mode, kind, target) =>
+                void openMedia(url, mode, kind, target)
+              }
+            />
+          </div>
+
+          {detailOpen ? (
+            <button
+              type="button"
+              aria-label="调整详情面板宽度"
+              title="拖动调整详情面板宽度"
+              onMouseDown={startDetailResize}
+              className={clsx(
+                "absolute left-0 top-0 z-10 h-full w-1.5 cursor-col-resize",
+                resizingDetail
+                  ? "bg-sky-400/50"
+                  : "bg-transparent transition hover:bg-black/[0.06]",
+              )}
+            />
+          ) : null}
+        </div>
+      </div>
 
       {pendingAgent ? (
         <FolderPicker
