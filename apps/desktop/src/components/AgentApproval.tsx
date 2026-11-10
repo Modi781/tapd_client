@@ -1,7 +1,9 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import clsx from "clsx";
 import { Archive, Bug, Check, Eye, FolderOpen, Loader2, ShieldAlert } from "lucide-react";
 
 import { agentApi, type AgentTask } from "../lib/agent";
+import { relativeTime } from "../lib/api";
 import { Badge, Button } from "./ui";
 
 type Props = {
@@ -18,12 +20,32 @@ type Props = {
 /**
  * 待审核：Agent 判断改动复杂时暂停在这里，工作区保留未提交的 diff。
  * 通过后任务重新入队并收到「审核已通过」的提交提示词；停止会储藏改动并暂停队列。
+ *
+ * 左侧是待审核队列，右侧是选中任务的改动摘要与操作。
  */
 export function AgentApproval(props: Props) {
-  const { tasks, busy, queuePaused } = props;
+  const { tasks, queuePaused } = props;
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+
+  // Newest review first: it is the one most likely to still be on screen.
+  const ordered = [...tasks].sort((a, b) => {
+    const left = Date.parse(a.approval?.requestedAt ?? a.createdAt);
+    const right = Date.parse(b.approval?.requestedAt ?? b.createdAt);
+    return (Number.isNaN(right) ? 0 : right) - (Number.isNaN(left) ? 0 : left);
+  });
+
+  useEffect(() => {
+    setSelectedId((current) =>
+      current && ordered.some((task) => task.id === current)
+        ? current
+        : ordered[0]?.id ?? null,
+    );
+  }, [tasks]);
+
+  const selected = ordered.find((task) => task.id === selectedId) ?? null;
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col gap-2.5 overflow-y-auto pr-0.5">
+    <div className="flex min-h-0 flex-1 flex-col gap-2.5">
       {tasks.length > 0 && !queuePaused ? (
         <div className="flex shrink-0 items-center gap-2 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-[11px] text-slate-600">
           <ShieldAlert size={14} className="shrink-0 text-amber-500" />
@@ -39,8 +61,8 @@ export function AgentApproval(props: Props) {
           <Button
             size="sm"
             variant="secondary"
-            loading={busy === "queue:resume"}
-            disabled={busy !== null && busy !== "queue:resume"}
+            loading={props.busy === "queue:resume"}
+            disabled={props.busy !== null && props.busy !== "queue:resume"}
             onClick={props.onResumeQueue}
           >
             继续队列
@@ -48,23 +70,89 @@ export function AgentApproval(props: Props) {
         </div>
       ) : null}
 
-      {tasks.length === 0 ? (
-        <div className="grid min-h-0 flex-1 place-items-center rounded-xl border border-slate-200 bg-white p-6 text-center shadow-sm">
-          <div className="max-w-md">
-            <div className="mx-auto grid h-12 w-12 place-items-center rounded-2xl bg-amber-50 text-amber-500">
-              <ShieldAlert size={22} />
-            </div>
-            <h3 className="mt-3 text-sm font-semibold text-slate-800">没有待审核的改动</h3>
-            <p className="mt-1 text-xs leading-5 text-slate-500">
-              复杂改动会在这里暂停。通过后重新入队提交；停止会把本次涉及的文件储藏到 git stash 并暂停队列，代码不会丢。
-            </p>
+      <div className="flex min-h-0 flex-1 gap-3">
+        <aside className="flex w-[300px] shrink-0 flex-col overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
+          <div className="flex shrink-0 items-center gap-1.5 border-b border-slate-100 px-3 py-2">
+            <ShieldAlert size={13} className="text-amber-500" />
+            <span className="text-[11px] font-medium text-slate-500">待审核改动</span>
+            <span className="ml-auto text-[10px] tabular-nums text-slate-400">
+              {tasks.length} 个
+            </span>
           </div>
-        </div>
-      ) : (
-        tasks.map((task) => (
-          <ReviewCard key={task.id} task={task} {...props} />
-        ))
-      )}
+          <div className="min-h-0 flex-1 overflow-y-auto p-1.5">
+            {ordered.length === 0 ? (
+              <div className="px-3 py-8 text-center text-xs leading-5 text-slate-400">
+                没有待审核的改动
+              </div>
+            ) : (
+              <div className="space-y-1">
+                {ordered.map((task) => (
+                  <button
+                    key={task.id}
+                    type="button"
+                    onClick={() => setSelectedId(task.id)}
+                    className={clsx(
+                      "w-full rounded-lg px-2.5 py-2 text-left transition",
+                      task.id === selectedId
+                        ? "bg-amber-50 ring-1 ring-amber-200"
+                        : "hover:bg-slate-50",
+                    )}
+                  >
+                    <div className="flex items-center gap-1.5">
+                      <Badge tone="amber" dot>
+                        待审核
+                      </Badge>
+                      <span className="ml-auto shrink-0 text-[10px] text-slate-400">
+                        {relativeTime(
+                          task.approval?.requestedAt ?? task.createdAt,
+                        )}
+                      </span>
+                    </div>
+                    <div
+                      className="mt-1 line-clamp-2 text-[12px] font-medium leading-4 text-slate-700"
+                      title={task.title}
+                    >
+                      {task.title || "（无标题）"}
+                    </div>
+                    <div className="mt-0.5 flex items-center gap-1.5 text-[10px] text-slate-400">
+                      <span className="min-w-0 truncate">
+                        {task.workspaceName || task.workspaceId} · #
+                        {task.bugId.slice(-7)}
+                      </span>
+                      {task.approval?.files?.length ? (
+                        <span className="shrink-0">
+                          {task.approval.files.length} 个文件
+                        </span>
+                      ) : null}
+                    </div>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        </aside>
+
+        <section className="min-w-0 flex-1 overflow-y-auto rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+          {selected ? (
+            <ReviewCard key={selected.id} task={selected} {...props} />
+          ) : (
+            <div className="grid h-full place-items-center px-6 py-10 text-center">
+              <div className="max-w-md">
+                <div className="mx-auto grid h-12 w-12 place-items-center rounded-2xl bg-amber-50 text-amber-500">
+                  <ShieldAlert size={22} />
+                </div>
+                <h3 className="mt-3 text-sm font-semibold text-slate-800">
+                  没有待审核的改动
+                </h3>
+                <p className="mt-1 text-xs leading-5 text-slate-500">
+                  复杂改动会在这里暂停。通过后重新入队提交；停止会把本次涉及的文件储藏到
+                  git stash 并暂停队列，代码不会丢。
+                </p>
+              </div>
+            </div>
+          )}
+        </section>
+      </div>
     </div>
   );
 }
@@ -106,7 +194,7 @@ function ReviewCard({
   };
 
   return (
-    <article className="shrink-0 rounded-xl border border-amber-200/80 bg-white p-4 shadow-sm">
+    <article className="min-w-0">
       <div className="flex flex-wrap items-start gap-2">
         <span className="mt-0.5 grid h-7 w-7 shrink-0 place-items-center rounded-lg bg-amber-50 text-amber-600">
           <ShieldAlert size={14} />

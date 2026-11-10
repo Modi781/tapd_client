@@ -102,6 +102,85 @@ export type AgentSummary = {
 
 export type PermissionReply = "once" | "always" | "reject";
 
+/** Statuses that still own the bug inside the agent pipeline. */
+const IN_FLIGHT_STATUSES: AgentTaskStatus[] = [
+  "queued",
+  "preparing",
+  "running",
+  "waiting_review",
+  "awaiting_approval",
+];
+
+export const isAgentInFlight = (task: AgentTask): boolean =>
+  IN_FLIGHT_STATUSES.includes(task.status);
+
+/** Stable key for "this bug already has an agent task". */
+export const agentBugKey = (workspaceId: string, bugId: string): string =>
+  `${workspaceId}::${bugId}`;
+
+export type AgentInFlight = {
+  task: AgentTask;
+  /** 1-based FIFO position among queued tasks; null when not queued. */
+  position: number | null;
+};
+
+/**
+ * In-flight agent tasks keyed by workspace + bug. Queue positions are the
+ * backend's insertion order, which is the order the serial worker will run.
+ */
+export function inFlightAgentTasks(tasks: AgentTask[]): Map<string, AgentInFlight> {
+  const queued = tasks.filter((task) => task.status === "queued");
+  const map = new Map<string, AgentInFlight>();
+  for (const task of tasks) {
+    if (!isAgentInFlight(task)) continue;
+    const key = agentBugKey(task.workspaceId, task.bugId);
+    const current = map.get(key);
+    // Legacy snapshots can contain duplicates; the most advanced state wins.
+    if (current && stateRank(current.task.status) <= stateRank(task.status)) continue;
+    const index = queued.findIndex((item) => item.id === task.id);
+    map.set(key, {
+      task,
+      position: index >= 0 ? index + 1 : null,
+    });
+  }
+  return map;
+}
+
+const stateRank = (status: AgentTaskStatus): number => {
+  switch (status) {
+    case "running":
+      return 0;
+    case "preparing":
+      return 1;
+    case "waiting_review":
+      return 2;
+    case "awaiting_approval":
+      return 3;
+    case "queued":
+      return 4;
+    default:
+      return 5;
+  }
+};
+
+/** Compact state label for bug rows and the detail entry point. */
+export function agentInFlightLabel(info: AgentInFlight): string {
+  switch (info.task.status) {
+    case "queued":
+      return info.position ? `排队中 #${info.position}` : "排队中";
+    case "preparing":
+      return "准备中";
+    case "running":
+      return "修复中";
+    case "waiting_review":
+      return "等待权限";
+    case "awaiting_approval":
+      return "待审核";
+    default:
+      return AGENT_STATUS_LABELS[info.task.status];
+  }
+}
+
 export type AgentEnqueueRequest = {
   workspaceId: string;
   bugId: string;
@@ -120,7 +199,7 @@ export const AGENT_STATUS_LABELS: Record<AgentTaskStatus, string> = {
   queued: "排队中",
   preparing: "准备中",
   running: "运行中",
-  waiting_review: "待审核",
+  waiting_review: "等待权限",
   awaiting_approval: "待审核",
   succeeded: "已完成",
   failed: "失败",

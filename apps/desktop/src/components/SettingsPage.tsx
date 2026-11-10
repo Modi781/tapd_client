@@ -228,9 +228,6 @@ export function SettingsPage(props: Props) {
               <FileJson size={15} className="text-slate-400" />
               接口抓包
             </h2>
-            <p className="mt-1 text-xs text-slate-500">
-              记录 TAPD 接口请求，便于排查问题。
-            </p>
           </div>
           <Button
             size="sm"
@@ -250,9 +247,6 @@ export function SettingsPage(props: Props) {
               <Sparkles size={15} className="text-slate-400" />
               新手引导
             </h2>
-            <p className="mt-1 text-xs text-slate-500">
-              重新查看产品卖点与快速开始。
-            </p>
           </div>
           <Button
             size="sm"

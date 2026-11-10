@@ -46,6 +46,11 @@ import {
   type WorkspaceMember,
 } from "../lib/api";
 import { isMyBug, ownerNames } from "../lib/bug";
+import {
+  agentBugKey,
+  agentInFlightLabel,
+  type AgentInFlight,
+} from "../lib/agent";
 import { MediaPreview, type PreviewItem } from "./MediaPreview";
 import { SkeletonBlock } from "./Skeleton";
 import {
@@ -68,6 +73,10 @@ type Props = {
   onCopy: (text: string) => void;
   onExport: (detail: BugDetail) => void;
   onAgentFix: (detail: BugDetail) => void;
+  /** In-flight agent tasks keyed by workspace + bug. */
+  agentInFlight?: Map<string, AgentInFlight>;
+  /** Jump to an already queued/running task instead of enqueuing again. */
+  onOpenAgentTask?: (taskId: string) => void;
   onOpenPath: (path: string) => void;
   onOpenMedia: (
     url: string,
@@ -100,6 +109,8 @@ function BugDetailDrawerImpl(props: Props) {
     onCopy,
     onExport,
     onAgentFix,
+    agentInFlight,
+    onOpenAgentTask,
     onOpenPath,
     onOpenMedia,
     me,
@@ -116,6 +127,11 @@ function BugDetailDrawerImpl(props: Props) {
   const [previewIndex, setPreviewIndex] = useState<number | null>(null);
   const [targetSets, setTargetSets] = useState<Record<string, OpenTargetSet>>({});
   const [, bumpMedia] = useState(0);
+
+  /** Live agent task for this bug: re-clicking must focus it, not enqueue. */
+  const agentInfo = detail
+    ? agentInFlight?.get(agentBugKey(detail.workspaceId, detail.id)) ?? null
+    : null;
 
   /** The single write action currently in flight (claim/comment/field/status). */
   const [busy, setBusy] = useState<string | null>(null);
@@ -707,15 +723,34 @@ function BugDetailDrawerImpl(props: Props) {
                 在 TAPD 中打开
               </Button>
               {mine ? (
-                <Button
-                  size="sm"
-                  variant="secondary"
-                  icon={<Bot size={13} />}
-                  disabled={exporting || loading}
-                  onClick={() => onAgentFix(detail)}
-                >
-                  用 Agent 修复
-                </Button>
+                agentInfo ? (
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    icon={
+                      agentInfo.task.status === "preparing" ||
+                      agentInfo.task.status === "running" ? (
+                        <Loader2 size={13} className="animate-spin" />
+                      ) : (
+                        <Bot size={13} />
+                      )
+                    }
+                    title="该缺陷已在 Agent 队列中，点击查看任务"
+                    onClick={() => onOpenAgentTask?.(agentInfo.task.id)}
+                  >
+                    {agentInFlightLabel(agentInfo)} · 查看任务
+                  </Button>
+                ) : (
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    icon={<Bot size={13} />}
+                    disabled={exporting || loading}
+                    onClick={() => onAgentFix(detail)}
+                  >
+                    用 Agent 修复
+                  </Button>
+                )
               ) : null}
               <Button
                 size="sm"

@@ -190,7 +190,7 @@ export function AgentHistory({ tasks, focusTaskId, onOpenBug, onQueued, toast }:
       </div>
 
       <div className="flex min-h-0 flex-1 gap-3">
-        <div className="w-[290px] shrink-0 overflow-y-auto rounded-xl border border-slate-200 bg-white p-1.5 shadow-sm">
+        <div className="w-[300px] shrink-0 overflow-y-auto rounded-xl border border-slate-200 bg-white p-1.5 shadow-sm">
           {filtered.length === 0 ? (
             <div className="px-3 py-8 text-center text-xs text-slate-400">
               没有匹配的执行记录

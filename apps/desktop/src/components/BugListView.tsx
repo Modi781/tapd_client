@@ -11,6 +11,7 @@ import {
   Loader2,
   RefreshCw,
   Search,
+  ShieldAlert,
   Sparkles,
   UserPlus,
   UserRound,
@@ -27,6 +28,11 @@ import {
   type Workspace,
 } from "../lib/api";
 import { isMyBug } from "../lib/bug";
+import {
+  agentBugKey,
+  agentInFlightLabel,
+  type AgentInFlight,
+} from "../lib/agent";
 import { cacheApi, type Cached } from "../lib/cache";
 import { beginRefresh } from "../lib/refresh";
 import { SkeletonRows } from "./Skeleton";
@@ -88,6 +94,10 @@ type Props = {
   onOpenWeb?: (url: string) => void;
   onCopyLink?: (url: string) => void;
   onAgentFix?: (bug: BugSummary) => void;
+  /** In-flight agent tasks keyed by workspace + bug. */
+  agentInFlight?: Map<string, AgentInFlight>;
+  /** Jump to an already queued/running task instead of enqueuing again. */
+  onOpenAgentTask?: (taskId: string) => void;
   /** Claim a bug owned by someone else, which unlocks its actions. */
   onClaim?: (bug: BugSummary) => Promise<void>;
   refreshToken: number;
@@ -103,6 +113,8 @@ function BugListViewImpl(props: Props) {
     onOpenWeb,
     onCopyLink,
     onAgentFix,
+    agentInFlight,
+    onOpenAgentTask,
     onClaim,
     refreshToken,
   } = props;
@@ -472,7 +484,11 @@ function BugListViewImpl(props: Props) {
               </tr>
             </thead>
             <tbody className={clsx("divide-y divide-slate-100", loading && "opacity-60")}>
-              {page.bugs.map((bug) => (
+              {page.bugs.map((bug) => {
+                const agent = agentInFlight?.get(
+                  agentBugKey(bug.workspaceId, bug.id),
+                );
+                return (
                 <tr
                   key={bug.id}
                   onClick={() => onOpenBug(bug)}
@@ -531,7 +547,40 @@ function BugListViewImpl(props: Props) {
                     className="sticky right-0 z-10 border-l border-slate-100 bg-white px-2 py-2.5 group-hover:bg-sky-50"
                     onClick={(event) => event.stopPropagation()}
                   >
-                    {!isMyBug(bug.owner, me) ? (
+                    {agent ? (
+                      // Once queued, the only action is to inspect the task:
+                      // other row actions are hidden so the bug cannot be
+                      // enqueued or edited twice while the agent owns it.
+                      <div className="flex items-center justify-end">
+                        <button
+                          type="button"
+                          title="该缺陷已在 Agent 队列中，点击查看任务"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            onOpenAgentTask?.(agent.task.id);
+                          }}
+                          className={clsx(
+                            "inline-flex max-w-full items-center gap-1 rounded-md border px-2 py-1 text-[11px] font-medium transition",
+                            agent.task.status === "waiting_review" ||
+                              agent.task.status === "awaiting_approval"
+                              ? "border-amber-200 bg-amber-50 text-amber-700 hover:border-amber-300 hover:bg-amber-100"
+                              : agent.task.status === "queued"
+                                ? "border-slate-200 bg-slate-50 text-slate-600 hover:border-slate-300 hover:bg-slate-100"
+                                : "border-sky-200 bg-sky-50 text-sky-700 hover:border-sky-300 hover:bg-sky-100",
+                          )}
+                        >
+                          {agent.task.status === "queued" ? (
+                            <Sparkles size={12} className="shrink-0" />
+                          ) : agent.task.status === "waiting_review" ||
+                            agent.task.status === "awaiting_approval" ? (
+                            <ShieldAlert size={12} className="shrink-0" />
+                          ) : (
+                            <Loader2 size={12} className="shrink-0 animate-spin" />
+                          )}
+                          <span className="truncate">{agentInFlightLabel(agent)}</span>
+                        </button>
+                      </div>
+                    ) : !isMyBug(bug.owner, me) ? (
                       <div className="flex items-center justify-center">
                         <button
                           type="button"
@@ -585,7 +634,8 @@ function BugListViewImpl(props: Props) {
                     )}
                   </td>
                 </tr>
-              ))}
+                );
+              })}
             </tbody>
           </table>
         ) : null}

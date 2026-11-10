@@ -32,7 +32,12 @@ import {
   type WorkspaceContext,
   type WorkspaceMember,
 } from "./lib/api";
-import { agentApi, type AgentTasksState } from "./lib/agent";
+import {
+  agentApi,
+  agentBugKey,
+  inFlightAgentTasks,
+  type AgentTasksState,
+} from "./lib/agent";
 import { cacheApi } from "./lib/cache";
 import {
   beginRefresh,
@@ -207,6 +212,16 @@ export default function App() {
     agentState?.tasks.filter((task) => task.status === "awaiting_approval").length ??
     0;
 
+  /** Bugs currently inside the agent pipeline, keyed by workspace + bug. */
+  const agentTasks = useMemo(() => agentState?.tasks ?? [], [agentState]);
+  const agentInFlight = useMemo(() => inFlightAgentTasks(agentTasks), [agentTasks]);
+
+  /** Jump to a live agent task instead of enqueuing the same bug twice. */
+  const openAgentTask = useCallback((taskId: string) => {
+    setAgentFocusTaskId(taskId);
+    setView("agent");
+  }, []);
+
   // Load hidden projects once from config.json. The UI is the source of truth
   // afterwards, so a background `app_info` refresh cannot revert a fresh toggle.
   useEffect(() => {
@@ -237,8 +252,14 @@ export default function App() {
       ),
     [context, hiddenWorkspaceIds],
   );
-  /** With a single visible project the list column is pointless. */
-  const projectListHidden = visibleWorkspaces.length === 1;
+  /** Whether the project list has resolved enough to decide its layout. */
+  const projectsKnown = context !== null || contextError !== null;
+  /**
+   * With a single visible project the list column is pointless. Unknown counts
+   * stay hidden too: deciding after the context request would flash the column
+   * and then collapse it on every single-project start.
+   */
+  const projectListHidden = !projectsKnown || visibleWorkspaces.length === 1;
 
   // The sidebar follows the window until the user drags it once. Coalesce
   // resize events into one update per frame; window expansion fires many.
@@ -973,6 +994,15 @@ export default function App() {
   /** Asks for the project folder first when none is configured, then enqueues. */
   const enqueueAgent = useCallback(
     async (target: AgentTarget) => {
+      // The bug is already queued/running: focus that task instead of creating
+      // a duplicate. The list and drawer also disable the action, this covers
+      // stale snapshots and notification-triggered flows.
+      const existing = agentInFlight.get(agentBugKey(target.workspaceId, target.id));
+      if (existing) {
+        openAgentTask(existing.task.id);
+        return;
+      }
+
       try {
         const { config } = await agentApi.configGet();
         const repoPath = (config.projects?.[target.workspaceId]?.repoPath ?? "").trim();
@@ -986,7 +1016,7 @@ export default function App() {
       }
       await doEnqueueAgent(target);
     },
-    [doEnqueueAgent, showToast],
+    [agentInFlight, doEnqueueAgent, openAgentTask, showToast],
   );
 
   const applyAgentFolder = useCallback(
@@ -1202,7 +1232,9 @@ export default function App() {
     view === "bugs"
       ? workspace
         ? `项目 ${workspace.id} · ${scope === "mine" ? "我负责的" : "全部缺陷"}`
-        : "选择左侧项目开始"
+        : projectsKnown
+          ? "选择左侧项目开始"
+          : "正在读取项目…"
       : view === "projects"
         ? "显示、本地文件夹与 Agent 规则"
         : view === "agent"
@@ -1579,6 +1611,8 @@ export default function App() {
                 onOpenWeb={openPath}
                 onCopyLink={copy}
                 onAgentFix={enqueueAgent}
+                agentInFlight={agentInFlight}
+                onOpenAgentTask={openAgentTask}
                 onClaim={claimBugFromList}
                 refreshToken={refreshToken}
               />
@@ -1685,6 +1719,8 @@ export default function App() {
                 onCopy={copy}
                 onExport={handleExport}
                 onAgentFix={handleAgentFix}
+                agentInFlight={agentInFlight}
+                onOpenAgentTask={openAgentTask}
                 onOpenPath={openPath}
                 onOpenMedia={openMedia}
                 me={context?.user.nick ?? info.me}

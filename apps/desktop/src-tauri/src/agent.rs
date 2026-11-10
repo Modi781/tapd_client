@@ -505,6 +505,18 @@ fn next_queued_index(tasks: &[AgentTask]) -> Option<usize> {
         .position(|task| task.status == TaskStatus::Queued)
 }
 
+/// The live task that already owns a bug, if any. Terminal tasks are ignored so
+/// a bug can be fixed again after a cancel/failure.
+fn live_task_for_bug<'a>(
+    tasks: &'a [AgentTask],
+    workspace_id: &str,
+    bug_id: &str,
+) -> Option<&'a AgentTask> {
+    tasks.iter().find(|task| {
+        task.workspace_id == workspace_id && task.bug_id == bug_id && !task.status.is_terminal()
+    })
+}
+
 fn task_counts(tasks: &[AgentTask]) -> TaskCounts {
     let mut counts = TaskCounts {
         queued: 0,
@@ -1358,10 +1370,16 @@ impl AgentCore {
             baseline_head: None,
         };
 
-        self.tasks
-            .lock()
-            .expect("agent tasks lock")
-            .push(task.clone());
+        // One bug owns at most one live task. A double click, the notification
+        // flow and a manual enqueue can race; checking and pushing under the
+        // same lock makes the operation idempotent.
+        {
+            let mut tasks = self.tasks.lock().expect("agent tasks lock");
+            if let Some(existing) = live_task_for_bug(&tasks, workspace_id, bug_id) {
+                return Ok(existing.clone());
+            }
+            tasks.push(task.clone());
+        }
         self.persist_tasks();
         self.emit_state();
         self.wake.notify_one();
@@ -3526,6 +3544,26 @@ mod tests {
         assert_eq!(active_task_id(&tasks).as_deref(), Some("new"));
         assert_eq!(next_queued_index(&tasks), None);
         assert_eq!(active_task_id(&[]), None);
+    }
+
+    #[test]
+    fn live_task_lookup_ignores_finished_tasks() {
+        let mut live = sample_task("live", TaskStatus::Queued);
+        live.workspace_id = "100".to_string();
+        live.bug_id = "1".to_string();
+
+        let mut finished = sample_task("finished", TaskStatus::Succeeded);
+        finished.workspace_id = "100".to_string();
+        finished.bug_id = "2".to_string();
+
+        let tasks = vec![live, finished];
+        assert_eq!(
+            live_task_for_bug(&tasks, "100", "1").map(|task| task.id.as_str()),
+            Some("live")
+        );
+        assert!(live_task_for_bug(&tasks, "100", "2").is_none());
+        assert!(live_task_for_bug(&tasks, "100", "3").is_none());
+        assert!(live_task_for_bug(&tasks, "200", "1").is_none());
     }
 
     #[test]
