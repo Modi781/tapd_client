@@ -160,7 +160,9 @@ jobs:
               --out "$OUT/latest.json"
           fi
 
-          (cd "$OUT" && shasum -a 256 ./* > SHA256SUMS.txt)
+          # `./*` would include the `.app` bundle directory and make shasum fail.
+          (cd "$OUT" && find . -maxdepth 1 -type f ! -name SHA256SUMS.txt -print0 \
+            | xargs -0 shasum -a 256 > SHA256SUMS.txt)
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           find "$OUT" -maxdepth 1 -print
 
