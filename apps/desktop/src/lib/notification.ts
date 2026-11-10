@@ -2,9 +2,49 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 import { featureCommand } from "./feature";
 
-export type NotificationKind = "new" | "transferred" | "reopened";
+export type NotificationKind = "new" | "transferred" | "reopened" | "ai";
 export type NotificationItemState = "pending" | "handled" | "viewed" | "ignored";
 export type NotificationScope = "mine" | "project";
+export type NotificationSource = "tapd" | "ai";
+
+export type AiTone = "info" | "success" | "warning" | "error" | "progress";
+export type AiActionStyle = "primary" | "secondary" | "danger";
+
+export type AiField = {
+  label: string;
+  value: string;
+};
+
+/** Extensible content blocks rendered by the island card. */
+export type AiBlock =
+  | { type: "text"; text: string }
+  | { type: "code"; text: string; language?: string }
+  | { type: "fields"; fields: AiField[] }
+  | { type: "progress"; percent?: number; label?: string }
+  | { type: "divider" };
+
+export type AiAction = {
+  id: string;
+  label: string;
+  style?: AiActionStyle;
+};
+
+export type AiResolution = {
+  kind: "action" | "dismissed" | "replaced" | string;
+  actionId?: string;
+  actionLabel?: string;
+  at: string;
+};
+
+/** Generic payload raised by an MCP client / external AI. */
+export type AiPayload = {
+  tone: AiTone;
+  client: string;
+  blocks: AiBlock[];
+  actions: AiAction[];
+  tag?: string | null;
+  resolution?: AiResolution | null;
+};
 
 export type QuietHours = {
   enabled: boolean;
@@ -21,6 +61,8 @@ export type NotificationSettings = {
   pollIntervalSecs: number;
   quietHours: QuietHours;
   maxVisible: number;
+  /** Allows MCP clients / external AI to raise capsule notifications. */
+  aiEnabled: boolean;
 };
 
 export type NotificationItem = {
@@ -37,6 +79,9 @@ export type NotificationItem = {
   created: string;
   detectedAt: string;
   state: NotificationItemState;
+  source?: NotificationSource;
+  /** Present only for AI / MCP notifications. */
+  ai?: AiPayload | null;
 };
 
 export type NotificationStateSnapshot = {
@@ -87,12 +132,22 @@ export const DEFAULT_NOTIFICATION_SETTINGS: NotificationSettings = {
   pollIntervalSecs: 30,
   quietHours: { enabled: false, start: "22:00", end: "09:00" },
   maxVisible: 3,
+  aiEnabled: true,
 };
 
 export const NOTIFICATION_KIND_LABELS: Record<NotificationKind, string> = {
   new: "新缺陷",
   transferred: "转派给我",
   reopened: "重新打开",
+  ai: "AI 通知",
+};
+
+export const AI_TONE_LABELS: Record<AiTone, string> = {
+  info: "提示",
+  success: "成功",
+  warning: "警告",
+  error: "失败",
+  progress: "进行中",
 };
 
 export const notificationApi = {
@@ -113,6 +168,22 @@ export const notificationApi = {
     }),
   simulate: (payload: { title?: string; bugId?: string; kind?: NotificationKind } = {}) =>
     featureCommand<{ ok: boolean; item: NotificationItem }>("notification_simulate", payload),
+  /** Reports the user's choice on an AI card back to the waiting MCP call. */
+  aiAction: (notificationId: string, actionId: string) =>
+    featureCommand<{ ok: boolean; item: NotificationItem }>("notification_ai_action", {
+      notificationId,
+      actionId,
+    }),
+  /** Raises a card from the settings debug panel (works even when AI is off). */
+  aiDebug: (payload: {
+    title: string;
+    tone?: AiTone;
+    body?: string;
+    fields?: AiField[];
+    blocks?: AiBlock[];
+    actions?: AiAction[];
+    tag?: string;
+  }) => featureCommand<{ ok: boolean; item: NotificationItem }>("notification_ai_debug", payload),
   preview: (notificationId: string) =>
     featureCommand<NotificationAcceptPreview>("notification_accept_preview", { notificationId }),
   history: () => featureCommand<{ items: NotificationItem[] }>("notification_history"),

@@ -14,6 +14,7 @@ import {
   CheckCircle2,
   Download,
   Eye,
+  Info,
   Loader2,
   X,
 } from "lucide-react";
@@ -26,6 +27,10 @@ import {
   onIslandLayout,
   onNotificationShow,
   pendingItems,
+  type AiAction,
+  type AiBlock,
+  type AiPayload,
+  type AiTone,
   type IslandLayout,
   type NotificationItem,
   type NotificationStateSnapshot,
@@ -42,7 +47,7 @@ import {
 
 const PILL_LAYOUT: IslandLayout = { expanded: false, width: 210, height: 34, count: 0 };
 
-type Busy = { id: string; action: "handle" | "view" | "ignore" } | null;
+type Busy = { id: string; action: string } | null;
 
 /**
  * Top-of-screen status capsule ("Dynamic Island"): collapsed it shows the
@@ -197,9 +202,33 @@ export function IslandWindow() {
     }
   };
 
+  /** Reports an AI card's button click back to the waiting MCP call. */
+  const runAi = async (item: NotificationItem, actionId: string) => {
+    if (busy) return;
+    setBusy({ id: item.id, action: `ai:${actionId}` });
+    setErrors((previous) => {
+      const next = { ...previous };
+      delete next[item.id];
+      return next;
+    });
+
+    try {
+      await notificationApi.aiAction(item.id, actionId);
+      setItems((previous) => previous.filter((candidate) => candidate.id !== item.id));
+      void refreshStatus();
+    } catch (error) {
+      setErrors((previous) => ({ ...previous, [item.id]: String(error) }));
+    } finally {
+      setBusy(null);
+    }
+  };
+
   // Only treat the agent as clickable when there is actually something to show.
   const agentTaskId =
-    agentSummary && (agentSummary.waitingReview || agentSummary.running)
+    agentSummary &&
+    (agentSummary.waitingReview ||
+      (agentSummary.awaitingApproval ?? 0) > 0 ||
+      agentSummary.running)
       ? agentSummary.activeTaskId
       : null;
 
@@ -207,7 +236,9 @@ export function IslandWindow() {
     if (updateState?.available) {
       return { label: `可更新 v${updateState.available.version}`, tone: "alert" as const };
     }
-    if (agentSummary?.waitingReview) return { label: "Agent 待审核", tone: "review" as const };
+    if (agentSummary?.waitingReview || (agentSummary?.awaitingApproval ?? 0) > 0) {
+      return { label: "Agent 待审核", tone: "review" as const };
+    }
     if (agentSummary?.running) return { label: "Agent 运行中", tone: "agent" as const };
     if (!snapshot) return { label: "连接中", tone: "idle" as const };
     if (!snapshot.running) return { label: "通知已暂停", tone: "paused" as const };
@@ -292,6 +323,21 @@ export function IslandWindow() {
         items.map((item) => {
           const itemBusy = busy?.id === item.id ? busy.action : null;
           const error = errors[item.id];
+
+          // AI / MCP cards use the generic payload and custom action buttons.
+          if (item.source === "ai" && item.ai) {
+            return (
+              <AiCard
+                key={item.id}
+                item={item}
+                payload={item.ai}
+                busyAction={itemBusy}
+                error={error}
+                onAction={(actionId) => void runAi(item, actionId)}
+                onDismiss={() => void run(item, "ignore")}
+              />
+            );
+          }
 
           return (
             <article
@@ -384,6 +430,241 @@ export function IslandWindow() {
           );
         })
       )}
+    </div>
+  );
+}
+
+const AI_TONE_META: Record<
+  AiTone,
+  {
+    label: string;
+    icon: typeof Info;
+    iconBg: string;
+    iconColor: string;
+    badge: string;
+  }
+> = {
+  info: {
+    label: "提示",
+    icon: Info,
+    iconBg: "bg-sky-500/15",
+    iconColor: "text-sky-300",
+    badge: "bg-sky-400/15 text-sky-300",
+  },
+  success: {
+    label: "成功",
+    icon: CheckCircle2,
+    iconBg: "bg-emerald-500/15",
+    iconColor: "text-emerald-400",
+    badge: "bg-emerald-400/15 text-emerald-300",
+  },
+  warning: {
+    label: "警告",
+    icon: AlertTriangle,
+    iconBg: "bg-amber-500/15",
+    iconColor: "text-amber-300",
+    badge: "bg-amber-400/15 text-amber-300",
+  },
+  error: {
+    label: "失败",
+    icon: AlertTriangle,
+    iconBg: "bg-rose-500/15",
+    iconColor: "text-rose-300",
+    badge: "bg-rose-400/15 text-rose-300",
+  },
+  progress: {
+    label: "进行中",
+    icon: Loader2,
+    iconBg: "bg-sky-500/15",
+    iconColor: "text-sky-300",
+    badge: "bg-sky-400/15 text-sky-300",
+  },
+};
+
+const AI_ACTION_CLASS: Record<string, string> = {
+  primary: "bg-sky-500 text-white hover:bg-sky-400",
+  secondary: "bg-white/5 text-slate-200 ring-1 ring-white/10 hover:bg-white/10",
+  danger: "bg-rose-500/90 text-white hover:bg-rose-400",
+};
+
+/** Generic card for AI / MCP notifications (tone + blocks + actions). */
+function AiCard(props: {
+  item: NotificationItem;
+  payload: AiPayload;
+  busyAction: string | null;
+  error?: string;
+  onAction: (actionId: string) => void;
+  onDismiss: () => void;
+}) {
+  const { item, payload, busyAction, error, onAction, onDismiss } = props;
+  const meta = AI_TONE_META[payload.tone] ?? AI_TONE_META.info;
+  const Icon = meta.icon;
+  const dismissBusy = busyAction === "ignore";
+
+  return (
+    <article className="island-expand relative flex min-h-0 flex-1 flex-col rounded-2xl bg-slate-900/92 p-3 ring-1 ring-white/10 backdrop-blur-xl">
+      <button
+        type="button"
+        aria-label="关闭"
+        title="关闭"
+        disabled={Boolean(busyAction)}
+        onClick={onDismiss}
+        className="absolute right-2 top-2 grid h-6 w-6 place-items-center rounded-full text-slate-400 transition hover:bg-white/10 hover:text-white disabled:opacity-40"
+      >
+        {dismissBusy ? <Loader2 size={12} className="animate-spin" /> : <X size={13} />}
+      </button>
+
+      <div className="flex items-center gap-1.5 pr-7 text-[10px] text-slate-400">
+        <span className={clsx("grid h-4 w-4 shrink-0 place-items-center rounded-full", meta.iconBg)}>
+          <Icon
+            size={11}
+            className={clsx(meta.iconColor, payload.tone === "progress" && "animate-spin")}
+          />
+        </span>
+        <span className="truncate font-medium text-slate-300" title={payload.client || item.workspaceName}>
+          {payload.client || item.workspaceName || "AI"}
+        </span>
+        <span className={clsx("shrink-0 rounded px-1.5 py-0.5 text-[9px] font-medium", meta.badge)}>
+          {meta.label}
+        </span>
+        <span className="ml-auto shrink-0 tabular-nums">
+          {formatNotificationTime(item.created)}
+        </span>
+      </div>
+
+      <h2
+        className="mt-1 line-clamp-2 text-[13px] font-semibold leading-5 text-slate-100"
+        title={item.title}
+      >
+        {item.title}
+      </h2>
+
+      <AiBlocks blocks={payload.blocks} />
+
+      <div className="mt-auto flex items-center gap-1.5 pt-2">
+        {payload.actions.length === 0 ? (
+          <button
+            type="button"
+            disabled={Boolean(busyAction)}
+            onClick={onDismiss}
+            className="inline-flex flex-1 items-center justify-center gap-1 rounded-lg bg-white/5 px-2.5 py-1.5 text-[11px] font-medium text-slate-200 ring-1 ring-white/10 transition hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {dismissBusy ? <Loader2 size={12} className="animate-spin" /> : <Check size={12} />}
+            知道了
+          </button>
+        ) : (
+          payload.actions.map((action) => (
+            <AiActionButton
+              key={action.id}
+              action={action}
+              busy={busyAction === `ai:${action.id}`}
+              disabled={Boolean(busyAction)}
+              onClick={() => onAction(action.id)}
+            />
+          ))
+        )}
+      </div>
+
+      {error ? (
+        <p className="mt-1.5 line-clamp-2 text-[10px] leading-4 text-rose-300" title={error}>
+          {error}
+        </p>
+      ) : null}
+    </article>
+  );
+}
+
+function AiActionButton(props: {
+  action: AiAction;
+  busy: boolean;
+  disabled: boolean;
+  onClick: () => void;
+}) {
+  const { action, busy, disabled, onClick } = props;
+  return (
+    <button
+      type="button"
+      disabled={disabled}
+      onClick={onClick}
+      className={clsx(
+        "inline-flex flex-1 items-center justify-center gap-1 rounded-lg px-2.5 py-1.5 text-[11px] font-medium transition disabled:cursor-not-allowed disabled:opacity-50",
+        AI_ACTION_CLASS[action.style ?? "secondary"] ?? AI_ACTION_CLASS.secondary,
+      )}
+    >
+      {busy ? <Loader2 size={12} className="animate-spin" /> : null}
+      {action.label}
+    </button>
+  );
+}
+
+function AiBlocks({ blocks }: { blocks: AiBlock[] }) {
+  if (blocks.length === 0) return null;
+
+  return (
+    <div className="mt-1 min-h-0 space-y-1 overflow-hidden">
+      {blocks.map((block, index) => {
+        switch (block.type) {
+          case "text":
+            return (
+              <p
+                key={index}
+                className="line-clamp-2 whitespace-pre-wrap break-words text-[11px] leading-4 text-slate-300"
+              >
+                {block.text}
+              </p>
+            );
+          case "code":
+            return (
+              <pre
+                key={index}
+                className="line-clamp-2 overflow-hidden rounded bg-black/30 px-1.5 py-1 font-mono text-[10px] leading-4 text-slate-200"
+              >
+                {block.text}
+              </pre>
+            );
+          case "fields":
+            return (
+              <div key={index} className="space-y-0.5">
+                {block.fields.map((field, fieldIndex) => (
+                  <div
+                    key={fieldIndex}
+                    className="flex items-center justify-between gap-2 text-[10px] leading-4"
+                  >
+                    <span className="shrink-0 text-slate-400">{field.label}</span>
+                    <span className="min-w-0 truncate text-right text-slate-200" title={field.value}>
+                      {field.value || "—"}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            );
+          case "progress": {
+            const percent = block.percent ?? 30;
+            return (
+              <div key={index} className="space-y-1">
+                <div className="flex items-center justify-between text-[10px] text-slate-400">
+                  <span className="truncate">{block.label ?? "进度"}</span>
+                  {block.percent != null ? (
+                    <span className="ml-2 shrink-0 tabular-nums">
+                      {Math.round(block.percent)}%
+                    </span>
+                  ) : null}
+                </div>
+                <div className="h-1 overflow-hidden rounded-full bg-white/10">
+                  <div
+                    className="h-full rounded-full bg-sky-400 transition-[width] duration-300"
+                    style={{ width: `${Math.min(100, Math.max(0, percent))}%` }}
+                  />
+                </div>
+              </div>
+            );
+          }
+          case "divider":
+            return <div key={index} className="h-px bg-white/10" />;
+          default:
+            return null;
+        }
+      })}
     </div>
   );
 }
@@ -554,6 +835,7 @@ function KindBadge({ kind }: { kind: NotificationItem["kind"] }) {
         kind === "new" && "bg-sky-400/15 text-sky-300",
         kind === "transferred" && "bg-violet-400/15 text-violet-300",
         kind === "reopened" && "bg-amber-400/15 text-amber-300",
+        kind === "ai" && "bg-white/10 text-slate-300",
       )}
     >
       {NOTIFICATION_KIND_LABELS[kind]}

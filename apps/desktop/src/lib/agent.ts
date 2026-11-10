@@ -5,6 +5,7 @@ export type AgentTaskStatus =
   | "preparing"
   | "running"
   | "waiting_review"
+  | "awaiting_approval"
   | "succeeded"
   | "failed"
   | "canceled";
@@ -35,6 +36,17 @@ export type AgentReviewRequest = {
   title: string;
 };
 
+/** A complex change paused for the user's commit decision. */
+export type AgentApproval = {
+  summary: string;
+  files: string[];
+  risk?: string;
+  requestedAt: string;
+  approvedAt?: string;
+  /** Stash reference recorded when the user stops instead of approving. */
+  stash?: string;
+};
+
 export type AgentTask = {
   id: string;
   workspaceId: string;
@@ -58,6 +70,10 @@ export type AgentTask = {
   sessionId?: string;
   /** Present while the agent waits for a permission decision. */
   review?: AgentReviewRequest | null;
+  /** Present while the task waits for the commit decision. */
+  approval?: AgentApproval | null;
+  /** The next run is the post-approval commit phase. */
+  commitOnly?: boolean;
 };
 
 export type AgentTasksState = {
@@ -68,12 +84,16 @@ export type AgentTasksState = {
   queuedCount?: number;
   activeCount?: number;
   waitingReviewCount?: number;
+  awaitingApprovalCount?: number;
+  /** Set after the user stopped a review; resume from the Agent tab. */
+  queuePaused?: boolean;
 };
 
 /** Lightweight agent state for the island capsule. */
 export type AgentSummary = {
   running: boolean;
   waitingReview: boolean;
+  awaitingApproval?: number;
   activeTaskId: string | null;
   title: string | null;
   workspaceName: string | null;
@@ -101,6 +121,7 @@ export const AGENT_STATUS_LABELS: Record<AgentTaskStatus, string> = {
   preparing: "准备中",
   running: "运行中",
   waiting_review: "待审核",
+  awaiting_approval: "待审核",
   succeeded: "已完成",
   failed: "失败",
   canceled: "已取消",
@@ -114,6 +135,7 @@ export const AGENT_STATUS_TONES: Record<
   preparing: "blue",
   running: "amber",
   waiting_review: "red",
+  awaiting_approval: "amber",
   succeeded: "green",
   failed: "red",
   canceled: "neutral",
@@ -131,6 +153,16 @@ export const agentApi = {
     featureCommand<{ task: AgentTask }>("agent_task_cancel", { taskId }),
   retry: (taskId: string) =>
     featureCommand<{ task: AgentTask }>("agent_task_retry", { taskId }),
+  /** Approve a paused change: the task re-enters the queue to commit. */
+  approveReview: (taskId: string) =>
+    featureCommand<{ task: AgentTask }>("agent_review_approve", { taskId }),
+  /** Stop a paused change: stash the diff, cancel the task and pause the queue. */
+  stopReview: (taskId: string) =>
+    featureCommand<{ task: AgentTask }>("agent_review_stop", { taskId }),
+  resumeQueue: () => featureCommand<AgentTasksState>("agent_queue_resume"),
+  /** Unified diff of the paused change, for the review card. */
+  reviewDiff: (taskId: string) =>
+    featureCommand<{ diff: string }>("agent_review_diff", { taskId }),
   taskLog: (taskId: string) =>
     featureCommand<{ data: string }>("agent_task_log", { taskId }),
   /** Reopen this task's opencode session in Terminal.app. */

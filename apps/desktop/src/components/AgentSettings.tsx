@@ -14,6 +14,7 @@ const PROMPT_VARIABLES = [
   "{{repo_path}}",
   "{{workspace_name}}",
   "{{bug_id}}",
+  "{{task_id}}",
   "{{severity}}",
   "{{priority}}",
   "{{project_rule}}",

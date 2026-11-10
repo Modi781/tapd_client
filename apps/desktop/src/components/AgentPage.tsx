@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import clsx from "clsx";
 import {
   Ban,
   Bot,
@@ -27,6 +28,7 @@ import {
   type AgentTasksState,
   type PermissionReply,
 } from "../lib/agent";
+import { AgentApproval } from "./AgentApproval";
 import { AgentHistory } from "./AgentHistory";
 import { AgentTerminal } from "./AgentTerminal";
 import { Segmented } from "./Segmented";
@@ -39,22 +41,31 @@ const ACTIVE_STATUSES: AgentTaskStatus[] = [
   "waiting_review",
 ];
 const isActiveStatus = (status: AgentTaskStatus) => ACTIVE_STATUSES.includes(status);
+const isApprovalStatus = (status: AgentTaskStatus) => status === "awaiting_approval";
 
 type Props = {
   /** Task selected by the island capsule (`agent://focus`). */
   focusTaskId: string | null;
+  /** Incremented by the title-bar review badge to open the 待审核 tab. */
+  focusReviewToken?: number;
   /** Jump to the bug a task belongs to (selects workspace + opens drawer). */
   onOpenBug: (workspaceId: string, bugId: string) => void;
   toast: (kind: "ok" | "error", text: string) => void;
 };
 
-type Tab = "run" | "history";
+type Tab = "run" | "approval" | "history";
 
 /**
- * Agent workspace: "运行" (active queue, review, logs/resume) and "历史"
+ * Agent workspace: "运行" (active queue, permission review, logs/resume),
+ * "待审核" (complex changes waiting for a commit decision) and "历史"
  * (terminal execution records, logs and bug links).
  */
-export function AgentPage({ focusTaskId, onOpenBug, toast }: Props) {
+export function AgentPage({
+  focusTaskId,
+  focusReviewToken = 0,
+  onOpenBug,
+  toast,
+}: Props) {
   const [tasksState, setTasksState] = useState<AgentTasksState | null>(null);
   const [loaded, setLoaded] = useState(false);
   const [tab, setTab] = useState<Tab>("run");
@@ -70,7 +81,10 @@ export function AgentPage({ focusTaskId, onOpenBug, toast }: Props) {
   const tasks = tasksState?.tasks ?? [];
   const activeTaskId = tasksState?.activeTaskId ?? null;
   const runTasks = tasks.filter((task) => isActiveStatus(task.status));
-  const historyTasks = tasks.filter((task) => !isActiveStatus(task.status));
+  const approvalTasks = tasks.filter((task) => isApprovalStatus(task.status));
+  const historyTasks = tasks.filter(
+    (task) => !isActiveStatus(task.status) && !isApprovalStatus(task.status),
+  );
 
   const refresh = useCallback(async () => {
     try {
@@ -119,7 +133,9 @@ export function AgentPage({ focusTaskId, onOpenBug, toast }: Props) {
     const focused = tasksState?.tasks.find((task) => task.id === focusTaskId);
     if (focused) {
       appliedFocusRef.current = focusTaskId;
-      if (isActiveStatus(focused.status)) {
+      if (isApprovalStatus(focused.status)) {
+        setTab("approval");
+      } else if (isActiveStatus(focused.status)) {
         setExplicitTaskId(focusTaskId);
         setTab("run");
       } else {
@@ -134,6 +150,11 @@ export function AgentPage({ focusTaskId, onOpenBug, toast }: Props) {
       void refresh();
     }
   }, [focusTaskId, tasksState, refresh]);
+
+  // The title-bar review badge opens the approval queue directly.
+  useEffect(() => {
+    if (focusReviewToken > 0) setTab("approval");
+  }, [focusReviewToken]);
 
   // Prefer a pending permission prompt, then the active task, then the first
   // queued task. Terminal tasks never leak into the run tab.
@@ -167,7 +188,16 @@ export function AgentPage({ focusTaskId, onOpenBug, toast }: Props) {
     const waiting =
       tasksState?.waitingReviewCount ??
       tasks.filter((task) => task.status === "waiting_review").length;
-    return { queued, active, waiting };
+    const awaiting =
+      tasksState?.awaitingApprovalCount ??
+      tasks.filter((task) => task.status === "awaiting_approval").length;
+    return {
+      queued,
+      active,
+      waiting,
+      awaiting,
+      paused: Boolean(tasksState?.queuePaused),
+    };
   }, [tasksState, tasks]);
 
   const queuedTasks = runTasks.filter((task) => task.status === "queued");
@@ -202,6 +232,40 @@ export function AgentPage({ focusTaskId, onOpenBug, toast }: Props) {
       setPermissionBusy(null);
     }
   };
+
+  const handleApprove = async (task: AgentTask) => {
+    if (actionBusy) return;
+    setActionBusy(`approve:${task.id}`);
+    try {
+      await agentApi.approveReview(task.id);
+      // The approved task re-enters the queue; show it running again.
+      setExplicitTaskId(task.id);
+      setTab("run");
+      await refresh();
+    } catch (error) {
+      toast("error", String(error));
+    } finally {
+      setActionBusy(null);
+    }
+  };
+
+  const handleStopReview = async (task: AgentTask) => {
+    if (actionBusy) return;
+    setActionBusy(`stop:${task.id}`);
+    try {
+      const { task: stopped } = await agentApi.stopReview(task.id);
+      // The stash ref is only visible in history otherwise; keep it in reach.
+      toast("ok", stopped.error ?? "已停止并储藏改动");
+      await refresh();
+    } catch (error) {
+      toast("error", String(error));
+    } finally {
+      setActionBusy(null);
+    }
+  };
+
+  const handleResumeQueue = () =>
+    runAction("queue:resume", () => agentApi.resumeQueue());
 
   const openExportDir = (task: AgentTask) => {
     const dir = exportDirFor(task.mdPath);
@@ -251,19 +315,50 @@ export function AgentPage({ focusTaskId, onOpenBug, toast }: Props) {
                 </span>
               ),
             },
+            {
+              value: "approval",
+              label: (
+                <span className="inline-flex items-center gap-1.5">
+                  待审核
+                  {counts.awaiting > 0 ? (
+                    <span className="inline-flex min-w-[2ch] justify-center rounded-full bg-amber-500 px-1.5 py-0.5 text-[9px] font-semibold leading-none tabular-nums text-white">
+                      {counts.awaiting}
+                    </span>
+                  ) : null}
+                </span>
+              ),
+            },
             { value: "history", label: "历史" },
           ]}
         />
 
         <span className="text-[11px] text-slate-400">
-          {counts.active} 运行 · {counts.queued} 排队 · {counts.waiting} 待审核
+          {counts.active} 运行 · {counts.queued} 排队 · {counts.waiting} 权限 ·{" "}
+          {counts.awaiting} 待审核
+          {counts.paused ? " · 队列已暂停" : ""}
         </span>
+
+        {counts.paused ? (
+          <Button
+            size="sm"
+            variant="secondary"
+            className="ml-auto"
+            loading={actionBusy === "queue:resume"}
+            disabled={actionBusy !== null && actionBusy !== "queue:resume"}
+            onClick={handleResumeQueue}
+          >
+            继续队列
+          </Button>
+        ) : null}
 
         <button
           type="button"
           onClick={() => void refresh()}
           title="刷新任务状态"
-          className="ml-auto grid h-7 w-7 place-items-center rounded-lg text-slate-400 transition hover:bg-slate-100 hover:text-slate-700"
+          className={clsx(
+            "grid h-7 w-7 place-items-center rounded-lg text-slate-400 transition hover:bg-slate-100 hover:text-slate-700",
+            !counts.paused && "ml-auto",
+          )}
         >
           <RefreshCw size={13} />
         </button>
@@ -279,6 +374,17 @@ export function AgentPage({ focusTaskId, onOpenBug, toast }: Props) {
             setTab("run");
           }}
           toast={toast}
+        />
+      ) : tab === "approval" ? (
+        <AgentApproval
+          tasks={approvalTasks}
+          busy={actionBusy}
+          queuePaused={counts.paused}
+          onApprove={handleApprove}
+          onStop={handleStopReview}
+          onResumeQueue={handleResumeQueue}
+          onOpenBug={onOpenBug}
+          onOpenExportDir={openExportDir}
         />
       ) : (
         <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
@@ -299,6 +405,16 @@ export function AgentPage({ focusTaskId, onOpenBug, toast }: Props) {
                 <p className="mt-1 text-xs leading-5 text-slate-500">
                   在缺陷详情点击「用 Agent 修复」后，任务会出现在这里；已结束的任务在「历史」中查看终端或恢复会话。
                 </p>
+                {counts.awaiting > 0 ? (
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    className="mt-3"
+                    onClick={() => setTab("approval")}
+                  >
+                    有 {counts.awaiting} 个改动待审核
+                  </Button>
+                ) : null}
               </div>
             </div>
           ) : (

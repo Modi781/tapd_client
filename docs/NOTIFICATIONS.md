@@ -62,6 +62,7 @@
 - seen 表按 `lastSeen` 保留 90 天，并限制最多 20000 条；被裁剪的 seen 会连同对应的 ignored 一起删除。
 - 重置本地数据会删除整个数据目录（含数据库）；下次启动重新建立 baseline，不会触发历史通知。
 - 退出登录会清空离线缓存，但保留通知设置、seen、ignored 与游标。
+- AI / MCP 通知只存在于内存，不写 SQLite，也不会跨重启保留。
 
 ## 5. 已读 / 未读
 
@@ -71,7 +72,18 @@ TAPD 的缺陷接口没有暴露“通知已读/未读”状态，客户端**不
 - 不提供通知历史视图；本地状态 `pending / handled / viewed / ignored` 表示“用户对这条通知做了什么”，不是 TAPD 的已读状态。
 - 若后续 TAPD 暴露已读接口，再接入真实未读数。
 
-## 6. 已知限制
+## 6. AI / MCP 通知
+
+除了 TAPD 缺陷轮询，AI 客户端（opencode、Claude Code、Cursor、Codex、ZCode 等）也可以通过 MCP 工具在同一个胶囊里提示用户。它与缺陷通知共用窗口和展开动画，但使用独立的通用卡片：
+
+- 入口：`tapd_notify_user`（唤起并等待用户操作）、`tapd_wait_notification`（继续等待）。
+- 卡片格式：`tone`（info / success / warning / error / progress）+ 标题 + 内容块（text / code / fields / progress / divider）+ 最多 4 个动作按钮。
+- 用户点击按钮或关闭后，结果作为同一次 MCP 工具调用的返回值交给 AI（`acted` + `actionId` / `dismissed` / `timeout` / `replaced` / `expired`）。
+- `tag` 相同的待处理通知会被替换，适合进度类连续更新，不会堆满胶囊。
+- AI 通知不受免打扰时段限制（它是用户主动要求的提示），但可以在设置里关闭「允许 AI / MCP 唤起通知」。
+- 设置页提供「调试通知」：选择配色、编辑标题/正文、勾选带「确认 / 取消」按钮，发送后可看到最近几条卡片及其回执，用来验证格式与反馈链路。
+
+## 7. 已知限制
 
 - `assigned_time` 依赖 TAPD 列表/详情返回；若项目不返回该字段，“转移”判定会保守，可能漏报或归类为新建。
 - 项目范围会对首次出现的候选缺陷额外拉一次详情，请求量高于“我的”范围。

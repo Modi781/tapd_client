@@ -16,6 +16,7 @@ import {
   Plug,
   RefreshCw,
   Settings as SettingsIcon,
+  ShieldAlert,
   X,
 } from "lucide-react";
 
@@ -31,7 +32,7 @@ import {
   type WorkspaceContext,
   type WorkspaceMember,
 } from "./lib/api";
-import { agentApi } from "./lib/agent";
+import { agentApi, type AgentTasksState } from "./lib/agent";
 import { cacheApi } from "./lib/cache";
 import {
   beginRefresh,
@@ -171,6 +172,40 @@ export default function App() {
   useEffect(() => {
     startUpdateStore();
   }, []);
+
+  // Pending commit reviews are surfaced in the title bar so they cannot be
+  // forgotten behind the Agent tab.
+  const [agentState, setAgentState] = useState<AgentTasksState | null>(null);
+  const [agentReviewFocus, setAgentReviewFocus] = useState(0);
+
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+
+    void agentApi
+      .tasksList()
+      .then((state) => {
+        if (!cancelled) setAgentState(state);
+      })
+      .catch(() => undefined);
+
+    void listen<AgentTasksState>("agent://state", (event) => {
+      if (!cancelled) setAgentState(event.payload);
+    }).then((fn) => {
+      if (cancelled) fn();
+      else unlisten = fn;
+    });
+
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, []);
+
+  const pendingReviews =
+    agentState?.awaitingApprovalCount ??
+    agentState?.tasks.filter((task) => task.status === "awaiting_approval").length ??
+    0;
 
   // Load hidden projects once from config.json. The UI is the source of truth
   // afterwards, so a background `app_info` refresh cannot revert a fresh toggle.
@@ -1171,7 +1206,7 @@ export default function App() {
       : view === "projects"
         ? "显示、本地文件夹与 Agent 规则"
         : view === "agent"
-          ? "运行 opencode、审核权限与查看执行历史"
+          ? "运行 opencode、审核改动与查看执行历史"
           : view === "mcp"
             ? "接入 AI 客户端与一键导入 opencode"
             : view === "account"
@@ -1198,6 +1233,26 @@ export default function App() {
             <Loader2 size={12} className="animate-spin" />
             更新中
           </div>
+        ) : null}
+
+        {/* Pending commit reviews stay visible until the user decides them. */}
+        {pendingReviews > 0 ? (
+          <button
+            type="button"
+            onClick={() => {
+              activateView("agent");
+              setAgentReviewFocus((token) => token + 1);
+            }}
+            title={`${pendingReviews} 个 Agent 改动待审核`}
+            className="grid h-7 w-7 shrink-0 place-items-center rounded-lg text-amber-600 transition hover:bg-amber-50"
+          >
+            <span className="relative">
+              <ShieldAlert size={16} />
+              <span className="absolute -right-1.5 -top-1.5 min-w-[14px] rounded-full bg-amber-500 px-1 text-center text-[9px] font-semibold leading-[14px] tabular-nums text-white">
+                {pendingReviews}
+              </span>
+            </span>
+          </button>
         ) : null}
 
         {/* The update icon only exists while a newer release is known. */}
@@ -1550,6 +1605,7 @@ export default function App() {
           ) : view === "agent" ? (
             <AgentPage
               focusTaskId={agentFocusTaskId}
+              focusReviewToken={agentReviewFocus}
               onOpenBug={openBugById}
               toast={showToast}
             />

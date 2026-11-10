@@ -13,7 +13,7 @@
 //!   body builders) so the business rules are unit-testable without TAPD.
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex, OnceLock,
@@ -24,10 +24,6 @@ use std::{
 use chrono::{Duration as ChronoDuration, Local, NaiveDateTime, NaiveTime};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tauri::{
-    AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, WebviewUrl, WebviewWindow,
-    WebviewWindowBuilder,
-};
 use tapd_core::{
     config::AppConfig,
     tapd::{
@@ -37,6 +33,10 @@ use tapd_core::{
         },
         Workspace,
     },
+};
+use tauri::{
+    AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, WebviewUrl, WebviewWindow,
+    WebviewWindowBuilder,
 };
 
 use crate::{
@@ -50,6 +50,17 @@ use crate::{
 pub const WINDOW_LABEL: &str = "island";
 const MAX_ITEMS: usize = 200;
 const MAX_HISTORY: usize = 100;
+/// AI notifications are transient prompts, so they stay in memory only.
+const MAX_AI_ITEMS: usize = 20;
+const MAX_AI_BLOCKS: usize = 8;
+const MAX_AI_ACTIONS: usize = 4;
+const MAX_AI_TITLE_CHARS: usize = 140;
+const MAX_AI_TEXT_CHARS: usize = 1_500;
+const MAX_AI_CODE_CHARS: usize = 4_000;
+const MAX_AI_TAG_CHARS: usize = 64;
+/// How long `tapd_notify_user` waits for the user by default.
+const DEFAULT_NOTIFY_WAIT_SECS: u64 = 30;
+const MAX_NOTIFY_WAIT_SECS: u64 = 120;
 const FRESH_WINDOW_MINUTES: i64 = 5;
 const OVERLAP_MINUTES: i64 = 2;
 const POLL_PAGE_SIZE: u32 = 200;
@@ -86,6 +97,9 @@ pub enum NotificationKind {
     New,
     Transferred,
     Reopened,
+    /// Raised by an MCP client (agent / external AI). The card is rendered
+    /// from the generic `ai` payload instead of the bug fields.
+    Ai,
 }
 
 impl NotificationKind {
@@ -94,6 +108,7 @@ impl NotificationKind {
             Self::New => "new",
             Self::Transferred => "transferred",
             Self::Reopened => "reopened",
+            Self::Ai => "ai",
         }
     }
 
@@ -102,9 +117,18 @@ impl NotificationKind {
             "new" => Some(Self::New),
             "transferred" => Some(Self::Transferred),
             "reopened" => Some(Self::Reopened),
+            "ai" => Some(Self::Ai),
             _ => None,
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum NotificationSource {
+    #[default]
+    Tapd,
+    Ai,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -153,6 +177,9 @@ pub struct NotificationSettings {
     pub poll_interval_secs: u64,
     pub quiet_hours: QuietHours,
     pub max_visible: u32,
+    /// Allows MCP clients to raise capsule notifications. Independent from
+    /// `enabled`, which only controls TAPD bug polling.
+    pub ai_enabled: bool,
 }
 
 impl Default for NotificationSettings {
@@ -166,6 +193,7 @@ impl Default for NotificationSettings {
             poll_interval_secs: DEFAULT_POLL_INTERVAL_SECS,
             quiet_hours: QuietHours::default(),
             max_visible: 3,
+            ai_enabled: true,
         }
     }
 }
@@ -176,6 +204,7 @@ impl NotificationSettings {
             NotificationKind::New => self.include_new,
             NotificationKind::Transferred => self.include_transferred,
             NotificationKind::Reopened => self.include_reopened,
+            NotificationKind::Ai => self.ai_enabled,
         }
     }
 
@@ -210,6 +239,103 @@ pub struct NotificationItem {
     pub created: String,
     pub detected_at: String,
     pub state: NotificationState,
+    #[serde(default)]
+    pub source: NotificationSource,
+    /// Populated only for `source = ai`; keeps the bug fields above untouched.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ai: Option<AiPayload>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AiTone {
+    #[default]
+    Info,
+    Success,
+    Warning,
+    Error,
+    Progress,
+}
+
+impl AiTone {
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw.trim() {
+            "info" => Some(Self::Info),
+            "success" => Some(Self::Success),
+            "warning" => Some(Self::Warning),
+            "error" => Some(Self::Error),
+            "progress" => Some(Self::Progress),
+            _ => None,
+        }
+    }
+}
+
+/// One content block in an AI notification. Unknown future block types are
+/// rejected at the MCP boundary, so the renderer can stay exhaustive while the
+/// schema grows.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum AiBlock {
+    Text {
+        text: String,
+    },
+    Code {
+        text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        language: Option<String>,
+    },
+    Fields {
+        fields: Vec<AiField>,
+    },
+    Progress {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        percent: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+    },
+    Divider,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiField {
+    pub label: String,
+    pub value: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiAction {
+    pub id: String,
+    pub label: String,
+    /// `primary` / `secondary` / `danger`; unknown values render as secondary.
+    pub style: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiResolution {
+    /// `action`, `dismissed` or `replaced`.
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action_label: Option<String>,
+    pub at: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiPayload {
+    pub tone: AiTone,
+    /// MCP client that raised the notification (shown in the card header).
+    pub client: String,
+    pub blocks: Vec<AiBlock>,
+    pub actions: Vec<AiAction>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tag: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolution: Option<AiResolution>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -282,6 +408,245 @@ pub fn scope_allows(scope: NotificationScope, owner: &str, me: &str) -> bool {
             !me.is_empty() && owner.trim() == me
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// AI notification payload parsing
+// ---------------------------------------------------------------------------
+
+fn truncate_chars(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let mut truncated: String = text.chars().take(max.saturating_sub(1)).collect();
+    truncated.push('…');
+    truncated
+}
+
+fn required_text(value: Option<&Value>, path: &str, max: usize) -> Result<String, String> {
+    value
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(|text| truncate_chars(text, max))
+        .ok_or_else(|| format!("{path} 不能为空"))
+}
+
+fn parse_ai_fields(value: &Value, path: &str) -> Result<Vec<AiField>, String> {
+    let items = value
+        .as_array()
+        .ok_or_else(|| format!("{path} 必须是数组"))?;
+    if items.len() > 8 {
+        return Err(format!("{path} 最多 8 项"));
+    }
+    items
+        .iter()
+        .enumerate()
+        .map(|(index, item)| {
+            let label = required_text(item.get("label"), &format!("{path}[{index}].label"), 24)?;
+            let value = item
+                .get("value")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .map(|text| truncate_chars(text, 120))
+                .unwrap_or_default();
+            Ok(AiField { label, value })
+        })
+        .collect()
+}
+
+fn parse_ai_progress(value: &Value, path: &str) -> Result<AiBlock, String> {
+    let percent = value.get("percent").and_then(Value::as_f64).map(|percent| {
+        if percent.is_finite() {
+            percent.clamp(0.0, 100.0)
+        } else {
+            0.0
+        }
+    });
+    let label = value
+        .get("label")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|label| !label.is_empty())
+        .map(|label| truncate_chars(label, 80));
+    if percent.is_none() && label.is_none() {
+        return Err(format!("{path} 需要 percent 或 label"));
+    }
+    Ok(AiBlock::Progress { percent, label })
+}
+
+fn parse_ai_block(block: &Value, index: usize) -> Result<AiBlock, String> {
+    let path = format!("blocks[{index}]");
+    let kind = block
+        .get("type")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|kind| !kind.is_empty())
+        .ok_or_else(|| format!("{path}.type 不能为空"))?;
+
+    match kind {
+        "text" => Ok(AiBlock::Text {
+            text: required_text(
+                block.get("text"),
+                &format!("{path}.text"),
+                MAX_AI_TEXT_CHARS,
+            )?,
+        }),
+        "code" => Ok(AiBlock::Code {
+            text: block
+                .get("text")
+                .and_then(Value::as_str)
+                .map(|text| truncate_chars(text, MAX_AI_CODE_CHARS))
+                .unwrap_or_default(),
+            language: block
+                .get("language")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|language| !language.is_empty())
+                .map(|language| truncate_chars(language, 24)),
+        }),
+        "fields" => {
+            let fields = parse_ai_fields(
+                block.get("fields").unwrap_or(&Value::Null),
+                &format!("{path}.fields"),
+            )?;
+            Ok(AiBlock::Fields { fields })
+        }
+        "progress" => parse_ai_progress(block, &path),
+        "divider" => Ok(AiBlock::Divider),
+        other => Err(format!(
+            "{path}.type 不支持「{other}」，可用 text / code / fields / progress / divider"
+        )),
+    }
+}
+
+fn parse_ai_actions(value: Option<&Value>) -> Result<Vec<AiAction>, String> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    if value.is_null() {
+        return Ok(Vec::new());
+    }
+    let items = value
+        .as_array()
+        .ok_or_else(|| "actions 必须是数组".to_string())?;
+    if items.len() > MAX_AI_ACTIONS {
+        return Err(format!("actions 最多 {MAX_AI_ACTIONS} 个"));
+    }
+
+    let mut seen = BTreeSet::new();
+    let mut actions = Vec::with_capacity(items.len());
+    for (index, item) in items.iter().enumerate() {
+        let path = format!("actions[{index}]");
+        let id = required_text(item.get("id"), &format!("{path}.id"), 48)?;
+        if !seen.insert(id.clone()) {
+            return Err(format!("{path}.id「{id}」重复"));
+        }
+        let label = required_text(item.get("label"), &format!("{path}.label"), 24)?;
+        let style = match item.get("style").and_then(Value::as_str) {
+            None | Some("") => "secondary".to_string(),
+            Some(style @ ("primary" | "secondary" | "danger")) => style.to_string(),
+            Some(_) => {
+                return Err(format!("{path}.style 必须是 primary / secondary / danger"));
+            }
+        };
+        actions.push(AiAction { id, label, style });
+    }
+    Ok(actions)
+}
+
+/// Parses the MCP arguments into a title plus the generic AI payload.
+///
+/// Supports both the shorthand (`body` / `fields` / `progress`) and the
+/// explicit `blocks` array. Text is truncated so a runaway message cannot
+/// break the fixed-height capsule card.
+pub fn ai_payload_from_arguments(
+    arguments: &Value,
+    client: &str,
+) -> Result<(String, AiPayload), String> {
+    let title = required_text(arguments.get("title"), "title", MAX_AI_TITLE_CHARS)?;
+    let tone = match arguments.get("tone").and_then(Value::as_str) {
+        None => AiTone::Info,
+        Some(raw) => AiTone::parse(raw)
+            .ok_or_else(|| "tone 必须是 info / success / warning / error / progress".to_string())?,
+    };
+
+    let blocks = match arguments.get("blocks") {
+        None => Vec::new(),
+        Some(Value::Array(items)) if items.is_empty() => Vec::new(),
+        Some(Value::Array(items)) => {
+            if items.len() > MAX_AI_BLOCKS {
+                return Err(format!("blocks 最多 {MAX_AI_BLOCKS} 个"));
+            }
+            items
+                .iter()
+                .enumerate()
+                .map(|(index, block)| parse_ai_block(block, index))
+                .collect::<Result<Vec<_>, _>>()?
+        }
+        Some(_) => return Err("blocks 必须是数组".to_string()),
+    };
+
+    let mut blocks = blocks;
+    if blocks.is_empty() {
+        if let Some(body) = arguments
+            .get("body")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|body| !body.is_empty())
+        {
+            blocks.push(AiBlock::Text {
+                text: truncate_chars(body, MAX_AI_TEXT_CHARS),
+            });
+        }
+        if let Some(fields) = arguments.get("fields").filter(|fields| !fields.is_null()) {
+            let fields = parse_ai_fields(fields, "fields")?;
+            if !fields.is_empty() {
+                blocks.push(AiBlock::Fields { fields });
+            }
+        }
+        if let Some(progress) = arguments
+            .get("progress")
+            .filter(|progress| !progress.is_null())
+        {
+            blocks.push(parse_ai_progress(progress, "progress")?);
+        }
+    }
+
+    let actions = parse_ai_actions(arguments.get("actions"))?;
+    let tag = arguments
+        .get("tag")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|tag| !tag.is_empty())
+        .map(|tag| truncate_chars(tag, MAX_AI_TAG_CHARS));
+
+    let client = if client.trim().is_empty() {
+        "AI".to_string()
+    } else {
+        truncate_chars(client.trim(), 40)
+    };
+
+    Ok((
+        title,
+        AiPayload {
+            tone,
+            client,
+            blocks,
+            actions,
+            tag,
+            resolution: None,
+        },
+    ))
+}
+
+fn notify_wait_seconds(arguments: &Value) -> u64 {
+    arguments
+        .get("waitSeconds")
+        .or_else(|| arguments.get("wait_seconds"))
+        .and_then(Value::as_u64)
+        .unwrap_or(DEFAULT_NOTIFY_WAIT_SECS)
+        .min(MAX_NOTIFY_WAIT_SECS)
 }
 
 pub fn parse_tapd_time(raw: &str) -> Option<NaiveDateTime> {
@@ -394,9 +759,7 @@ pub fn classify_bug(
         return Some(NotificationKind::New);
     }
     let recently_assigned = assigned_recently(created, assigned_time, now);
-    let assumption = trust_recent_assignment
-        && owner == me
-        && assigned_time.trim().is_empty();
+    let assumption = trust_recent_assignment && owner == me && assigned_time.trim().is_empty();
     if owner == me && (recently_assigned || assumption) {
         return Some(NotificationKind::Transferred);
     }
@@ -566,26 +929,14 @@ pub fn transition_attempts(
         attempts.push(TransitionAttempt {
             api: TransitionApi::Kanban,
             target,
-            body: kanban_transition_body(
-                workspace_id,
-                bug_id,
-                current_status,
-                target,
-                dsc_token,
-            ),
+            body: kanban_transition_body(workspace_id, bug_id, current_status, target, dsc_token),
         });
     }
     for target in TRANSITION_TARGETS {
         attempts.push(TransitionAttempt {
             api: TransitionApi::Workflow,
             target,
-            body: workflow_transition_body(
-                workspace_id,
-                bug_id,
-                current_status,
-                target,
-                dsc_token,
-            ),
+            body: workflow_transition_body(workspace_id, bug_id, current_status, target, dsc_token),
         });
     }
 
@@ -695,6 +1046,9 @@ struct NotificationService {
     app: AppHandle,
     state: SharedState,
     store: Mutex<NotificationStore>,
+    /// AI / MCP notifications are transient prompts: memory only, never
+    /// persisted, cleared on restart.
+    ai_items: Mutex<VecDeque<NotificationItem>>,
     workspace_names: Mutex<BTreeMap<String, String>>,
     /// First workspace returned by TAPD, used before the UI persists a choice.
     default_workspace: Mutex<Option<String>>,
@@ -743,11 +1097,7 @@ impl NotificationService {
             .ok_or_else(|| "通知不存在或已被清理".to_string())
     }
 
-    fn set_state(
-        &self,
-        id: &str,
-        state: NotificationState,
-    ) -> Result<NotificationItem, String> {
+    fn set_state(&self, id: &str, state: NotificationState) -> Result<NotificationItem, String> {
         let item = {
             let mut store = self.store.lock().expect("notification store lock");
             let item = store
@@ -776,18 +1126,216 @@ impl NotificationService {
     }
 
     fn pending_payload(&self) -> (Vec<NotificationItem>, bool) {
-        let store = self.store.lock().expect("notification store lock");
-        let max = store.settings.max_visible.max(1) as usize;
-        let items: Vec<NotificationItem> = store
-            .items
+        let (mut items, quiet_hours, max) = {
+            let store = self.store.lock().expect("notification store lock");
+            (
+                store
+                    .items
+                    .iter()
+                    .filter(|item| item.state == NotificationState::Pending)
+                    .cloned()
+                    .collect::<Vec<_>>(),
+                quiet_hours_active(&store.settings.quiet_hours, Local::now().time()),
+                store.settings.max_visible.max(1) as usize,
+            )
+        };
+        {
+            let ai_items = self.ai_items.lock().expect("ai notification lock");
+            items.extend(
+                ai_items
+                    .iter()
+                    .filter(|item| item.state == NotificationState::Pending)
+                    .cloned(),
+            );
+        }
+        // Explicit AI prompts come first (they may be waiting for a click),
+        // then newest-first within each source.
+        items.sort_by(|left, right| {
+            let left_ai = left.source == NotificationSource::Ai;
+            let right_ai = right.source == NotificationSource::Ai;
+            right_ai
+                .cmp(&left_ai)
+                .then_with(|| right.detected_at.cmp(&left.detected_at))
+        });
+        items.truncate(max);
+        // Explicit AI prompts are user-addressed; quiet hours only silence
+        // background bug notifications.
+        let has_ai = items
             .iter()
-            .rev()
-            .filter(|item| item.state == NotificationState::Pending)
-            .take(max)
+            .any(|item| item.source == NotificationSource::Ai);
+        (items, quiet_hours && !has_ai)
+    }
+
+    /// Recent items (bugs first, newest-first overall) for settings/history.
+    fn recent_items(&self, limit: usize) -> Vec<NotificationItem> {
+        let mut items = self
+            .store
+            .lock()
+            .expect("notification store lock")
+            .items
+            .clone();
+        items.extend(
+            self.ai_items
+                .lock()
+                .expect("ai notification lock")
+                .iter()
+                .cloned(),
+        );
+        items.sort_by(|left, right| right.detected_at.cmp(&left.detected_at));
+        items.truncate(limit);
+        items
+    }
+
+    fn find_ai_item(&self, id: &str) -> Result<NotificationItem, String> {
+        self.ai_items
+            .lock()
+            .expect("ai notification lock")
+            .iter()
+            .find(|item| item.id == id)
             .cloned()
-            .collect();
-        let quiet = quiet_hours_active(&store.settings.quiet_hours, Local::now().time());
-        (items, quiet)
+            .ok_or_else(|| "通知不存在或已被清理".to_string())
+    }
+
+    /// Creates an AI notification. `bypass_enabled` is used by the settings
+    /// debug panel so a test card still appears while AI notifications are off.
+    fn raise_ai(
+        &self,
+        title: String,
+        payload: AiPayload,
+        bypass_enabled: bool,
+    ) -> Result<NotificationItem, String> {
+        if !bypass_enabled && !self.settings().ai_enabled {
+            return Err("AI 通知已在「设置 → 通知」中关闭".to_string());
+        }
+
+        let now = Local::now();
+        let tag = payload.tag.clone();
+        let item = NotificationItem {
+            id: uuid::Uuid::new_v4().to_string(),
+            workspace_id: "ai".to_string(),
+            workspace_name: payload.client.clone(),
+            bug_id: String::new(),
+            title,
+            kind: NotificationKind::Ai,
+            owner: String::new(),
+            creator: payload.client.clone(),
+            severity: String::new(),
+            priority: String::new(),
+            created: format_tapd_time(now.naive_local()),
+            detected_at: now.to_rfc3339(),
+            state: NotificationState::Pending,
+            source: NotificationSource::Ai,
+            ai: Some(payload),
+        };
+
+        {
+            let mut items = self.ai_items.lock().expect("ai notification lock");
+            // `tag` replaces an outstanding card in place, so rapid progress
+            // updates do not collapse and re-expand the island. The replaced
+            // waiter observes `replaced` on its next poll.
+            if let Some(tag) = tag.as_deref() {
+                for existing in items.iter_mut() {
+                    if existing.state != NotificationState::Pending
+                        || existing.ai.as_ref().and_then(|ai| ai.tag.as_deref()) != Some(tag)
+                    {
+                        continue;
+                    }
+                    if let Some(ai) = existing.ai.as_mut() {
+                        ai.resolution = Some(AiResolution {
+                            kind: "replaced".to_string(),
+                            action_id: None,
+                            action_label: None,
+                            at: now.to_rfc3339(),
+                        });
+                    }
+                    existing.state = NotificationState::Ignored;
+                }
+            }
+
+            items.push_back(item.clone());
+            while items.len() > MAX_AI_ITEMS {
+                items.pop_front();
+            }
+        }
+        self.refresh_window();
+        Ok(item)
+    }
+
+    /// Stores the user's decision on an AI card. `kind` is `action`,
+    /// `dismissed` or `replaced`; `action_id` is required for `action`.
+    fn finish_ai(
+        &self,
+        id: &str,
+        kind: &str,
+        action_id: Option<&str>,
+    ) -> Result<NotificationItem, String> {
+        let item = {
+            let mut items = self.ai_items.lock().expect("ai notification lock");
+            let item = items
+                .iter_mut()
+                .find(|item| item.id == id)
+                .ok_or_else(|| "通知不存在或已被清理".to_string())?;
+            if let Some(ai) = item.ai.as_mut() {
+                if ai.resolution.is_some() {
+                    return Ok(item.clone());
+                }
+                let action = match action_id {
+                    Some(action_id) => Some(
+                        ai.actions
+                            .iter()
+                            .find(|action| action.id == action_id)
+                            .cloned()
+                            .ok_or_else(|| format!("未知操作「{action_id}」"))?,
+                    ),
+                    None => None,
+                };
+                ai.resolution = Some(AiResolution {
+                    kind: kind.to_string(),
+                    action_id: action.as_ref().map(|action| action.id.clone()),
+                    action_label: action.as_ref().map(|action| action.label.clone()),
+                    at: Local::now().to_rfc3339(),
+                });
+            }
+            item.state = if kind == "action" {
+                NotificationState::Handled
+            } else {
+                NotificationState::Ignored
+            };
+            item.clone()
+        };
+        self.refresh_window();
+        Ok(item)
+    }
+
+    fn ai_state(&self, id: &str) -> (bool, Option<AiResolution>) {
+        let items = self.ai_items.lock().expect("ai notification lock");
+        match items.iter().find(|item| item.id == id) {
+            Some(item) => (true, item.ai.as_ref().and_then(|ai| ai.resolution.clone())),
+            None => (false, None),
+        }
+    }
+
+    /// Waits for a user decision. Returns the stored resolution when the user
+    /// already acted, `Pending` on timeout, `Gone` when the card was dropped.
+    ///
+    /// Uses a short poll instead of a notifier so a resolution that lands
+    /// between the state check and the wait cannot be missed.
+    async fn wait_ai(&self, id: &str, timeout: Duration) -> AiWait {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let (exists, resolution) = self.ai_state(id);
+            if let Some(resolution) = resolution {
+                return AiWait::Resolved(resolution);
+            }
+            if !exists {
+                return AiWait::Gone;
+            }
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                return AiWait::Pending;
+            }
+            tokio::time::sleep((deadline - now).min(Duration::from_millis(200))).await;
+        }
     }
 
     /// Emits the current pending list and lays the island out accordingly.
@@ -801,7 +1349,13 @@ impl NotificationService {
             json!({ "items": items, "quiet": quiet }),
         );
 
-        apply_island(&self.app, &self.state, !items.is_empty() && !quiet, items.len(), true);
+        apply_island(
+            &self.app,
+            &self.state,
+            !items.is_empty() && !quiet,
+            items.len(),
+            true,
+        );
     }
 
     /// Resolves the signed-in user plus the accessible workspaces in one call.
@@ -1161,6 +1715,8 @@ impl NotificationService {
                         created: bug.created.clone(),
                         detected_at: Local::now().to_rfc3339(),
                         state: NotificationState::Pending,
+                        source: NotificationSource::Tapd,
+                        ai: None,
                     };
                     store.items.push(item.clone());
                     new_items.push(item);
@@ -1381,24 +1937,20 @@ fn ensure_window(app: &AppHandle, state: &SharedState) -> Result<WebviewWindow, 
         return Ok(window);
     }
 
-    let window = WebviewWindowBuilder::new(
-        app,
-        WINDOW_LABEL,
-        WebviewUrl::App("index.html".into()),
-    )
-    .title("TAPD Client")
-    .inner_size(PILL_WIDTH, PILL_HEIGHT)
-    .resizable(false)
-    // Transparent, chrome-less window: the capsule/card is drawn by CSS.
-    .decorations(false)
-    .transparent(true)
-    .shadow(false)
-    .always_on_top(true)
-    .skip_taskbar(true)
-    .focused(false)
-    .visible(false)
-    .build()
-    .map_err(|error| error.to_string())?;
+    let window = WebviewWindowBuilder::new(app, WINDOW_LABEL, WebviewUrl::App("index.html".into()))
+        .title("TAPD Client")
+        .inner_size(PILL_WIDTH, PILL_HEIGHT)
+        .resizable(false)
+        // Transparent, chrome-less window: the capsule/card is drawn by CSS.
+        .decorations(false)
+        .transparent(true)
+        .shadow(false)
+        .always_on_top(true)
+        .skip_taskbar(true)
+        .focused(false)
+        .visible(false)
+        .build()
+        .map_err(|error| error.to_string())?;
 
     let window_for_events = window.clone();
     let app_for_events = app.clone();
@@ -1481,7 +2033,10 @@ fn island_size(expanded: bool, count: usize) -> (f64, f64) {
         return (PILL_WIDTH, PILL_HEIGHT);
     }
     let rows = count.clamp(1, 5) as f64;
-    (CARD_WIDTH, CARD_BASE_HEIGHT + (rows - 1.0) * CARD_ROW_HEIGHT)
+    (
+        CARD_WIDTH,
+        CARD_BASE_HEIGHT + (rows - 1.0) * CARD_ROW_HEIGHT,
+    )
 }
 
 /// Rectangle (physical pixels) for a logical island size.
@@ -1707,6 +2262,7 @@ pub fn init(app: &AppHandle, state: SharedState) {
         app: app.clone(),
         state,
         store: Mutex::new(store),
+        ai_items: Mutex::new(VecDeque::new()),
         workspace_names: Mutex::new(BTreeMap::new()),
         default_workspace: Mutex::new(None),
         last_poll_at: Mutex::new(None),
@@ -1747,6 +2303,106 @@ pub fn init(app: &AppHandle, state: SharedState) {
 }
 
 // ---------------------------------------------------------------------------
+// AI notification entry points (MCP + settings debug)
+// ---------------------------------------------------------------------------
+
+enum AiWait {
+    Resolved(AiResolution),
+    /// The user did not act before the wait deadline; the card stays visible.
+    Pending,
+    /// The card was dropped (cap / restart) before a decision.
+    Gone,
+}
+
+fn ai_outcome_json(id: &str, outcome: AiWait, waited: Duration, waited_for: bool) -> Value {
+    let (status, resolution) = match outcome {
+        AiWait::Resolved(resolution) => {
+            // Only these three are produced by `finish_ai`; a future kind still
+            // gets a stable fallback instead of leaking an internal string.
+            let status = match resolution.kind.as_str() {
+                "action" => "acted",
+                "dismissed" => "dismissed",
+                "replaced" => "replaced",
+                _ => "resolved",
+            };
+            (status, Some(resolution))
+        }
+        AiWait::Pending => (if waited_for { "timeout" } else { "pending" }, None),
+        AiWait::Gone => ("expired", None),
+    };
+
+    let mut result = json!({
+        "id": id,
+        "status": status,
+        "waitedMs": waited.as_millis() as u64,
+    });
+    if let Some(resolution) = resolution {
+        result["resolvedAt"] = Value::from(resolution.at);
+        if let Some(action_id) = resolution.action_id {
+            result["actionId"] = Value::from(action_id);
+        }
+        if let Some(action_label) = resolution.action_label {
+            result["actionLabel"] = Value::from(action_label);
+        }
+    }
+    result
+}
+
+/// MCP `tapd_notify_user`: raises the capsule and optionally waits for the
+/// user's decision so the calling AI receives it in the same tool call.
+pub async fn mcp_notify(arguments: &Value, client: &str) -> Result<Value, String> {
+    let service = service()?;
+    let (title, payload) = ai_payload_from_arguments(arguments, client)?;
+    let wait_secs = notify_wait_seconds(arguments);
+    let started = std::time::Instant::now();
+    let item = service.raise_ai(title, payload, false)?;
+
+    let outcome = if wait_secs == 0 {
+        AiWait::Pending
+    } else {
+        service
+            .wait_ai(&item.id, Duration::from_secs(wait_secs))
+            .await
+    };
+    Ok(ai_outcome_json(
+        &item.id,
+        outcome,
+        started.elapsed(),
+        wait_secs > 0,
+    ))
+}
+
+/// MCP `tapd_wait_notification`: waits again for a card raised earlier.
+pub async fn mcp_wait(arguments: &Value) -> Result<Value, String> {
+    let service = service()?;
+    let id = arguments
+        .get("id")
+        .or_else(|| arguments.get("notificationId"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| "缺少参数 id".to_string())?
+        .to_string();
+    let wait_secs = notify_wait_seconds(arguments);
+    let started = std::time::Instant::now();
+    let outcome = if wait_secs == 0 {
+        match service.ai_state(&id) {
+            (false, _) => AiWait::Gone,
+            (true, Some(resolution)) => AiWait::Resolved(resolution),
+            (true, None) => AiWait::Pending,
+        }
+    } else {
+        service.wait_ai(&id, Duration::from_secs(wait_secs)).await
+    };
+    Ok(ai_outcome_json(
+        &id,
+        outcome,
+        started.elapsed(),
+        wait_secs > 0,
+    ))
+}
+
+// ---------------------------------------------------------------------------
 // Tauri feature commands
 // ---------------------------------------------------------------------------
 
@@ -1777,15 +2433,7 @@ pub async fn command(
         }
         "notification_history" => {
             let service = service()?;
-            let store = service.store.lock().expect("notification store lock");
-            let items: Vec<NotificationItem> = store
-                .items
-                .iter()
-                .rev()
-                .take(MAX_HISTORY)
-                .cloned()
-                .collect();
-            Ok(json!({ "items": items }))
+            Ok(json!({ "items": service.recent_items(MAX_HISTORY) }))
         }
         "notification_handle" => {
             let service = service()?;
@@ -1833,24 +2481,38 @@ pub async fn command(
             let service = service()?;
             simulate_notification(state, &service, &payload)
         }
+        "notification_ai_action" => {
+            let service = service()?;
+            let id = payload_str(&payload, "notificationId")?;
+            let action_id = payload_str(&payload, "actionId")?;
+            let item = service.finish_ai(&id, "action", Some(&action_id))?;
+            Ok(json!({ "ok": true, "item": item }))
+        }
+        "notification_ai_debug" => {
+            let service = service()?;
+            let client = payload
+                .get("client")
+                .and_then(Value::as_str)
+                .filter(|client| !client.trim().is_empty())
+                .unwrap_or("调试面板");
+            let (title, ai) = ai_payload_from_arguments(&payload, client)?;
+            // Debug cards must show even when AI notifications are disabled.
+            let item = service.raise_ai(title, ai, true)?;
+            Ok(json!({ "ok": true, "item": item }))
+        }
         other => Err(format!("unknown notification command: {other}")),
     }
 }
 
 fn state_snapshot(service: &NotificationService) -> Result<Value, String> {
-    let store = service.store.lock().expect("notification store lock");
-    let items: Vec<NotificationItem> = store
-        .items
-        .iter()
-        .rev()
-        .take(MAX_HISTORY)
-        .cloned()
-        .collect();
+    let items = service.recent_items(MAX_HISTORY);
+    let settings = service.settings();
+    let running = service.running.load(Ordering::SeqCst) && settings.enabled;
 
     Ok(json!({
         "items": items,
-        "settings": store.settings,
-        "running": service.running.load(Ordering::SeqCst) && store.settings.enabled,
+        "settings": settings,
+        "running": running,
         "lastPollAt": service.last_poll_at.lock().expect("last poll lock").clone(),
         "lastError": service.last_error.lock().expect("last error lock").clone(),
     }))
@@ -1867,8 +2529,7 @@ fn view_notification(
     focus_main_window(app);
 
     // Simulated cards have no real bug to open; just bring the main window up.
-    let simulated =
-        item.workspace_id == "simulated" || item.bug_id.starts_with("simulated-");
+    let simulated = item.workspace_id == "simulated" || item.bug_id.starts_with("simulated-");
     if !simulated {
         let _ = app.emit(
             "notification://open-bug",
@@ -1881,6 +2542,13 @@ fn view_notification(
 }
 
 fn ignore_notification(service: &NotificationService, id: &str) -> Result<Value, String> {
+    // AI cards are dismissed (and the waiting MCP call is released) rather
+    // than added to the bug ignore list.
+    if service.find_ai_item(id).is_ok() {
+        let item = service.finish_ai(id, "dismissed", None)?;
+        return Ok(json!({ "ok": true, "item": item }));
+    }
+
     let item = service.find_item(id)?;
     let key = bug_key(&item.workspace_id, &item.bug_id);
     {
@@ -1914,13 +2582,19 @@ fn simulate_notification(
         .get("kind")
         .and_then(Value::as_str)
         .and_then(NotificationKind::parse)
+        .filter(|kind| *kind != NotificationKind::Ai)
         .unwrap_or(NotificationKind::New);
     let bug_id = payload
         .get("bugId")
         .and_then(Value::as_str)
         .filter(|id| !id.trim().is_empty())
         .map(str::to_string)
-        .unwrap_or_else(|| format!("simulated-{}", &uuid::Uuid::new_v4().simple().to_string()[..8]));
+        .unwrap_or_else(|| {
+            format!(
+                "simulated-{}",
+                &uuid::Uuid::new_v4().simple().to_string()[..8]
+            )
+        });
     let title = payload
         .get("title")
         .and_then(Value::as_str)
@@ -1942,6 +2616,8 @@ fn simulate_notification(
         created: format_tapd_time(Local::now().naive_local()),
         detected_at: Local::now().to_rfc3339(),
         state: NotificationState::Pending,
+        source: NotificationSource::Tapd,
+        ai: None,
     };
 
     service.push_item(item.clone());
@@ -2002,12 +2678,7 @@ async fn build_accept_plan(
 
     Ok(AcceptPlan {
         inline_body: inline_owner_body(&item.workspace_id, &item.bug_id, &me, dsc),
-        transition_attempts: transition_attempts(
-            &item.workspace_id,
-            &item.bug_id,
-            &status,
-            dsc,
-        ),
+        transition_attempts: transition_attempts(&item.workspace_id, &item.bug_id, &status, dsc),
         me,
         owner,
         status,
@@ -2159,9 +2830,9 @@ async fn handle_notification(
         match resolve_attempt_target(&plan.transition_attempts, &outcomes) {
             Some(target) => transition_target = Some(target.to_string()),
             None => {
-                return Err(last_error.unwrap_or_else(|| {
-                    "状态流转失败：所有候选目标均未成功".to_string()
-                }));
+                return Err(
+                    last_error.unwrap_or_else(|| "状态流转失败：所有候选目标均未成功".to_string())
+                );
             }
         }
     }
@@ -2282,13 +2953,17 @@ struct SettingsPatch {
     poll_interval_secs: Option<u64>,
     quiet_hours: Option<QuietHoursPatch>,
     max_visible: Option<u32>,
+    ai_enabled: Option<bool>,
 }
 
 fn apply_settings_patch(
     service: &NotificationService,
     payload: &Value,
 ) -> Result<NotificationSettings, String> {
-    let patch_value = payload.get("settings").cloned().unwrap_or_else(|| payload.clone());
+    let patch_value = payload
+        .get("settings")
+        .cloned()
+        .unwrap_or_else(|| payload.clone());
     let patch: SettingsPatch = serde_json::from_value(patch_value)
         .map_err(|error| format!("通知设置格式不正确：{error}"))?;
 
@@ -2313,6 +2988,9 @@ fn apply_settings_patch(
     }
     if let Some(value) = patch.max_visible {
         settings.max_visible = value;
+    }
+    if let Some(value) = patch.ai_enabled {
+        settings.ai_enabled = value;
     }
     if let Some(quiet) = patch.quiet_hours {
         if let Some(enabled) = quiet.enabled {
@@ -2513,7 +3191,10 @@ mod tests {
             "closed",
             "rejected",
         ] {
-            assert!(!is_starting_status(status), "{status} should not be starting");
+            assert!(
+                !is_starting_status(status),
+                "{status} should not be starting"
+            );
         }
     }
 
@@ -2674,10 +3355,22 @@ mod tests {
             start: "22:00".to_string(),
             end: "09:00".to_string(),
         };
-        assert!(quiet_hours_active(&quiet, NaiveTime::from_hms_opt(23, 0, 0).unwrap()));
-        assert!(quiet_hours_active(&quiet, NaiveTime::from_hms_opt(8, 59, 0).unwrap()));
-        assert!(!quiet_hours_active(&quiet, NaiveTime::from_hms_opt(9, 0, 0).unwrap()));
-        assert!(!quiet_hours_active(&quiet, NaiveTime::from_hms_opt(12, 0, 0).unwrap()));
+        assert!(quiet_hours_active(
+            &quiet,
+            NaiveTime::from_hms_opt(23, 0, 0).unwrap()
+        ));
+        assert!(quiet_hours_active(
+            &quiet,
+            NaiveTime::from_hms_opt(8, 59, 0).unwrap()
+        ));
+        assert!(!quiet_hours_active(
+            &quiet,
+            NaiveTime::from_hms_opt(9, 0, 0).unwrap()
+        ));
+        assert!(!quiet_hours_active(
+            &quiet,
+            NaiveTime::from_hms_opt(12, 0, 0).unwrap()
+        ));
     }
 
     #[test]
@@ -2687,14 +3380,23 @@ mod tests {
             start: "12:00".to_string(),
             end: "13:30".to_string(),
         };
-        assert!(quiet_hours_active(&quiet, NaiveTime::from_hms_opt(13, 0, 0).unwrap()));
-        assert!(!quiet_hours_active(&quiet, NaiveTime::from_hms_opt(13, 30, 0).unwrap()));
+        assert!(quiet_hours_active(
+            &quiet,
+            NaiveTime::from_hms_opt(13, 0, 0).unwrap()
+        ));
+        assert!(!quiet_hours_active(
+            &quiet,
+            NaiveTime::from_hms_opt(13, 30, 0).unwrap()
+        ));
 
         let disabled = QuietHours {
             enabled: false,
             ..quiet
         };
-        assert!(!quiet_hours_active(&disabled, NaiveTime::from_hms_opt(13, 0, 0).unwrap()));
+        assert!(!quiet_hours_active(
+            &disabled,
+            NaiveTime::from_hms_opt(13, 0, 0).unwrap()
+        ));
     }
 
     #[test]
@@ -2725,7 +3427,8 @@ mod tests {
 
     #[test]
     fn workflow_transition_omits_required_field_flags() {
-        let body = workflow_transition_body("45336192", "1010606", "reopened", "in_progress", Some("t"));
+        let body =
+            workflow_transition_body("45336192", "1010606", "reopened", "in_progress", Some("t"));
         assert!(body.get("check_required_fields").is_none());
         assert!(body.get("edit_rule_fields").is_none());
         assert_eq!(body["dsc_token"], "t");
@@ -2736,7 +3439,9 @@ mod tests {
         assert!(response_ok(&json!({ "meta": { "code": 0 } })));
         assert!(response_ok(&json!({ "meta": { "code": "0" } })));
         assert!(response_ok(&json!({ "data": {} })));
-        assert!(!response_ok(&json!({ "meta": { "code": 1, "message": "no" } })));
+        assert!(!response_ok(
+            &json!({ "meta": { "code": 1, "message": "no" } })
+        ));
         assert!(!response_ok(&json!({ "meta": { "code": "1" } })));
     }
 
@@ -2858,8 +3563,14 @@ mod tests {
             workspace_from_session_url("https://www.tapd.cn/tapd_fe/123/my/work?x=1"),
             Some("123".to_string())
         );
-        assert_eq!(workspace_from_session_url("https://www.tapd.cn/login"), None);
-        assert_eq!(workspace_from_session_url("https://www.tapd.cn/tapd_fe/my/work"), None);
+        assert_eq!(
+            workspace_from_session_url("https://www.tapd.cn/login"),
+            None
+        );
+        assert_eq!(
+            workspace_from_session_url("https://www.tapd.cn/tapd_fe/my/work"),
+            None
+        );
     }
 
     #[test]
@@ -2898,5 +3609,116 @@ mod island_tests {
         let expanded = place_island(Some((1500, 120)), AREA.0, AREA.1, AREA.2, 384, MARGIN);
         assert_eq!(collapsed.0 + 105, expanded.0 + 192);
         assert_eq!(collapsed.1, expanded.1);
+    }
+}
+
+#[cfg(test)]
+mod ai_notification_tests {
+    use super::*;
+
+    #[test]
+    fn builds_blocks_from_shorthand() {
+        let (title, payload) = ai_payload_from_arguments(
+            &json!({
+                "title": "  构建完成 ",
+                "tone": "success",
+                "body": "3 个任务完成",
+                "fields": [{"label": "耗时", "value": "42s"}],
+                "actions": [{"id": "open", "label": "打开", "style": "primary"}]
+            }),
+            "Claude Code",
+        )
+        .expect("payload");
+
+        assert_eq!(title, "构建完成");
+        assert_eq!(payload.tone, AiTone::Success);
+        assert_eq!(payload.client, "Claude Code");
+        assert_eq!(
+            payload.blocks[0],
+            AiBlock::Text {
+                text: "3 个任务完成".to_string()
+            }
+        );
+        assert!(matches!(payload.blocks[1], AiBlock::Fields { .. }));
+        assert_eq!(payload.actions[0].id, "open");
+        assert_eq!(payload.actions[0].style, "primary");
+    }
+
+    #[test]
+    fn explicit_blocks_override_shorthand() {
+        let (_, payload) = ai_payload_from_arguments(
+            &json!({
+                "title": "进度",
+                "tone": "progress",
+                "body": "ignored",
+                "blocks": [
+                    {"type": "progress", "percent": 120, "label": "安装"},
+                    {"type": "divider"},
+                    {"type": "code", "text": "cargo build", "language": "sh"}
+                ]
+            }),
+            "Codex",
+        )
+        .expect("payload");
+
+        assert_eq!(payload.blocks.len(), 3);
+        assert_eq!(
+            payload.blocks[0],
+            AiBlock::Progress {
+                percent: Some(100.0),
+                label: Some("安装".to_string())
+            }
+        );
+        assert_eq!(payload.blocks[1], AiBlock::Divider);
+        assert!(matches!(&payload.blocks[2], AiBlock::Code { text, .. } if text == "cargo build"));
+    }
+
+    #[test]
+    fn rejects_unknown_types_and_duplicate_actions() {
+        let unknown = ai_payload_from_arguments(
+            &json!({"title": "x", "blocks": [{"type": "video"}]}),
+            "client",
+        );
+        assert!(unknown.is_err());
+
+        let duplicate = ai_payload_from_arguments(
+            &json!({
+                "title": "x",
+                "actions": [
+                    {"id": "a", "label": "A"},
+                    {"id": "a", "label": "B"}
+                ]
+            }),
+            "client",
+        );
+        assert!(duplicate.is_err());
+
+        let bad_style = ai_payload_from_arguments(
+            &json!({"title": "x", "actions": [{"id": "a", "label": "A", "style": "loud"}]}),
+            "client",
+        );
+        assert!(bad_style.is_err());
+    }
+
+    #[test]
+    fn truncates_long_body_and_clamps_wait() {
+        let body = "x".repeat(MAX_AI_TEXT_CHARS + 10);
+        let (_, payload) =
+            ai_payload_from_arguments(&json!({"title": "x", "body": body}), "client")
+                .expect("payload");
+        match &payload.blocks[0] {
+            AiBlock::Text { text } => {
+                assert_eq!(text.chars().count(), MAX_AI_TEXT_CHARS);
+                assert!(text.ends_with('…'));
+            }
+            other => panic!("unexpected block: {other:?}"),
+        }
+
+        assert_eq!(
+            notify_wait_seconds(&json!({"waitSeconds": 999})),
+            MAX_NOTIFY_WAIT_SECS
+        );
+        assert_eq!(notify_wait_seconds(&json!({})), DEFAULT_NOTIFY_WAIT_SECS);
+        assert_eq!(notify_wait_seconds(&json!({"waitSeconds": 0})), 0);
     }
 }

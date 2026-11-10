@@ -87,6 +87,24 @@ pub fn looks_like_auth_page(raw: &str) -> bool {
         || lower.contains("/register")
 }
 
+/// The actual TAPD login form (not an OAuth callback). Reaching it means the
+/// logout cleanup finished navigating, so the logout guard can be released.
+pub fn is_login_form_url(raw: &str) -> bool {
+    raw.to_ascii_lowercase().contains("/cloud_logins/login")
+}
+
+/// Decides whether the session watcher must re-evaluate a URL.
+///
+/// An unchanged URL is normally skipped to avoid rewriting the config every
+/// tick. Two cases must still be evaluated: while the logout guard is active
+/// (a login may finish inside it), the first tick after it expires (that login
+/// was suppressed and must not be lost), and a blank page (a failed logout
+/// navigation needs to be repaired).
+fn should_evaluate(url: &str, last_url: &str, guarded: bool, was_guarded: bool) -> bool {
+    let blank = url.is_empty() || url == "about:blank";
+    url != last_url || guarded || was_guarded || blank
+}
+
 /// Creates (or reveals) the TAPD webview used both for login and as the data bridge.
 pub fn ensure_session_window(
     app: &AppHandle,
@@ -170,6 +188,7 @@ pub fn cookie_value(window: &WebviewWindow, name: &str) -> Option<String> {
 pub fn spawn_session_watcher(app: AppHandle, state: SharedState) {
     tauri::async_runtime::spawn(async move {
         let mut last_url = String::new();
+        let mut was_guarded = false;
 
         loop {
             tokio::time::sleep(Duration::from_millis(1200)).await;
@@ -181,26 +200,31 @@ pub fn spawn_session_watcher(app: AppHandle, state: SharedState) {
                 continue;
             };
             let url_string = url.to_string();
-            // During the logout guard we still re-evaluate the same URL, so a
-            // login that finishes inside the guard window is picked up as soon
-            // as it expires instead of being stuck logged out.
-            if url_string == last_url && !logout_in_progress() {
+            let guarded = logout_in_progress();
+            let blank = url_string.is_empty() || url_string == "about:blank";
+
+            if !should_evaluate(&url_string, &last_url, guarded, was_guarded) {
                 continue;
             }
+            was_guarded = guarded;
             last_url = url_string.clone();
 
             let logged_in = is_logged_in_url(&url_string);
             let auth_page = looks_like_auth_page(&url_string);
+            let login_form = is_login_form_url(&url_string);
 
             let mut login_changed = false;
             let mut expired = false;
             let mut open_login = false;
+            let mut guard_done = false;
             let persisted = state.update_config(|config| {
-                config.last_session_url = Some(url_string.clone());
+                if !blank {
+                    config.last_session_url = Some(url_string.clone());
+                }
 
                 // A logout just cleared cookies and is still navigating: don't
                 // read the old page as a fresh login and flip the state back.
-                let suppress_login = logout_in_progress() && !config.logged_in;
+                let suppress_login = guarded && !config.logged_in;
 
                 if !suppress_login && logged_in && !config.logged_in {
                     config.logged_in = true;
@@ -216,14 +240,27 @@ pub fn spawn_session_watcher(app: AppHandle, state: SharedState) {
                     expired = true;
                 }
 
-                // TAPD's marketing home never redirects to the login form on
+                // The real login form is on screen, so the logout navigation
+                // has finished: release the guard and let the next scan log in
+                // immediately instead of being ignored for the whole window.
+                if guarded && !config.logged_in && login_form {
+                    guard_done = true;
+                }
+
+                // TAPD's marketing home (or a blank document left behind by a
+                // failed logout navigation) never turns into the login form on
                 // its own, which would leave the hidden webview stuck there.
-                if !suppress_login && !config.logged_in && is_bare_tapd_home(&url_string) {
+                if !suppress_login && !config.logged_in && (is_bare_tapd_home(&url_string) || blank)
+                {
                     open_login = true;
                 }
             });
             if let Err(error) = persisted {
                 tracing::warn!(%error, "failed to persist session state");
+            }
+
+            if guard_done {
+                LOGOUT_GUARD_UNTIL.store(0, Ordering::SeqCst);
             }
 
             if open_login && now_millis() > LOGIN_BOUNCE_UNTIL.load(Ordering::SeqCst) {
@@ -429,4 +466,42 @@ fn parse_bridge_payload(raw: &str) -> Result<serde_json::Value, String> {
     }
 
     Ok(value)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_login_form_url, should_evaluate};
+
+    #[test]
+    fn reevaluates_once_after_the_logout_guard_expires() {
+        let url = "https://www.tapd.cn/tapd_fe/my/work";
+        // Same URL, no guard: skipped on purpose.
+        assert!(!should_evaluate(url, url, false, false));
+        // Same URL right after the guard ended: the suppressed login must be
+        // picked up instead of staying logged out forever.
+        assert!(should_evaluate(url, url, false, true));
+        // While the guard is active the URL is re-checked every tick.
+        assert!(should_evaluate(url, url, true, true));
+    }
+
+    #[test]
+    fn reevaluates_changed_and_blank_urls() {
+        let login = "https://www.tapd.cn/cloud_logins/login?";
+        assert!(should_evaluate(login, "about:blank", false, false));
+        assert!(should_evaluate("about:blank", "about:blank", false, false));
+        assert!(should_evaluate("", "", false, false));
+    }
+
+    #[test]
+    fn detects_the_real_login_form_only() {
+        assert!(is_login_form_url("https://www.tapd.cn/cloud_logins/login?"));
+        assert!(is_login_form_url(
+            "https://www.tapd.cn/cloud_logins/login?redirect_url=https%3A%2F%2Fwww.tapd.cn%2F"
+        ));
+        // OAuth callbacks are part of an in-flight login, not the form.
+        assert!(!is_login_form_url("https://www.tapd.cn/tapd_fe/my/work"));
+        assert!(!is_login_form_url(
+            "https://www.tapd.cn/cloud_logins/wework_callback"
+        ));
+    }
 }

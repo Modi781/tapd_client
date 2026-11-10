@@ -7,7 +7,6 @@
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Map, Value};
-use tauri::AppHandle;
 use tapd_core::{
     config::McpPolicy,
     tapd::{
@@ -15,6 +14,7 @@ use tapd_core::{
         BugListPage, Workspace,
     },
 };
+use tauri::AppHandle;
 
 use crate::{
     bug_write::{self, add_comment, load_transition_info, resolve_status_key},
@@ -54,7 +54,27 @@ pub async fn handle(
         return Err(message);
     }
 
-    let result = dispatch(app, state, tool, arguments).await;
+    // The local agent must commit before it comments or changes TAPD state.
+    if is_write_tool(tool) {
+        if let Some(message) = crate::agent::tapd_write_block_reason(app, arguments) {
+            record_audit(
+                state,
+                &policy,
+                tool,
+                client,
+                "denied",
+                false,
+                started,
+                arguments,
+                Some(message.clone()),
+                summary,
+            );
+            tracing::info!(tool, client, ok = false, error = %message, "mcp write blocked until commit");
+            return Err(message);
+        }
+    }
+
+    let result = dispatch(app, state, tool, arguments, client).await;
     let (decision, ok) = match &result {
         Ok(_) => ("allowed", true),
         Err(_) => ("error", false),
@@ -86,10 +106,7 @@ pub async fn handle(
 }
 
 fn is_write_tool(tool: &str) -> bool {
-    matches!(
-        tool,
-        "tapd_add_bug_comment" | "tapd_update_bug_status"
-    )
+    matches!(tool, "tapd_add_bug_comment" | "tapd_update_bug_status")
 }
 
 /// Returns a user-facing reason when the policy forbids the call.
@@ -100,9 +117,7 @@ fn policy_violation(policy: &McpPolicy, tool: &str, arguments: &Value) -> Option
 
     if let Some(workspace_id) = string_arg(arguments, "workspace_id") {
         if !policy.allows_workspace(&workspace_id) {
-            return Some(format!(
-                "项目 {workspace_id} 不在 MCP 策略允许的项目范围内"
-            ));
+            return Some(format!("项目 {workspace_id} 不在 MCP 策略允许的项目范围内"));
         }
     }
 
@@ -121,6 +136,8 @@ fn summarize_arguments(arguments: &Value) -> Value {
         "limit",
         "page",
         "only_unresolved",
+        "tone",
+        "waitSeconds",
     ] {
         if let Some(value) = arguments.get(key) {
             summary.insert(key.to_string(), value.clone());
@@ -134,6 +151,21 @@ fn summarize_arguments(arguments: &Value) -> Value {
     }
     if let Some(fields) = arguments.get("fields").and_then(Value::as_array) {
         summary.insert("fields".to_string(), Value::from(fields.len() as u64));
+    }
+    if let Some(blocks) = arguments.get("blocks").and_then(Value::as_array) {
+        summary.insert("blocks".to_string(), Value::from(blocks.len() as u64));
+    }
+    if let Some(actions) = arguments.get("actions").and_then(Value::as_array) {
+        summary.insert("actions".to_string(), Value::from(actions.len() as u64));
+    }
+    if let Some(files) = arguments.get("files").and_then(Value::as_array) {
+        summary.insert("files".to_string(), Value::from(files.len() as u64));
+    }
+    if let Some(summary_text) = arguments.get("summary").and_then(Value::as_str) {
+        summary.insert(
+            "summaryChars".to_string(),
+            Value::from(summary_text.chars().count() as u64),
+        );
     }
     Value::Object(summary)
 }
@@ -179,6 +211,7 @@ async fn dispatch(
     state: &SharedState,
     tool: &str,
     arguments: &Value,
+    client: &str,
 ) -> Result<Value, String> {
     match tool {
         "tapd_whoami" => whoami(app, state).await,
@@ -190,6 +223,11 @@ async fn dispatch(
         "tapd_get_bug_transitions" => get_bug_transitions(app, state, arguments).await,
         "tapd_add_bug_comment" => add_bug_comment(app, state, arguments).await,
         "tapd_update_bug_status" => update_bug_status(app, state, arguments).await,
+        // Local-only: no TAPD session or workspace scope involved.
+        "tapd_notify_user" => crate::notification::mcp_notify(arguments, client).await,
+        "tapd_wait_notification" => crate::notification::mcp_wait(arguments).await,
+        // Local agent only: pauses the running task for a commit decision.
+        "tapd_request_review" => crate::agent::request_review_from_mcp(app, arguments).await,
         other => Err(format!("tool `{other}` is not available")),
     }
 }
@@ -246,13 +284,8 @@ async fn list_my_bugs(
     Ok(page_json(page))
 }
 
-async fn get_bug(
-    app: &AppHandle,
-    state: &SharedState,
-    arguments: &Value,
-) -> Result<Value, String> {
-    let bug_id = string_arg(arguments, "bug_id")
-        .ok_or_else(|| "bug_id is required".to_string())?;
+async fn get_bug(app: &AppHandle, state: &SharedState, arguments: &Value) -> Result<Value, String> {
+    let bug_id = string_arg(arguments, "bug_id").ok_or_else(|| "bug_id is required".to_string())?;
     let (_, workspaces) = load_context(app).await?;
     let workspace_id = resolve_workspace(state, &workspaces, arguments)?;
 
@@ -265,8 +298,7 @@ async fn export_bug_md(
     state: &SharedState,
     arguments: &Value,
 ) -> Result<Value, String> {
-    let bug_id = string_arg(arguments, "bug_id")
-        .ok_or_else(|| "bug_id is required".to_string())?;
+    let bug_id = string_arg(arguments, "bug_id").ok_or_else(|| "bug_id is required".to_string())?;
     let (_, workspaces) = load_context(app).await?;
     let workspace_id = resolve_workspace(state, &workspaces, arguments)?;
     let workspace_name = string_arg(arguments, "workspace_name").or_else(|| {
@@ -276,14 +308,9 @@ async fn export_bug_md(
             .map(|workspace| workspace.name.clone())
     });
 
-    let result = crate::export::run_export(
-        app,
-        &state.paths,
-        &workspace_id,
-        &bug_id,
-        workspace_name,
-    )
-    .await?;
+    let result =
+        crate::export::run_export(app, &state.paths, &workspace_id, &bug_id, workspace_name)
+            .await?;
 
     serde_json::to_value(result).map_err(|error| error.to_string())
 }
@@ -386,10 +413,7 @@ async fn load_context(app: &AppHandle) -> Result<(Value, Vec<Workspace>), String
     Ok((user, workspaces))
 }
 
-async fn resolve_me(
-    app: &AppHandle,
-    state: &SharedState,
-) -> Result<Option<String>, String> {
+async fn resolve_me(app: &AppHandle, state: &SharedState) -> Result<Option<String>, String> {
     if let Some(me) = state.config_snapshot().me {
         return Ok(Some(me));
     }
@@ -421,16 +445,16 @@ fn resolve_workspace(
     if let Some(workspace_id) = string_arg(arguments, "workspace_id") {
         if !workspace_id.is_empty() {
             if !policy.allows_workspace(&workspace_id) {
-                return Err(format!(
-                    "项目 {workspace_id} 不在 MCP 策略允许的项目范围内"
-                ));
+                return Err(format!("项目 {workspace_id} 不在 MCP 策略允许的项目范围内"));
             }
             return Ok(workspace_id);
         }
     }
 
     if let Some(workspace_id) = state.config_snapshot().last_workspace_id {
-        if workspaces.iter().any(|workspace| workspace.id == workspace_id)
+        if workspaces
+            .iter()
+            .any(|workspace| workspace.id == workspace_id)
             && policy.allows_workspace(&workspace_id)
         {
             return Ok(workspace_id);
@@ -453,8 +477,7 @@ async fn get_bug_transitions(
     state: &SharedState,
     arguments: &Value,
 ) -> Result<Value, String> {
-    let bug_id = string_arg(arguments, "bug_id")
-        .ok_or_else(|| "bug_id is required".to_string())?;
+    let bug_id = string_arg(arguments, "bug_id").ok_or_else(|| "bug_id is required".to_string())?;
     let (_, workspaces) = load_context(app).await?;
     let workspace_id = resolve_workspace(state, &workspaces, arguments)?;
 
@@ -479,8 +502,7 @@ async fn add_bug_comment(
     state: &SharedState,
     arguments: &Value,
 ) -> Result<Value, String> {
-    let bug_id = string_arg(arguments, "bug_id")
-        .ok_or_else(|| "bug_id is required".to_string())?;
+    let bug_id = string_arg(arguments, "bug_id").ok_or_else(|| "bug_id is required".to_string())?;
     let comment = string_arg(arguments, "comment")
         .or_else(|| string_arg(arguments, "body"))
         .ok_or_else(|| "comment is required".to_string())?;
@@ -500,8 +522,7 @@ async fn update_bug_status(
     state: &SharedState,
     arguments: &Value,
 ) -> Result<Value, String> {
-    let bug_id = string_arg(arguments, "bug_id")
-        .ok_or_else(|| "bug_id is required".to_string())?;
+    let bug_id = string_arg(arguments, "bug_id").ok_or_else(|| "bug_id is required".to_string())?;
     let target_input = string_arg(arguments, "status")
         .or_else(|| string_arg(arguments, "next_status"))
         .ok_or_else(|| "status is required".to_string())?;
@@ -557,8 +578,7 @@ fn default_workspace_id(
         .config_snapshot()
         .last_workspace_id
         .filter(|id| {
-            workspaces.iter().any(|workspace| &workspace.id == id)
-                && policy.allows_workspace(id)
+            workspaces.iter().any(|workspace| &workspace.id == id) && policy.allows_workspace(id)
         })
         .or_else(|| {
             workspaces
@@ -623,12 +643,9 @@ mod policy_tests {
             &json!({ "workspace_id": "45336192" })
         )
         .is_none());
-        assert!(policy_violation(
-            &policy,
-            "tapd_get_bug",
-            &json!({ "workspace_id": "999" })
-        )
-        .is_some());
+        assert!(
+            policy_violation(&policy, "tapd_get_bug", &json!({ "workspace_id": "999" })).is_some()
+        );
     }
 
     #[test]

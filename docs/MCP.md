@@ -67,7 +67,7 @@ opencode mcp list
 
 ## 4. 工具
 
-共 9 个工具：6 个查询/导出 + 3 个修复后回写（评论、状态、状态查询）。
+共 12 个工具：7 个查询/导出/状态查询 + 2 个修复后回写（评论、状态）+ 2 个桌面胶囊通知（唤起、等待回执）+ 1 个 Agent 改动审核（暂停并等待用户确认提交）。
 
 | 工具 | 作用 | 关键参数 |
 | --- | --- | --- |
@@ -80,6 +80,9 @@ opencode mcp list
 | `tapd_get_bug_transitions` | 当前状态与允许的下一步 | `bug_id`（必填）、`workspace_id` |
 | `tapd_add_bug_comment` | 追加评论（纯文本自动转富文本） | `bug_id`、`comment`（必填） |
 | `tapd_update_bug_status` | 更新状态，可同时评论 | `bug_id`、`status`（key 或中文名）、`comment`、`fields` |
+| `tapd_notify_user` | 在顶部胶囊唤起通知，并等待用户点击后回传结果 | `title`（必填）、`tone`、`body`、`fields`、`progress`、`blocks`、`actions`、`tag`、`waitSeconds` |
+| `tapd_wait_notification` | 继续等待之前通知的用户决定 | `id`（必填）、`waitSeconds` |
+| `tapd_request_review` | 复杂改动暂停，等待用户审核后再提交（仅 Agent 任务） | `taskId`（必填）、`summary`（必填）、`files`、`risk` |
 
 约定：
 
@@ -98,7 +101,48 @@ opencode mcp list
 {"tool": "tapd_get_bug_transitions", "arguments": {"bug_id": "1145336192001010582"}}
 {"tool": "tapd_add_bug_comment", "arguments": {"bug_id": "1145336192001010582", "comment": "根因：草稿状态未写入 store。\n方案：补持久化并加回归测试。\n影响范围：会话详情草稿。"}}
 {"tool": "tapd_update_bug_status", "arguments": {"bug_id": "1145336192001010582", "status": "已解决", "comment": "已修复并验证。"}}
+{"tool": "tapd_notify_user", "arguments": {"title": "修复完成", "tone": "success", "body": "3 个缺陷已更新并推送。", "fields": [{"label": "耗时", "value": "2m 18s"}], "actions": [{"id": "open", "label": "查看", "style": "primary"}]}}
+{"tool": "tapd_wait_notification", "arguments": {"id": "0b6f…", "waitSeconds": 30}}
 ```
+
+### 4.1 AI 通知格式
+
+`tapd_notify_user` 把一条通知推到屏幕顶部的胶囊，并同步等待用户操作（默认 30 秒，最长 120 秒），因此同一个工具调用就能拿到回执。适合「任务完成 / 失败 / 需要确认」等场景，外部 AI 客户端也可以用它提示用户。
+
+- `tone`：`info` / `success` / `warning` / `error` / `progress`，控制图标与配色。
+- `body`：正文，保留换行。
+- `fields`：键值对列表（最多 8 项），渲染为两列。
+- `progress`：`{ "percent": 0-100, "label": "…" }`，渲染进度条。
+- `blocks`：需要更精细排版时使用，支持 `text` / `code` / `fields` / `progress` / `divider`；传了非空 `blocks` 就不再使用上面的简写。
+- `actions`：最多 4 个按钮，`{ "id", "label", "style" }`；用户点击后返回 `actionId` 与 `actionLabel`。不传时只显示「知道了」。
+- `tag`：相同 tag 的待处理通知会被替换，适合反复更新的进度卡片。
+- `waitSeconds`：0 表示立即返回；之后可用 `tapd_wait_notification` 继续等待。
+
+返回 `status`：
+
+| status | 含义 |
+| --- | --- |
+| `acted` | 用户点击了按钮，附 `actionId` / `actionLabel` |
+| `dismissed` | 用户点了关闭 |
+| `timeout` | 等待超时，卡片仍留在胶囊里；可再次等待 |
+| `pending` | `waitSeconds=0`，立即返回 |
+| `replaced` | 被相同 `tag` 的新通知替换 |
+| `expired` | 卡片已被清理或客户端重启 |
+
+AI 通知只存在于内存，不写入 SQLite，也不会跨重启保留；设置 → 通知里可以关闭「允许 AI / MCP 唤起通知」，或用调试面板发一条自定义卡片验证效果。
+
+### 4.2 Agent 改动审核（tapd_request_review）
+
+只有客户端 Agent 修复流程会用到：
+
+- 简单改动按默认提示词直接 `git commit`，提交成功后再回写 TAPD。
+- 复杂改动调用 `tapd_request_review`，参数 `taskId` 来自提示词中的 `{{task_id}}`；`summary` 写根因/方案/影响，`files` 列出改动文件，`risk` 说明风险点。
+- 调用后任务进入 `awaiting_approval`，Agent 本轮被中止，工作区保留未提交的 diff，队列停住。
+- 「待审核」页选择：
+  - **通过并提交**：任务重新入队，使用「审核已通过」提示词，只做核对、提交与 TAPD 回写。
+  - **停止并储藏**：把本次涉及的文件 `git stash`（含未跟踪），任务取消并暂停队列。
+- 如果模型忘记调用该工具，本轮结束时新出现的未提交文件也会自动进入待审核，避免代码被遗忘。
+- 客户端会拒绝未提交时的 TAPD 写操作：任务仍有本轮新产生的未提交文件时，`tapd_add_bug_comment` / `tapd_update_bug_status` 返回“请先 git commit”。
 
 写回规则：
 
@@ -159,6 +203,8 @@ MCP tab 的「MCP 策略」与「调用审计」是客户端的第二层权限�
 - sidecar 只能访问 `127.0.0.1` 上的客户端，使用每次启动轮换的 Bearer token（`runtime.json`，权限 0600）。
 - Cookie 不写入文件、不返回给 AI；资源下载在客户端进程内完成。
 - 写回仅开放「追加评论」和「更新状态」，不提供删除、改处理人、批量操作等工具。
+- `tapd_notify_user` / `tapd_wait_notification` 只操作本地胶囊窗口，不读写 TAPD；「允许 AI / MCP 唤起通知」关闭时调用会直接失败。
+- `tapd_request_review` 只接受当前正在运行的 Agent 任务 id；外部 AI 没有活动任务时会被拒绝，不能暂停桌面队列。
 - 写操作使用当前 TAPD 会话 Cookie + `dsc-token`，受 TAPD 工作流与权限约束；非法流转会被拒绝并把允许的下一步返回给 AI。
 - 所有工具调用（含写操作）记录在客户端日志（数据目录 `logs/`）与 MCP 审计（`mcp-audit.json`）；审计包含工具名、客户端、策略决策、耗时、项目/缺陷与错误摘要，不保存评论正文。
 

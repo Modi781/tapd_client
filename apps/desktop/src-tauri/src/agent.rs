@@ -36,8 +36,8 @@ use std::{
 use portable_pty::{native_pty_system, Child, ChildKiller, CommandBuilder, MasterPty, PtySize};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tauri::{AppHandle, Emitter, Listener, Manager};
 use tapd_core::store::{read_json, write_json_atomic};
+use tauri::{AppHandle, Emitter, Listener, Manager};
 use tokio::sync::mpsc as tokio_mpsc;
 
 use crate::{
@@ -54,6 +54,8 @@ const EVENTS_DIR: &str = "agent-events";
 
 const DEFAULT_BINARY: &str = "opencode";
 const MAX_LOG_TAIL_BYTES: usize = 400 * 1024;
+/// Cap the diff preview so a huge refactor cannot freeze the review panel.
+const MAX_REVIEW_DIFF_CHARS: usize = 120_000;
 /// Ignore completion events that arrive immediately after prompt injection
 /// (the TUI may still be replaying history).
 const COMPLETION_GRACE: Duration = Duration::from_secs(2);
@@ -68,7 +70,12 @@ const PROMPT_VERIFY_TIMEOUT: Duration = Duration::from_secs(30);
 /// How often the injection watchdog re-checks the guard.
 const PROMPT_WATCHDOG_TICK: Duration = Duration::from_secs(2);
 
-pub const DEFAULT_PROMPT_TEMPLATE: &str = "请修复 TAPD 缺陷：{{title}}\n\n缺陷详情文件：{{md_path}}\n本地仓库：{{repo_path}}\n项目：{{workspace_name}} / 严重程度：{{severity}} / 优先级：{{priority}}\n\n项目规则：\n{{project_rule}}\n\n要求：\n1. 先完整阅读 bug.md 和 assets/ 下的截图、视频。\n2. 定位根因，做最小必要修改。\n3.修复时请遵循团队代码规范，确保代码可读、可维护。\n4. 修复完成后，提交代码并在 TAPD 中更新缺陷状态并简要评论原由以及解决方案和修复影响范围。";
+pub const DEFAULT_PROMPT_TEMPLATE: &str = "请修复 TAPD 缺陷：{{title}}\n\n缺陷详情文件：{{md_path}}\n本地仓库：{{repo_path}}\n项目：{{workspace_name}} / 严重程度：{{severity}} / 优先级：{{priority}}\n\n项目规则：\n{{project_rule}}\n\n要求：\n1. 先完整阅读 bug.md 和 assets/ 下的截图、视频，定位根因，做最小必要修改，并遵循团队代码规范。\n2. 修改后运行相关测试或构建。\n3. 判断改动复杂度：\n   - 简单缺陷（单文件或少量文件、局部改动，不涉及公共接口/数据模型/依赖/构建配置，测试通过）：直接 git commit（不要 push），提交成功后再在 TAPD 中评论并更新状态。\n   - 复杂缺陷（多文件、跨模块、涉及公共接口/数据模型/依赖/构建配置、风险较高或测试失败）：不要 commit，也不要修改 TAPD。调用 tapd_request_review 工具，taskId 使用 {{task_id}}，summary 说明根因、方案与影响范围，files 列出改动文件，risk 说明风险点，然后结束本轮等待用户审核。\n4. 任何情况下都不要在提交成功前评论或更新 TAPD 状态。";
+
+/// Follow-up prompt injected after the user approves a paused review. The
+/// working tree still holds the reviewed changes, so the agent only commits
+/// and writes back to TAPD instead of redoing the fix.
+pub const DEFAULT_COMMIT_PROMPT_TEMPLATE: &str = "审核已通过，请继续完成 TAPD 缺陷：{{title}}\n\n缺陷详情文件：{{md_path}}\n本地仓库：{{repo_path}}\n项目：{{workspace_name}} / 严重程度：{{severity}} / 优先级：{{priority}}\n\n项目规则：\n{{project_rule}}\n\n要求：\n1. 当前工作区保留了上一轮审核过的修改。先运行 git status / git diff 核对改动，不要重做或扩大范围。\n2. 运行必要的测试或构建，确认改动与缺陷相关。\n3. 提交代码（git commit，不要 push）。\n4. 提交成功后，再在 TAPD 中追加评论并更新缺陷状态；评论说明原由、解决方案与影响范围。\n5. 如果工作区已经没有未提交改动，说明上一轮已提交：核对提交记录后直接更新 TAPD，不要重复提交。\n6. 绝对不要在提交成功前评论或更新 TAPD 状态。";
 
 /// Previous defaults; untouched installs are migrated to the current default
 /// (which also carries the `{{project_rule}}` slot).
@@ -209,7 +216,12 @@ pub enum TaskStatus {
     Queued,
     Preparing,
     Running,
+    /// opencode asked for a permission decision (edit / bash / ...).
     WaitingReview,
+    /// The agent finished a complex change and is waiting for the user to
+    /// approve the commit. The working tree keeps the diff; the queue is
+    /// blocked until the user approves or stops the task.
+    AwaitingApproval,
     Succeeded,
     Failed,
     Canceled,
@@ -218,6 +230,8 @@ pub enum TaskStatus {
 impl TaskStatus {
     /// A task occupying the single worker slot. `WaitingReview` still owns the
     /// slot: the agent is blocked on a human decision, not finished.
+    /// `AwaitingApproval` also blocks the queue, but through the explicit
+    /// awaiting-review check so the worker does not mistake it for a live turn.
     fn is_active(self) -> bool {
         matches!(self, Self::Preparing | Self::Running | Self::WaitingReview)
     }
@@ -260,12 +274,47 @@ pub struct AgentTask {
     /// `waiting_review`. Absent in older persisted files (hence `default`).
     #[serde(default)]
     pub review: Option<PermissionReview>,
+    /// Post-work review (complex change) shown in the 待审核 tab.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval: Option<TaskApproval>,
+    /// Set after approval: the next run only verifies, commits and writes back
+    /// to TAPD instead of repeating the fix.
+    #[serde(default)]
+    pub commit_only: bool,
+    /// Files already dirty when the run started. The "uncommitted changes"
+    /// safety net only considers files outside this set, so unrelated local
+    /// work cannot turn every successful task into a review.
+    #[serde(default)]
+    pub baseline_dirty: Vec<String>,
+    /// HEAD when the run started. If the agent committed, the safety net does
+    /// not force a review for leftover untracked build artifacts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub baseline_head: Option<String>,
+}
+
+/// A complex change the agent wants the user to approve before committing.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskApproval {
+    pub summary: String,
+    #[serde(default)]
+    pub files: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub risk: Option<String>,
+    pub requested_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approved_at: Option<String>,
+    /// Stash reference recorded when the user stops instead of approving.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stash: Option<String>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 struct TaskFile {
     tasks: Vec<AgentTask>,
+    /// Set when the user stops a review: the queue must not auto-advance.
+    queue_paused: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -296,6 +345,10 @@ pub struct AgentTasksState {
     /// `preparing | running | waiting_review`.
     active_count: usize,
     waiting_review_count: usize,
+    awaiting_approval_count: usize,
+    /// True after the user stopped a review; the worker stays idle until
+    /// `agent_queue_resume`.
+    queue_paused: bool,
 }
 
 /// Lightweight state for the island capsule / tray badge.
@@ -304,6 +357,8 @@ pub struct AgentTasksState {
 pub struct AgentSummary {
     running: bool,
     waiting_review: bool,
+    /// Number of tasks waiting for a commit decision (island/top-bar badge).
+    awaiting_approval: usize,
     active_task_id: Option<String>,
     title: Option<String>,
     workspace_name: Option<String>,
@@ -315,6 +370,7 @@ struct TaskCounts {
     queued: usize,
     active: usize,
     waiting_review: usize,
+    awaiting_approval: usize,
 }
 
 /// Permission decision sent back to opencode.
@@ -382,6 +438,8 @@ struct DetectRequest {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PromptVars {
+    /// Agent task id, passed to `tapd_request_review` for complex changes.
+    pub task_id: String,
     pub title: String,
     pub md_path: String,
     pub repo_path: String,
@@ -396,6 +454,7 @@ pub struct PromptVars {
 impl PromptVars {
     fn from_task(task: &AgentTask) -> Self {
         Self {
+            task_id: task.id.clone(),
             title: task.title.clone(),
             md_path: task.md_path.clone(),
             repo_path: task.repo_path.clone(),
@@ -415,6 +474,7 @@ impl PromptVars {
 /// appended as its own section instead of being silently dropped.
 pub fn render_prompt(template: &str, vars: &PromptVars) -> String {
     let pairs = [
+        ("task_id", vars.task_id.as_str()),
         ("title", vars.title.as_str()),
         ("md_path", vars.md_path.as_str()),
         ("repo_path", vars.repo_path.as_str()),
@@ -450,13 +510,16 @@ fn task_counts(tasks: &[AgentTask]) -> TaskCounts {
         queued: 0,
         active: 0,
         waiting_review: 0,
+        awaiting_approval: 0,
     };
     for task in tasks {
-        if task.status == TaskStatus::Queued {
-            counts.queued += 1;
-        }
-        if task.status.is_active() {
-            counts.active += 1;
+        match task.status {
+            TaskStatus::Queued => counts.queued += 1,
+            TaskStatus::Preparing | TaskStatus::Running | TaskStatus::WaitingReview => {
+                counts.active += 1
+            }
+            TaskStatus::AwaitingApproval => counts.awaiting_approval += 1,
+            _ => {}
         }
         if task.status == TaskStatus::WaitingReview {
             counts.waiting_review += 1;
@@ -471,6 +534,11 @@ fn active_task_id(tasks: &[AgentTask]) -> Option<String> {
     tasks
         .iter()
         .find(|task| task.status.is_active())
+        .or_else(|| {
+            tasks
+                .iter()
+                .find(|task| task.status == TaskStatus::AwaitingApproval)
+        })
         .or_else(|| tasks.iter().find(|task| task.status == TaskStatus::Queued))
         .or_else(|| tasks.iter().rev().find(|task| task.status.is_terminal()))
         .map(|task| task.id.clone())
@@ -487,6 +555,10 @@ fn agent_summary(tasks: &[AgentTask]) -> AgentSummary {
         waiting_review: tasks
             .iter()
             .any(|task| task.status == TaskStatus::WaitingReview),
+        awaiting_approval: tasks
+            .iter()
+            .filter(|task| task.status == TaskStatus::AwaitingApproval)
+            .count(),
         active_task_id: active_id,
         title: active.map(|task| task.title.clone()),
         workspace_name: active.map(|task| task.workspace_name.clone()),
@@ -522,12 +594,158 @@ fn finish_status(canceled: bool, exit_code: Option<i32>) -> TaskStatus {
     }
 }
 
+/// Parses `git status --porcelain` output into changed file paths.
+fn parse_porcelain_files(output: &str) -> Vec<String> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim_end();
+            if line.len() < 4 {
+                return None;
+            }
+            let path = line.get(3..)?.trim();
+            if path.is_empty() {
+                return None;
+            }
+            // Renames are reported as `old -> new`; keep the new path.
+            let path = path.rsplit(" -> ").next().unwrap_or(path);
+            Some(path.trim_matches('"').to_string())
+        })
+        .take(50)
+        .collect()
+}
+
+/// Files still uncommitted in the task's repository. Empty on a clean tree or
+/// when git is unavailable, so a failed check never blocks a task.
+fn uncommitted_files(repo_path: &str) -> Vec<String> {
+    let repo_path = repo_path.trim();
+    if repo_path.is_empty() {
+        return Vec::new();
+    }
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo_path)
+        .args(["status", "--porcelain"])
+        .output();
+    match output {
+        Ok(output) if output.status.success() => {
+            parse_porcelain_files(&String::from_utf8_lossy(&output.stdout))
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// Current HEAD of the task repository, used to tell "committed" from "left
+/// uncommitted changes".
+fn git_head(repo_path: &str) -> Option<String> {
+    let repo_path = repo_path.trim();
+    if repo_path.is_empty() {
+        return None;
+    }
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo_path)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let sha = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!sha.is_empty()).then_some(sha)
+}
+
+/// True when the task's repository gained a commit since the run started.
+fn committed_since_baseline(task: &AgentTask) -> bool {
+    let Some(before) = task.baseline_head.as_deref() else {
+        return false;
+    };
+    git_head(&task.repo_path).is_some_and(|after| after != before)
+}
+
+/// Stashes the reviewed files (tracked and untracked) so a rejected review
+/// never loses the agent's work. Restricting the pathspec keeps unrelated local
+/// changes out of the stash. Returns a human-readable stash ref.
+fn stash_changes(repo_path: &str, label: &str, files: &[String]) -> Result<String, String> {
+    let mut command = std::process::Command::new("git");
+    command
+        .arg("-C")
+        .arg(repo_path)
+        .args(["stash", "push", "--include-untracked", "-m", label]);
+    if !files.is_empty() {
+        // Agent-supplied paths may be absolute; git pathspecs are repo-relative.
+        let prefix = format!("{}/", repo_path.trim_end_matches('/'));
+        command.arg("--");
+        for file in files {
+            let file = file.trim();
+            if file.is_empty() {
+                continue;
+            }
+            command.arg(file.strip_prefix(&prefix).unwrap_or(file));
+        }
+    }
+    let output = command
+        .output()
+        .map_err(|error| format!("无法执行 git：{error}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if stderr.is_empty() {
+            "git stash 失败".to_string()
+        } else {
+            stderr
+        });
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if stdout.contains("No local changes") {
+        return Ok("无未提交改动".to_string());
+    }
+
+    let reference = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo_path)
+        .args(["rev-parse", "--short", "refs/stash"])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+        .filter(|reference| !reference.is_empty());
+    Ok(match reference {
+        Some(reference) => format!("stash@{{0}} ({reference})"),
+        None => "stash@{0}".to_string(),
+    })
+}
+
+/// Moves a task into the post-work review state without touching the working
+/// tree. Returns whether the status changed.
+fn set_awaiting_approval(
+    task: &mut AgentTask,
+    summary: String,
+    files: Vec<String>,
+    risk: Option<String>,
+    now: &str,
+) -> bool {
+    task.status = TaskStatus::AwaitingApproval;
+    task.review = None;
+    task.finished_at = None;
+    task.error = None;
+    task.approval = Some(TaskApproval {
+        summary,
+        files,
+        risk,
+        requested_at: now.to_string(),
+        approved_at: None,
+        stash: None,
+    });
+    true
+}
+
 /// Applies a PTY/event outcome to a task. Returns whether anything changed.
 ///
 /// A task that already reached a terminal state is never downgraded: a late
 /// `finish_task` must not turn an event-driven `succeeded` into `failed`.
 fn apply_finish(task: &mut AgentTask, outcome: &PtyOutcome, now: &str) -> bool {
-    if task.status.is_terminal() {
+    if task.status.is_terminal() || task.status == TaskStatus::AwaitingApproval {
         return false;
     }
 
@@ -555,10 +773,13 @@ fn apply_finish(task: &mut AgentTask, outcome: &PtyOutcome, now: &str) -> bool {
         task.error = None;
     } else {
         task.status = TaskStatus::Failed;
-        let message = outcome.error.clone().unwrap_or_else(|| match outcome.exit_code {
-            Some(code) => format!("Agent 进程退出码 {code}"),
-            None => "Agent 进程异常结束".to_string(),
-        });
+        let message = outcome
+            .error
+            .clone()
+            .unwrap_or_else(|| match outcome.exit_code {
+                Some(code) => format!("Agent 进程退出码 {code}"),
+                None => "Agent 进程异常结束".to_string(),
+            });
         task.error = Some(message);
     }
     true
@@ -829,7 +1050,12 @@ fn take_utf8_prefix(buffer: &mut Vec<u8>) -> Vec<u8> {
     std::mem::replace(buffer, rest)
 }
 
-fn flush_output(app: &AppHandle, task_id: &str, log: &mut Option<std::fs::File>, pending: &mut Vec<u8>) {
+fn flush_output(
+    app: &AppHandle,
+    task_id: &str,
+    log: &mut Option<std::fs::File>,
+    pending: &mut Vec<u8>,
+) {
     if pending.is_empty() {
         return;
     }
@@ -875,6 +1101,9 @@ pub struct AgentCore {
     /// Terminal size the UI asked for. The console can be opened before the
     /// PTY exists, so the size is remembered and applied when it starts.
     sizes: Mutex<HashMap<String, (u16, u16)>>,
+    /// Set when the user stops a review. Persisted in `agent-tasks.json` so a
+    /// restart does not silently resume a queue the user halted.
+    paused: AtomicBool,
     wake: tokio::sync::Notify,
 }
 
@@ -889,6 +1118,7 @@ impl AgentCore {
             servers: Mutex::new(HashMap::new()),
             cancels: Mutex::new(HashMap::new()),
             sizes: Mutex::new(HashMap::new()),
+            paused: AtomicBool::new(false),
             wake: tokio::sync::Notify::new(),
         }
     }
@@ -918,9 +1148,9 @@ impl AgentCore {
         }
         *self.config.lock().expect("agent config lock") = loaded;
 
-        let mut tasks = read_json::<TaskFile>(&self.tasks_path())
-            .map(|file| file.tasks)
-            .unwrap_or_default();
+        let task_file = read_json::<TaskFile>(&self.tasks_path()).unwrap_or_default();
+        let mut tasks = task_file.tasks;
+        self.paused.store(task_file.queue_paused, Ordering::SeqCst);
         let recovered = recover_incomplete(&mut tasks, &self.events_dir(), &now());
         if recovered > 0 {
             tracing::warn!(recovered, "recovered interrupted agent tasks");
@@ -939,6 +1169,7 @@ impl AgentCore {
     fn persist_tasks(&self) {
         let file = TaskFile {
             tasks: self.tasks.lock().expect("agent tasks lock").clone(),
+            queue_paused: self.paused.load(Ordering::SeqCst),
         };
         if let Err(error) = write_json_atomic(&self.tasks_path(), &file) {
             tracing::warn!(%error, "failed to persist agent tasks");
@@ -956,6 +1187,8 @@ impl AgentCore {
             queued_count: counts.queued,
             active_count: counts.active,
             waiting_review_count: counts.waiting_review,
+            awaiting_approval_count: counts.awaiting_approval,
+            queue_paused: self.paused.load(Ordering::SeqCst),
             tasks,
         }
     }
@@ -1019,8 +1252,9 @@ impl AgentCore {
     fn fail_task(&self, task_id: &str, message: String) {
         let changed = self.update_task(task_id, |task| {
             // Never downgrade a task that already reached a terminal state
-            // (e.g. event-driven `succeeded` followed by a late teardown).
-            if task.status.is_terminal() {
+            // (e.g. event-driven `succeeded` followed by a late teardown), and
+            // never destroy a task that is waiting for the user's review.
+            if task.status.is_terminal() || task.status == TaskStatus::AwaitingApproval {
                 return;
             }
             task.status = TaskStatus::Failed;
@@ -1118,6 +1352,10 @@ impl AgentCore {
             source: source.to_string(),
             session_id: None,
             review: None,
+            approval: None,
+            commit_only: false,
+            baseline_dirty: Vec::new(),
+            baseline_head: None,
         };
 
         self.tasks
@@ -1181,11 +1419,8 @@ impl AgentCore {
         }
 
         if let (Some(server), Some(session_id)) = (server, session_id) {
-            match tokio::time::timeout(
-                Duration::from_secs(3),
-                server.abort_session(&session_id),
-            )
-            .await
+            match tokio::time::timeout(Duration::from_secs(3), server.abort_session(&session_id))
+                .await
             {
                 Ok(Ok(())) => {}
                 Ok(Err(error)) => {
@@ -1228,10 +1463,7 @@ impl AgentCore {
         }
 
         self.stop_runtime(task_id);
-        self.sizes
-            .lock()
-            .expect("agent sizes lock")
-            .remove(task_id);
+        self.sizes.lock().expect("agent sizes lock").remove(task_id);
 
         let server = self
             .servers
@@ -1309,11 +1541,30 @@ impl AgentCore {
     /// Marks a task succeeded from a turn-boundary event. Returns whether the
     /// status changed; terminal tasks are never touched.
     fn mark_succeeded(&self, task_id: &str) -> bool {
+        // A turn that ends with uncommitted changes is treated as a review,
+        // even when the model forgot to call `tapd_request_review`. This is the
+        // safety net that keeps a forgotten diff from being lost. The approved
+        // commit phase is exempt: it is supposed to commit, not ask again.
+        let review_files = match self.task_snapshot(task_id) {
+            Some(task)
+                if !task.commit_only
+                    && !task.status.is_terminal()
+                    && !committed_since_baseline(&task) =>
+            {
+                uncommitted_files(&task.repo_path)
+                    .into_iter()
+                    .filter(|file| !task.baseline_dirty.contains(file))
+                    .collect()
+            }
+            _ => Vec::new(),
+        };
+        let at = now();
+
         self.mutate_tasks(|tasks| {
             let Some(task) = tasks.iter_mut().find(|task| task.id == task_id) else {
                 return false;
             };
-            if task.status.is_terminal() {
+            if task.status.is_terminal() || task.status == TaskStatus::AwaitingApproval {
                 return false;
             }
             // A permission prompt keeps the turn alive; an idle event that
@@ -1321,8 +1572,17 @@ impl AgentCore {
             if task.status == TaskStatus::WaitingReview {
                 return false;
             }
+            if !review_files.is_empty() {
+                return set_awaiting_approval(
+                    task,
+                    "Agent 已完成修改但未提交，等待确认后提交。".to_string(),
+                    review_files,
+                    Some("存在未提交的改动".to_string()),
+                    &at,
+                );
+            }
             task.status = TaskStatus::Succeeded;
-            task.finished_at = Some(now());
+            task.finished_at = Some(at);
             task.exit_code = Some(0);
             task.error = None;
             task.review = None;
@@ -1336,7 +1596,7 @@ impl AgentCore {
             let Some(task) = tasks.iter_mut().find(|task| task.id == task_id) else {
                 return false;
             };
-            if task.status.is_terminal() {
+            if task.status.is_terminal() || task.status == TaskStatus::AwaitingApproval {
                 return false;
             }
             task.status = TaskStatus::Failed;
@@ -1355,8 +1615,8 @@ impl AgentCore {
             if task.status.is_terminal() {
                 return false;
             }
-            let unchanged = task.review.as_ref() == Some(&review)
-                && task.status == TaskStatus::WaitingReview;
+            let unchanged =
+                task.review.as_ref() == Some(&review) && task.status == TaskStatus::WaitingReview;
             if unchanged {
                 return false;
             }
@@ -1410,12 +1670,7 @@ impl AgentCore {
 
         tokio::time::timeout(
             Duration::from_secs(10),
-            server.reply_permission(
-                &review.session_id,
-                &review.id,
-                response.as_str(),
-                remember,
-            ),
+            server.reply_permission(&review.session_id, &review.id, response.as_str(), remember),
         )
         .await
         .map_err(|_| "回复权限请求超时".to_string())?
@@ -1437,6 +1692,234 @@ impl AgentCore {
 
         self.task_snapshot(task_id)
             .ok_or_else(|| "任务不存在".to_string())
+    }
+
+    // -- post-work review ---------------------------------------------------
+
+    /// True while any task waits for a commit decision; the worker must not
+    /// start the next queued task.
+    fn has_awaiting_approval(&self) -> bool {
+        self.tasks
+            .lock()
+            .expect("agent tasks lock")
+            .iter()
+            .any(|task| task.status == TaskStatus::AwaitingApproval)
+    }
+
+    /// Marks the active task as awaiting the user's commit decision and stops
+    /// the turn so the agent cannot keep editing after asking for review.
+    async fn request_review(
+        &self,
+        task_id: &str,
+        summary: String,
+        files: Vec<String>,
+        risk: Option<String>,
+    ) -> Result<Value, String> {
+        let task = self
+            .task_snapshot(task_id)
+            .ok_or_else(|| "任务不存在".to_string())?;
+        if !matches!(
+            task.status,
+            TaskStatus::Preparing | TaskStatus::Running | TaskStatus::WaitingReview
+        ) {
+            return Err("任务不在运行中，无法请求审核".to_string());
+        }
+
+        let at = now();
+        let updated = self
+            .update_task(task_id, |task| {
+                if !matches!(
+                    task.status,
+                    TaskStatus::Preparing | TaskStatus::Running | TaskStatus::WaitingReview
+                ) {
+                    return;
+                }
+                set_awaiting_approval(task, summary, files, risk, &at);
+            })
+            .ok_or_else(|| "任务不存在".to_string())?;
+        if updated.status != TaskStatus::AwaitingApproval {
+            return Err("任务状态已变化，无法请求审核".to_string());
+        }
+
+        // Best effort abort of the model turn, then kill the TUI. The working
+        // tree is deliberately left untouched so approval can commit it.
+        let server_session = self
+            .servers
+            .lock()
+            .expect("agent servers lock")
+            .get(task_id)
+            .and_then(|state| {
+                state
+                    .session_id
+                    .as_ref()
+                    .map(|session_id| (state.process.clone(), session_id.clone()))
+            });
+        if let Some((server, session_id)) = server_session {
+            let _ = tokio::time::timeout(Duration::from_secs(3), server.abort_session(&session_id))
+                .await;
+        }
+        self.stop_runtime(task_id);
+        self.persist_tasks();
+        self.emit_state();
+
+        tracing::info!(task_id, "agent task awaiting commit approval");
+        Ok(json!({ "status": "pending_review", "taskId": task_id }))
+    }
+
+    /// Approves a paused change: the task re-enters the queue and the next run
+    /// only verifies, commits and writes back to TAPD.
+    fn approve_review(&self, task_id: &str) -> Result<AgentTask, String> {
+        let task = self
+            .task_snapshot(task_id)
+            .ok_or_else(|| "任务不存在".to_string())?;
+        if task.status != TaskStatus::AwaitingApproval {
+            return Err("任务不在待审核状态".to_string());
+        }
+        if !Path::new(task.repo_path.trim()).is_dir() {
+            return Err(format!("本地仓库路径不存在：{}", task.repo_path));
+        }
+
+        // Approving is an explicit "continue" signal, so a queue paused by an
+        // earlier stop resumes unless another review still blocks it.
+        self.paused.store(false, Ordering::SeqCst);
+        let at = now();
+        let updated = self
+            .update_task(task_id, |task| {
+                task.status = TaskStatus::Queued;
+                task.commit_only = true;
+                task.finished_at = None;
+                task.error = None;
+                task.review = None;
+                if let Some(approval) = task.approval.as_mut() {
+                    approval.approved_at = Some(at);
+                }
+            })
+            .ok_or_else(|| "任务不存在".to_string())?;
+
+        tracing::info!(task_id, "agent review approved and requeued");
+        self.wake.notify_one();
+        Ok(updated)
+    }
+
+    /// Stops a paused review: the uncommitted diff is stashed (including
+    /// untracked files) so nothing is lost, the task is canceled and the queue
+    /// stays paused until the user resumes it.
+    async fn stop_review(&self, task_id: &str) -> Result<AgentTask, String> {
+        let task = self
+            .task_snapshot(task_id)
+            .ok_or_else(|| "任务不存在".to_string())?;
+        if task.status != TaskStatus::AwaitingApproval {
+            return Err("任务不在待审核状态".to_string());
+        }
+        let repo = task.repo_path.trim().to_string();
+        if repo.is_empty() || !Path::new(&repo).is_dir() {
+            return Err(format!("本地仓库路径不存在：{}", task.repo_path));
+        }
+
+        let label = format!("tapd-agent {} #{}", task.bug_id, task.id);
+        let reviewed = task
+            .approval
+            .as_ref()
+            .map(|approval| approval.files.clone())
+            .unwrap_or_default();
+        let files = if reviewed.is_empty() {
+            // No file list (e.g. model omitted it): use the run's own new
+            // changes, excluding files that were already dirty before it.
+            uncommitted_files(&repo)
+                .into_iter()
+                .filter(|file| !task.baseline_dirty.contains(file))
+                .collect()
+        } else {
+            reviewed
+        };
+        let repo_for_check = repo.clone();
+        let stash = tokio::task::spawn_blocking(move || stash_changes(&repo, &label, &files))
+            .await
+            .map_err(|error| format!("储藏改动失败：{error}"))?
+            .map_err(|error| format!("储藏改动失败：{error}"))?;
+
+        self.teardown_task(task_id);
+        self.paused.store(true, Ordering::SeqCst);
+        let mut message = if stash.contains("无未提交改动") {
+            format!("已停止：{stash}")
+        } else {
+            format!("已停止，改动已储藏：{stash}")
+        };
+        // Files the model did not list stay in the worktree; say so instead of
+        // claiming the whole change was stashed.
+        let remaining = uncommitted_files(&repo_for_check)
+            .into_iter()
+            .filter(|file| !task.baseline_dirty.contains(file))
+            .count();
+        if remaining > 0 {
+            message.push_str(&format!(
+                "；另有 {remaining} 个文件未列入本次审核，仍保留在工作区"
+            ));
+        }
+        let updated = self
+            .update_task(task_id, |task| {
+                task.status = TaskStatus::Canceled;
+                task.finished_at = Some(now());
+                task.exit_code = None;
+                task.error = Some(message.clone());
+                task.review = None;
+                if let Some(approval) = task.approval.as_mut() {
+                    approval.stash = Some(stash.clone());
+                }
+            })
+            .ok_or_else(|| "任务不存在".to_string())?;
+
+        tracing::info!(task_id, stash = %stash, "agent review stopped and changes stashed");
+        Ok(updated)
+    }
+
+    /// Unified diff of the reviewed change (`git diff HEAD`). Read-only; the
+    /// review card uses it so the user can inspect the diff before approving.
+    fn review_diff(&self, task_id: &str) -> Result<String, String> {
+        let task = self
+            .task_snapshot(task_id)
+            .ok_or_else(|| "任务不存在".to_string())?;
+        if task.status != TaskStatus::AwaitingApproval {
+            return Err("任务不在待审核状态".to_string());
+        }
+        if !Path::new(task.repo_path.trim()).is_dir() {
+            return Err(format!("本地仓库路径不存在：{}", task.repo_path));
+        }
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(task.repo_path.trim())
+            .args(["diff", "--no-color", "HEAD"])
+            .output()
+            .map_err(|error| format!("无法执行 git：{error}"))?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            return Err(if stderr.is_empty() {
+                "git diff 失败".to_string()
+            } else {
+                stderr
+            });
+        }
+
+        let text = String::from_utf8_lossy(&output.stdout);
+        if text.trim().is_empty() {
+            return Ok("没有未提交的差异（可能已提交，或只有未跟踪文件）。".to_string());
+        }
+        let count = text.chars().count();
+        if count > MAX_REVIEW_DIFF_CHARS {
+            let prefix: String = text.chars().take(MAX_REVIEW_DIFF_CHARS).collect();
+            return Ok(format!("{prefix}\n\n… diff 共 {count} 字符，已截断"));
+        }
+        Ok(text.into_owned())
+    }
+
+    /// Clears the queue pause. Tasks still awaiting review keep blocking the
+    /// worker until the user decides them.
+    fn resume_queue(&self) -> AgentTasksState {
+        self.paused.store(false, Ordering::SeqCst);
+        self.persist_tasks();
+        self.emit_state();
+        self.wake.notify_one();
+        self.tasks_state()
     }
 
     /// Handles one decoded opencode event for a task.
@@ -1612,8 +2095,13 @@ impl AgentCore {
         task.exit_code = None;
         task.error = None;
         task.review = None;
+        task.approval = None;
         task.session_id = None;
-        task.log_path = self.logs_dir().join(format!("{id}.log")).to_string_lossy().to_string();
+        task.log_path = self
+            .logs_dir()
+            .join(format!("{id}.log"))
+            .to_string_lossy()
+            .to_string();
 
         self.tasks
             .lock()
@@ -1712,6 +2200,14 @@ impl AgentCore {
         let core = self.clone();
         tauri::async_runtime::spawn(async move {
             loop {
+                // A user-stopped queue stays idle; a pending review blocks the
+                // single worker so no new task touches the repo before the
+                // reviewed diff is committed or stashed.
+                if core.paused.load(Ordering::SeqCst) || core.has_awaiting_approval() {
+                    core.wake.notified().await;
+                    continue;
+                }
+
                 let Some(task) = core.take_next_queued() else {
                     core.wake.notified().await;
                     continue;
@@ -1868,9 +2364,28 @@ impl AgentCore {
 
         let mut vars = PromptVars::from_task(&task);
         vars.project_rule = config.rule_for(&task.workspace_id);
-        task.prompt = render_prompt(&config.prompt_template, &vars);
+        // Approved reviews re-enter the queue with a commit-only prompt; the
+        // reviewed diff is still in the working tree.
+        let template = if task.commit_only {
+            DEFAULT_COMMIT_PROMPT_TEMPLATE
+        } else {
+            config.prompt_template.as_str()
+        };
+        task.prompt = render_prompt(template, &vars);
 
-        // 4. Move to `running` with the resolved paths.
+        // 4. Move to `running` with the resolved paths. Snapshot pre-existing
+        //    dirty files so the uncommitted-change safety net only reacts to
+        //    files this run touched.
+        let (baseline_dirty, baseline_head) = if task.commit_only {
+            // Keep the pre-task snapshots so unrelated local files stay
+            // excluded from the write guard during the commit phase.
+            (task.baseline_dirty.clone(), task.baseline_head.clone())
+        } else {
+            (
+                uncommitted_files(&task.repo_path),
+                git_head(&task.repo_path),
+            )
+        };
         let Some(running_task) = self.update_task(&task.id, |current| {
             if current.status == TaskStatus::Canceled {
                 return;
@@ -1878,6 +2393,8 @@ impl AgentCore {
             current.md_path = task.md_path.clone();
             current.repo_path = task.repo_path.clone();
             current.prompt = task.prompt.clone();
+            current.baseline_dirty = baseline_dirty.clone();
+            current.baseline_head = baseline_head.clone();
             current.status = TaskStatus::Running;
             if current.started_at.is_none() {
                 current.started_at = Some(now());
@@ -1929,7 +2446,10 @@ impl AgentCore {
                     server_active = true;
                     let events_path = self.events_dir().join(format!("{}.jsonl", task.id));
                     let (sink, receiver) = tokio_mpsc::unbounded_channel();
-                    match server.subscribe_events(sink, events_path, cancel.clone()).await {
+                    match server
+                        .subscribe_events(sink, events_path, cancel.clone())
+                        .await
+                    {
                         Ok((pump, flavor)) => {
                             events_live = true;
                             tracing::info!(
@@ -1944,38 +2464,31 @@ impl AgentCore {
                                 guard.clone(),
                                 done.clone(),
                             );
-                            self.servers
-                                .lock()
-                                .expect("agent servers lock")
-                                .insert(
-                                    task.id.clone(),
-                                    ActiveServer {
-                                        process: server.clone(),
-                                        pump: Some(pump),
-                                        consumer: Some(consumer),
-                                        session_id: None,
-                                    },
-                                );
+                            self.servers.lock().expect("agent servers lock").insert(
+                                task.id.clone(),
+                                ActiveServer {
+                                    process: server.clone(),
+                                    pump: Some(pump),
+                                    consumer: Some(consumer),
+                                    session_id: None,
+                                },
+                            );
                         }
                         Err(error) => {
-                            let message = format!(
-                                "无法订阅 opencode 事件流（{error}），回退为终端退出判定"
-                            );
+                            let message =
+                                format!("无法订阅 opencode 事件流（{error}），回退为终端退出判定");
                             warnings.push(message.clone());
                             self.log_server_warning(&task.id, &message);
                             // The TUI still uses the server; keep it for abort.
-                            self.servers
-                                .lock()
-                                .expect("agent servers lock")
-                                .insert(
-                                    task.id.clone(),
-                                    ActiveServer {
-                                        process: server.clone(),
-                                        pump: None,
-                                        consumer: None,
-                                        session_id: None,
-                                    },
-                                );
+                            self.servers.lock().expect("agent servers lock").insert(
+                                task.id.clone(),
+                                ActiveServer {
+                                    process: server.clone(),
+                                    pump: None,
+                                    consumer: None,
+                                    session_id: None,
+                                },
+                            );
                         }
                     }
                 }
@@ -2019,13 +2532,7 @@ impl AgentCore {
         std::thread::Builder::new()
             .name(format!("agent-pty-{}", pty_task.id))
             .spawn(move || {
-                let outcome = core.run_pty(
-                    &pty_task,
-                    &pty_config,
-                    tui_args,
-                    tui_envs,
-                    pty_guard,
-                );
+                let outcome = core.run_pty(&pty_task, &pty_config, tui_args, tui_envs, pty_guard);
                 let _ = sender.send(outcome);
             })
             .map_err(|error| tracing::warn!(%error, "failed to spawn agent pty thread"))
@@ -2035,12 +2542,7 @@ impl AgentCore {
         // text, and without a session the task would run forever. Only possible
         // when session events are actually flowing.
         let watchdog = if events_live {
-            Some(self.spawn_injection_watchdog(
-                &task.id,
-                &task.prompt,
-                guard.clone(),
-                done.clone(),
-            ))
+            Some(self.spawn_injection_watchdog(&task.id, &task.prompt, guard.clone(), done.clone()))
         } else {
             None
         };
@@ -2346,8 +2848,32 @@ impl AgentCore {
 
     fn finish_task(&self, task_id: &str, outcome: PtyOutcome) {
         let warning = outcome.warning.clone();
+        let review_files = match self.task_snapshot(task_id) {
+            Some(task)
+                if !task.commit_only
+                    && !task.status.is_terminal()
+                    && task.status != TaskStatus::AwaitingApproval
+                    && !committed_since_baseline(&task) =>
+            {
+                uncommitted_files(&task.repo_path)
+                    .into_iter()
+                    .filter(|file| !task.baseline_dirty.contains(file))
+                    .collect()
+            }
+            _ => Vec::new(),
+        };
         let snapshot = self.update_task(task_id, |task| {
-            apply_finish(task, &outcome, &now());
+            let at = now();
+            apply_finish(task, &outcome, &at);
+            if task.status == TaskStatus::Succeeded && !review_files.is_empty() {
+                set_awaiting_approval(
+                    task,
+                    "Agent 已完成修改但未提交，等待确认后提交。".to_string(),
+                    review_files,
+                    Some("存在未提交的改动".to_string()),
+                    &at,
+                );
+            }
         });
 
         if let Some(task) = &snapshot {
@@ -2370,6 +2896,15 @@ impl AgentCore {
 
 fn now() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+}
+
+fn truncate_text(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let mut truncated: String = text.chars().take(max.saturating_sub(1)).collect();
+    truncated.push('…');
+    truncated
 }
 
 fn join_with_timeout(handle: Option<std::thread::JoinHandle<()>>, timeout: Duration) {
@@ -2462,9 +2997,8 @@ fn open_terminal_session(binary: &str, repo_path: &str, session_id: &str) -> Res
         shell_quote(session_id)
     );
     let escaped = command.replace('\\', "\\\\").replace('"', "\\\"");
-    let script = format!(
-        "tell application \"Terminal\"\nactivate\ndo script \"{escaped}\"\nend tell"
-    );
+    let script =
+        format!("tell application \"Terminal\"\nactivate\ndo script \"{escaped}\"\nend tell");
     let status = std::process::Command::new("osascript")
         .arg("-e")
         .arg(script)
@@ -2478,11 +3012,7 @@ fn open_terminal_session(binary: &str, repo_path: &str, session_id: &str) -> Res
 }
 
 #[cfg(not(target_os = "macos"))]
-fn open_terminal_session(
-    _binary: &str,
-    _repo_path: &str,
-    _session_id: &str,
-) -> Result<(), String> {
+fn open_terminal_session(_binary: &str, _repo_path: &str, _session_id: &str) -> Result<(), String> {
     Err("终端恢复目前仅支持 macOS".to_string())
 }
 
@@ -2526,7 +3056,12 @@ fn detect_version(binary: &str) -> Result<String, String> {
     if version.is_empty() {
         return Err(format!("{binary} --version 没有输出"));
     }
-    Ok(version.lines().next().unwrap_or_default().trim().to_string())
+    Ok(version
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_string())
 }
 
 fn focus_main_window(app: &AppHandle) {
@@ -2568,6 +3103,99 @@ pub fn shutdown(app: &AppHandle) {
     if let Some(core) = app.try_state::<Arc<AgentCore>>() {
         core.shutdown();
     }
+}
+
+/// Blocks TAPD comment/status writes from the local agent while its worktree
+/// still has files changed by this run. This enforces "commit first, then write
+/// back" even if the model ignores the prompt. Unrelated dirty files recorded
+/// in `baseline_dirty` are ignored.
+pub fn tapd_write_block_reason(app: &AppHandle, arguments: &Value) -> Option<String> {
+    let core = app.try_state::<Arc<AgentCore>>()?;
+    let bug_id = arguments
+        .get("bug_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|id| !id.is_empty())?;
+    let workspace_id = arguments
+        .get("workspace_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|id| !id.is_empty());
+
+    let task = core
+        .tasks
+        .lock()
+        .ok()?
+        .iter()
+        .rev()
+        .find(|task| {
+            task.bug_id == bug_id
+                && workspace_id.map_or(true, |workspace| task.workspace_id == workspace)
+                && !task.status.is_terminal()
+        })
+        .cloned()?;
+    if task.repo_path.trim().is_empty() {
+        return None;
+    }
+
+    let pending: Vec<String> = uncommitted_files(&task.repo_path)
+        .into_iter()
+        .filter(|file| !task.baseline_dirty.contains(file))
+        .collect();
+    if pending.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "Agent 任务尚未提交（{} 个文件有未提交改动），请先 git commit，再评论或更新 TAPD 状态",
+        pending.len()
+    ))
+}
+
+/// MCP `tapd_request_review`: the local agent pauses a complex change and asks
+/// the user to approve the commit. Other MCP clients have no active task and
+/// are rejected, so they cannot pause the desktop queue.
+pub async fn request_review_from_mcp(app: &AppHandle, arguments: &Value) -> Result<Value, String> {
+    let core = app
+        .try_state::<Arc<AgentCore>>()
+        .ok_or_else(|| "Agent 模块尚未初始化".to_string())?;
+    let task_id = arguments
+        .get("taskId")
+        .or_else(|| arguments.get("task_id"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| "缺少参数 taskId".to_string())?
+        .to_string();
+
+    let summary = arguments
+        .get("summary")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|summary| !summary.is_empty())
+        .map(|summary| truncate_text(summary, 2_000))
+        .ok_or_else(|| "summary 不能为空".to_string())?;
+
+    let files = match arguments.get("files") {
+        None => Vec::new(),
+        Some(Value::Array(items)) => items
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
+            .map(|path| truncate_text(path, 300))
+            .take(50)
+            .collect(),
+        Some(_) => return Err("files 必须是字符串数组".to_string()),
+    };
+
+    let risk = arguments
+        .get("risk")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|risk| !risk.is_empty())
+        .map(|risk| truncate_text(risk, 500));
+
+    core.request_review(&task_id, summary, files, risk).await
 }
 
 pub async fn command(
@@ -2643,6 +3271,38 @@ pub async fn command(
             let task = core.retry(request.task_id.trim())?;
             Ok(json!({ "task": task }))
         }
+        "agent_review_approve" => {
+            let request: TaskIdRequest = serde_json::from_value(payload)
+                .map_err(|error| format!("无效的审核参数：{error}"))?;
+            if request.task_id.trim().is_empty() {
+                return Err("缺少 taskId".to_string());
+            }
+            let task = core.approve_review(request.task_id.trim())?;
+            Ok(json!({ "task": task }))
+        }
+        "agent_review_stop" => {
+            let request: TaskIdRequest = serde_json::from_value(payload)
+                .map_err(|error| format!("无效的停止参数：{error}"))?;
+            if request.task_id.trim().is_empty() {
+                return Err("缺少 taskId".to_string());
+            }
+            let task = core.stop_review(request.task_id.trim()).await?;
+            Ok(json!({ "task": task }))
+        }
+        "agent_queue_resume" => Ok(json!(core.resume_queue())),
+        "agent_review_diff" => {
+            let request: TaskIdRequest = serde_json::from_value(payload)
+                .map_err(|error| format!("无效的差异参数：{error}"))?;
+            if request.task_id.trim().is_empty() {
+                return Err("缺少 taskId".to_string());
+            }
+            let task_id = request.task_id.trim().to_string();
+            let core = core.inner().clone();
+            let diff = tokio::task::spawn_blocking(move || core.review_diff(&task_id))
+                .await
+                .map_err(|error| format!("读取差异失败：{error}"))??;
+            Ok(json!({ "diff": diff }))
+        }
         "agent_task_log" => {
             let request: TaskIdRequest = serde_json::from_value(payload)
                 .map_err(|error| format!("无效的日志参数：{error}"))?;
@@ -2711,6 +3371,10 @@ mod tests {
             source: "manual".to_string(),
             session_id: None,
             review: None,
+            approval: None,
+            commit_only: false,
+            baseline_dirty: Vec::new(),
+            baseline_head: None,
         }
     }
 
@@ -2724,6 +3388,18 @@ mod tests {
         assert!(config.auto_open_console);
         assert!(config.prompt_template.contains("{{md_path}}"));
         assert!(config.prompt_template.contains("{{title}}"));
+    }
+
+    #[test]
+    fn old_default_prompt_migrates_to_the_review_flow() {
+        let config = AgentConfig {
+            prompt_template: LEGACY_PROMPT_TEMPLATES[0].to_string(),
+            ..AgentConfig::default()
+        }
+        .sanitized();
+        assert_eq!(config.prompt_template, DEFAULT_PROMPT_TEMPLATE);
+        assert!(config.prompt_template.contains("tapd_request_review"));
+        assert!(config.prompt_template.contains("{{task_id}}"));
     }
 
     #[test]
@@ -2747,7 +3423,10 @@ mod tests {
         assert_eq!(config.ready_timeout_ms, 120_000);
         assert_eq!(config.repo_mappings.len(), 0);
         assert_eq!(
-            config.projects.get("1").map(|project| project.repo_path.as_str()),
+            config
+                .projects
+                .get("1")
+                .map(|project| project.repo_path.as_str()),
             Some("/repo")
         );
         assert_eq!(config.prompt_template, DEFAULT_PROMPT_TEMPLATE);
@@ -2757,6 +3436,7 @@ mod tests {
     #[test]
     fn renders_prompt_placeholders() {
         let vars = PromptVars {
+            task_id: "task-42".to_string(),
             title: "标题".to_string(),
             md_path: "/exports/bug.md".to_string(),
             repo_path: "/repo".to_string(),
@@ -2780,6 +3460,7 @@ mod tests {
     #[test]
     fn project_rule_uses_the_explicit_slot() {
         let vars = PromptVars {
+            task_id: "task-1".to_string(),
             title: "t".to_string(),
             md_path: "m".to_string(),
             repo_path: "r".to_string(),
@@ -2799,6 +3480,7 @@ mod tests {
     #[test]
     fn empty_project_rule_adds_nothing() {
         let vars = PromptVars {
+            task_id: "task-1".to_string(),
             title: "t".to_string(),
             md_path: "m".to_string(),
             repo_path: "r".to_string(),
@@ -2861,6 +3543,7 @@ mod tests {
             (TaskStatus::Preparing, "\"preparing\""),
             (TaskStatus::Running, "\"running\""),
             (TaskStatus::WaitingReview, "\"waiting_review\""),
+            (TaskStatus::AwaitingApproval, "\"awaiting_approval\""),
             (TaskStatus::Succeeded, "\"succeeded\""),
             (TaskStatus::Failed, "\"failed\""),
             (TaskStatus::Canceled, "\"canceled\""),
@@ -2875,9 +3558,103 @@ mod tests {
     #[test]
     fn task_review_defaults_to_none_for_old_files() {
         let mut value = serde_json::to_value(sample_task("a", TaskStatus::Running)).unwrap();
-        value.as_object_mut().unwrap().remove("review");
+        let object = value.as_object_mut().unwrap();
+        for key in [
+            "review",
+            "approval",
+            "commitOnly",
+            "baselineDirty",
+            "baselineHead",
+        ] {
+            object.remove(key);
+        }
         let parsed: AgentTask = serde_json::from_value(value).unwrap();
         assert_eq!(parsed.review, None);
+        assert_eq!(parsed.approval, None);
+        assert!(!parsed.commit_only);
+        assert!(parsed.baseline_dirty.is_empty());
+        assert_eq!(parsed.baseline_head, None);
+
+        let file: TaskFile = serde_json::from_str(r#"{"tasks": []}"#).unwrap();
+        assert!(!file.queue_paused);
+    }
+
+    #[test]
+    fn porcelain_status_lists_changed_files() {
+        let files =
+            parse_porcelain_files(" M src/a.rs\n?? src/new.rs\nR  src/old.rs -> src/newer.rs\n");
+        assert_eq!(files, vec!["src/a.rs", "src/new.rs", "src/newer.rs"]);
+        assert!(parse_porcelain_files("").is_empty());
+    }
+
+    #[test]
+    fn stash_limits_to_reviewed_files() {
+        let dir = std::env::temp_dir().join(format!(
+            "tapd-agent-stash-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let git = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&dir)
+                .args(["-c", "user.email=test@example.com", "-c", "user.name=Test"])
+                .args(args)
+                .status()
+                .expect("git");
+            assert!(status.success(), "git {args:?}");
+        };
+
+        git(&["init", "-q"]);
+        std::fs::write(dir.join("a.txt"), "one\n").unwrap();
+        std::fs::write(dir.join("b.txt"), "one\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "init"]);
+        std::fs::write(dir.join("a.txt"), "changed\n").unwrap();
+        std::fs::write(dir.join("b.txt"), "changed\n").unwrap();
+        std::fs::write(dir.join("new.txt"), "new file\n").unwrap();
+
+        let stash = stash_changes(
+            dir.to_str().unwrap(),
+            "review",
+            &["a.txt".to_string(), "new.txt".to_string()],
+        )
+        .expect("stash");
+        assert!(stash.starts_with("stash@"));
+        assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "one\n");
+        assert!(!dir.join("new.txt").exists());
+        // Unrelated local work stays in the working tree.
+        assert_eq!(
+            std::fs::read_to_string(dir.join("b.txt")).unwrap(),
+            "changed\n"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn awaiting_approval_is_not_downgraded_by_finish() {
+        let mut task = sample_task("a", TaskStatus::Running);
+        assert!(set_awaiting_approval(
+            &mut task,
+            "改了 3 个文件".to_string(),
+            vec!["src/a.rs".to_string()],
+            Some("公共接口变化".to_string()),
+            "2026-11-10T01:00:00Z",
+        ));
+        assert_eq!(task.status, TaskStatus::AwaitingApproval);
+        assert_eq!(
+            task.approval.as_ref().map(|approval| approval.files.len()),
+            Some(1)
+        );
+        assert!(task.finished_at.is_none());
+
+        let outcome = PtyOutcome {
+            exit_code: Some(0),
+            ..PtyOutcome::default()
+        };
+        assert!(!apply_finish(&mut task, &outcome, "2026-11-10T01:01:00Z"));
+        assert_eq!(task.status, TaskStatus::AwaitingApproval);
     }
 
     #[test]
@@ -2926,6 +3703,8 @@ mod tests {
             queued_count: 0,
             active_count: 1,
             waiting_review_count: 1,
+            awaiting_approval_count: 0,
+            queue_paused: false,
         };
         let value = serde_json::to_value(&state).unwrap();
         assert_eq!(value["queueLength"], 0);
@@ -2949,6 +3728,7 @@ mod tests {
             sample_task("running", TaskStatus::Running),
             sample_task("waiting", TaskStatus::WaitingReview),
             sample_task("queued", TaskStatus::Queued),
+            sample_task("approval", TaskStatus::AwaitingApproval),
         ];
         tasks[2].review = Some(PermissionReview {
             id: "per_1".to_string(),
@@ -2957,17 +3737,34 @@ mod tests {
             resource: "src/main.rs".to_string(),
             title: "允许编辑".to_string(),
         });
+        tasks[4].approval = Some(TaskApproval {
+            summary: "改了 2 个文件".to_string(),
+            files: vec!["src/a.rs".to_string()],
+            risk: None,
+            requested_at: "2026-11-10T01:00:00Z".to_string(),
+            approved_at: None,
+            stash: None,
+        });
 
         let counts = task_counts(&tasks);
         assert_eq!(counts.queued, 1);
         assert_eq!(counts.active, 2);
         assert_eq!(counts.waiting_review, 1);
+        assert_eq!(counts.awaiting_approval, 1);
 
         let summary = agent_summary(&tasks);
         assert!(summary.running);
         assert!(summary.waiting_review);
+        assert_eq!(summary.awaiting_approval, 1);
         // The first active task in list order is the running one.
         assert_eq!(summary.active_task_id.as_deref(), Some("running"));
+
+        // Without a live turn, an awaiting task is the thing to open.
+        let only_approval = vec![
+            sample_task("approval", TaskStatus::AwaitingApproval),
+            sample_task("queued", TaskStatus::Queued),
+        ];
+        assert_eq!(active_task_id(&only_approval).as_deref(), Some("approval"));
         assert_eq!(summary.title.as_deref(), Some("示例缺陷"));
         assert_eq!(summary.workspace_name.as_deref(), Some("UU"));
         assert_eq!(summary.bug_id.as_deref(), Some("1145336192001234567"));
@@ -3051,7 +3848,10 @@ mod tests {
         assert_eq!(tasks[0].status, TaskStatus::Queued);
         assert_eq!(tasks[1].status, TaskStatus::Failed);
         assert_eq!(tasks[1].error.as_deref(), Some("客户端重启"));
-        assert_eq!(tasks[1].finished_at.as_deref(), Some("2026-11-10T01:00:00Z"));
+        assert_eq!(
+            tasks[1].finished_at.as_deref(),
+            Some("2026-11-10T01:00:00Z")
+        );
         assert_eq!(tasks[2].status, TaskStatus::Failed);
         assert_eq!(tasks[3].status, TaskStatus::Failed);
         assert_eq!(tasks[4].status, TaskStatus::Succeeded);
@@ -3178,19 +3978,13 @@ mod tests {
     fn pty_smoke_test_with_shell_script() {
         use std::os::unix::fs::PermissionsExt;
 
-        let dir = std::env::temp_dir().join(format!(
-            "tapd-agent-pty-{}",
-            uuid::Uuid::new_v4().simple()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("tapd-agent-pty-{}", uuid::Uuid::new_v4().simple()));
         std::fs::create_dir_all(&dir).expect("temp dir");
         let script = dir.join("fake-agent.sh");
-        std::fs::write(
-            &script,
-            "#!/bin/sh\nprintf 'pty-smoke-ok\\n'\nsleep 0.1\n",
-        )
-        .expect("write script");
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
-            .expect("chmod");
+        std::fs::write(&script, "#!/bin/sh\nprintf 'pty-smoke-ok\\n'\nsleep 0.1\n")
+            .expect("write script");
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
 
         let handles = open_pty(script.to_str().unwrap(), &[], &[], &dir, 80, 24).expect("open pty");
         let PtyHandles {

@@ -1,12 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import clsx from "clsx";
-import { AlertTriangle, Bell, Clock, RefreshCw, Send } from "lucide-react";
+import { AlertTriangle, Bell, Bot, Clock, RefreshCw, Send } from "lucide-react";
 
 import type { SettingsSectionProps } from "../lib/feature";
 import {
+  AI_TONE_LABELS,
   DEFAULT_NOTIFICATION_SETTINGS,
   formatPollTime,
   notificationApi,
+  type AiTone,
+  type NotificationItem,
   type NotificationSettings as NotificationSettingsValue,
   type NotificationStateSnapshot,
 } from "../lib/notification";
@@ -19,6 +22,11 @@ export function NotificationSettings({ toast }: SettingsSectionProps) {
   const [snapshot, setSnapshot] = useState<NotificationStateSnapshot | null>(null);
   const [loading, setLoading] = useState(true);
   const [simulating, setSimulating] = useState(false);
+  const [debugTitle, setDebugTitle] = useState("测试通知");
+  const [debugBody, setDebugBody] = useState("这是一条来自设置页的调试通知。");
+  const [debugTone, setDebugTone] = useState<AiTone>("success");
+  const [debugActions, setDebugActions] = useState(true);
+  const [debugSending, setDebugSending] = useState(false);
 
   const load = useCallback(
     async (silent = false) => {
@@ -37,6 +45,13 @@ export function NotificationSettings({ toast }: SettingsSectionProps) {
 
   useEffect(() => {
     void load();
+  }, [load]);
+
+  // Refresh while the panel is open so debug notifications' action results
+  // appear without a manual reload.
+  useEffect(() => {
+    const timer = window.setInterval(() => void load(true), 4000);
+    return () => window.clearInterval(timer);
   }, [load]);
 
   const settingsRef = useRef(settings);
@@ -83,6 +98,35 @@ export function NotificationSettings({ toast }: SettingsSectionProps) {
       setSimulating(false);
     }
   };
+
+  const sendDebug = async () => {
+    setDebugSending(true);
+    try {
+      await notificationApi.aiDebug({
+        title: debugTitle.trim() || "测试通知",
+        tone: debugTone,
+        body: debugBody.trim() || undefined,
+        // Repeated debug sends replace the previous card instead of stacking.
+        tag: "settings-debug",
+        actions: debugActions
+          ? [
+              { id: "confirm", label: "确认", style: "primary" },
+              { id: "cancel", label: "取消", style: "secondary" },
+            ]
+          : [],
+      });
+      await load(true);
+    } catch (error) {
+      toast("error", String(error));
+    } finally {
+      setDebugSending(false);
+    }
+  };
+
+  /** AI cards stay in memory, so `state` returns both pending and resolved. */
+  const aiItems = (snapshot?.items ?? [])
+    .filter((item) => item.source === "ai")
+    .slice(0, 4);
 
   return (
     <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
@@ -161,6 +205,101 @@ export function NotificationSettings({ toast }: SettingsSectionProps) {
               checked={settings.includeReopened}
               onChange={(value) => patch({ includeReopened: value })}
             />
+          </div>
+        </div>
+
+        <div className="rounded-xl border border-slate-100 px-3 py-2.5">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <div className="flex items-center gap-1.5 text-xs font-medium text-slate-800">
+                <Bot size={12} className="text-slate-400" />
+                允许 AI / MCP 唤起通知
+              </div>
+              <p className="mt-1 text-[11px] leading-4 text-slate-500">
+                opencode、Claude Code 等可调用 tapd_notify_user，在胶囊里提示成功、失败或等待确认。
+              </p>
+            </div>
+            <Toggle
+              checked={settings.aiEnabled}
+              onChange={(value) => patch({ aiEnabled: value })}
+              label="允许 AI 通知"
+            />
+          </div>
+
+          <div className="mt-3 rounded-lg border border-slate-100 bg-slate-50/70 p-2.5">
+            <div className="flex items-center justify-between">
+              <div className="text-[11px] font-medium text-slate-700">调试通知</div>
+              <span className="text-[10px] text-slate-400">卡片会出现在屏幕顶部</span>
+            </div>
+
+            <div className="mt-2 flex flex-wrap items-center gap-1.5">
+              {(Object.keys(AI_TONE_LABELS) as AiTone[]).map((tone) => (
+                <button
+                  key={tone}
+                  type="button"
+                  onClick={() => setDebugTone(tone)}
+                  className={clsx(
+                    "rounded-full border px-2 py-0.5 text-[10px] transition",
+                    AI_TONE_CHIP[tone],
+                    debugTone === tone
+                      ? "ring-1 ring-slate-400"
+                      : "opacity-70 hover:opacity-100",
+                  )}
+                >
+                  {AI_TONE_LABELS[tone]}
+                </button>
+              ))}
+            </div>
+
+            <input
+              value={debugTitle}
+              onChange={(event) => setDebugTitle(event.target.value)}
+              placeholder="标题"
+              className="mt-2 w-full rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-700 focus:outline-none focus:ring-2 focus:ring-sky-200"
+            />
+            <textarea
+              value={debugBody}
+              onChange={(event) => setDebugBody(event.target.value)}
+              rows={2}
+              placeholder="正文（可换行）"
+              className="mt-1.5 w-full resize-none rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-700 focus:outline-none focus:ring-2 focus:ring-sky-200"
+            />
+
+            <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
+              <label className="flex items-center gap-1.5 text-[10px] text-slate-500">
+                <input
+                  type="checkbox"
+                  checked={debugActions}
+                  onChange={(event) => setDebugActions(event.target.checked)}
+                  className="h-3 w-3 rounded border-slate-300"
+                />
+                带「确认 / 取消」按钮
+              </label>
+              <Button
+                size="sm"
+                loading={debugSending}
+                onClick={() => void sendDebug()}
+                icon={<Send size={12} />}
+              >
+                发送调试通知
+              </Button>
+            </div>
+
+            {aiItems.length > 0 ? (
+              <div className="mt-2 space-y-0.5 border-t border-slate-200/70 pt-1.5">
+                {aiItems.map((item) => (
+                  <div
+                    key={item.id}
+                    className="flex items-center gap-2 text-[10px] text-slate-500"
+                  >
+                    <span className="min-w-0 flex-1 truncate" title={item.title}>
+                      {item.title}
+                    </span>
+                    <span className="shrink-0 text-slate-400">{aiResultLabel(item)}</span>
+                  </div>
+                ))}
+              </div>
+            ) : null}
           </div>
         </div>
 
@@ -289,6 +428,25 @@ export function NotificationSettings({ toast }: SettingsSectionProps) {
       </div>
     </section>
   );
+}
+
+const AI_TONE_CHIP: Record<AiTone, string> = {
+  info: "border-sky-200 bg-sky-50 text-sky-700",
+  success: "border-emerald-200 bg-emerald-50 text-emerald-700",
+  warning: "border-amber-200 bg-amber-50 text-amber-700",
+  error: "border-rose-200 bg-rose-50 text-rose-700",
+  progress: "border-sky-200 bg-sky-50 text-sky-700",
+};
+
+function aiResultLabel(item: NotificationItem): string {
+  const resolution = item.ai?.resolution;
+  if (!resolution) return item.state === "pending" ? "待操作" : "—";
+  if (resolution.kind === "action") {
+    return `已点击 ${resolution.actionLabel ?? resolution.actionId ?? ""}`.trim();
+  }
+  if (resolution.kind === "dismissed") return "已关闭";
+  if (resolution.kind === "replaced") return "已替换";
+  return resolution.kind;
 }
 
 function ScopeOption(props: {

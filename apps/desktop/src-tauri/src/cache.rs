@@ -199,6 +199,19 @@ impl Cache {
                 .map_err(|error| error.to_string())?;
         }
 
+        if version < 4 {
+            // MCP / AI capsule notifications can be switched off independently
+            // from TAPD bug polling.
+            conn.execute(
+                "ALTER TABLE notification_settings
+                    ADD COLUMN ai_enabled INTEGER NOT NULL DEFAULT 1",
+                [],
+            )
+            .map_err(|error| error.to_string())?;
+            conn.pragma_update(None, "user_version", 4)
+                .map_err(|error| error.to_string())?;
+        }
+
         Ok(())
     }
 
@@ -406,7 +419,11 @@ impl Cache {
     /// snapshot exists for this query (e.g. the user changed a filter offline).
     pub fn query_bugs(&self, query: &BugQuery) -> Option<(BugListPage, i64)> {
         // Saved views (`confId`) are server-side definitions we cannot replay.
-        if query.conf_id.as_deref().is_some_and(|value| !value.is_empty()) {
+        if query
+            .conf_id
+            .as_deref()
+            .is_some_and(|value| !value.is_empty())
+        {
             return None;
         }
 
@@ -462,7 +479,12 @@ impl Cache {
 }
 
 fn matches_query(query: &BugQuery, bug: &BugSummary) -> bool {
-    if let Some(owner) = query.owner.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+    if let Some(owner) = query
+        .owner
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
         if bug.owner != owner {
             return false;
         }
@@ -546,11 +568,7 @@ fn cached(value: Option<(Value, i64)>) -> CachedPayload {
     }
 }
 
-pub async fn command(
-    state: &SharedState,
-    name: &str,
-    payload: Value,
-) -> Result<Value, String> {
+pub async fn command(state: &SharedState, name: &str, payload: Value) -> Result<Value, String> {
     let cache = &state.cache;
     match name {
         "cache_workspace_context" => {
@@ -562,9 +580,9 @@ pub async fn command(
             // Exact query snapshot first; otherwise filter the cached bug rows
             // locally so offline filter changes still show data.
             let value = cache.get_bug_list::<Value>(&query).or_else(|| {
-                cache
-                    .query_bugs(&query)
-                    .and_then(|(page, fetched_at)| serde_json::to_value(page).ok().map(|v| (v, fetched_at)))
+                cache.query_bugs(&query).and_then(|(page, fetched_at)| {
+                    serde_json::to_value(page).ok().map(|v| (v, fetched_at))
+                })
             });
             Ok(serde_json::to_value(cached(value)).unwrap_or_else(|_| Value::Null))
         }
@@ -720,6 +738,10 @@ mod tests {
             source: "manual".to_string(),
             session_id: Some("ses_1".to_string()),
             review: None,
+            approval: None,
+            commit_only: false,
+            baseline_dirty: Vec::new(),
+            baseline_head: None,
         };
         cache.replace_agent_tasks(&[task]);
 
@@ -773,7 +795,7 @@ mod tests {
                 |row| row.get(0),
             )
             .expect("notification_settings table");
-        assert_eq!(version, 3);
+        assert_eq!(version, 4);
         assert_eq!(table, 1);
         assert_eq!(notification_table, 1);
     }

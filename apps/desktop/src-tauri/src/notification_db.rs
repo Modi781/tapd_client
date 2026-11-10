@@ -43,7 +43,7 @@ fn load_conn(conn: &Connection) -> Option<NotificationStore> {
         .query_row(
             "SELECT enabled, scope, include_new, include_transferred, include_reopened,
                     poll_interval_secs, quiet_enabled, quiet_start, quiet_end, max_visible,
-                    settings_version
+                    settings_version, ai_enabled
                FROM notification_settings WHERE id = 1",
             [],
             |row| {
@@ -61,6 +61,7 @@ fn load_conn(conn: &Connection) -> Option<NotificationStore> {
                             end: row.get(8)?,
                         },
                         max_visible: row.get::<_, i64>(9)? as u32,
+                        ai_enabled: row.get::<_, i64>(11)? != 0,
                     },
                     row.get::<_, i64>(10)? as u32,
                 ))
@@ -92,6 +93,9 @@ fn load_conn(conn: &Connection) -> Option<NotificationStore> {
                 created: row.get(10)?,
                 detected_at: row.get(11)?,
                 state: state_from(&row.get::<_, String>(12)?),
+                // Persisted items are always TAPD bugs; AI cards are in-memory.
+                source: crate::notification::NotificationSource::Tapd,
+                ai: None,
             })
         })
         .ok()?
@@ -345,8 +349,8 @@ fn upsert_settings(
         "INSERT INTO notification_settings (
             id, enabled, scope, include_new, include_transferred, include_reopened,
             poll_interval_secs, quiet_enabled, quiet_start, quiet_end, max_visible,
-            settings_version
-         ) VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+            settings_version, ai_enabled
+         ) VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
          ON CONFLICT(id) DO UPDATE SET
             enabled = excluded.enabled,
             scope = excluded.scope,
@@ -358,7 +362,8 @@ fn upsert_settings(
             quiet_start = excluded.quiet_start,
             quiet_end = excluded.quiet_end,
             max_visible = excluded.max_visible,
-            settings_version = excluded.settings_version",
+            settings_version = excluded.settings_version,
+            ai_enabled = excluded.ai_enabled",
         params![
             if settings.enabled { 1_i64 } else { 0 },
             scope_str(settings.scope),
@@ -379,6 +384,7 @@ fn upsert_settings(
             settings.quiet_hours.end,
             settings.max_visible as i64,
             version as i64,
+            if settings.ai_enabled { 1_i64 } else { 0 },
         ],
     )?;
     Ok(())
@@ -533,6 +539,8 @@ mod tests {
             created: "2026-11-10 11:00:00".to_string(),
             detected_at: "2026-11-10 11:01:00".to_string(),
             state: NotificationState::Pending,
+            source: crate::notification::NotificationSource::Tapd,
+            ai: None,
         });
         store.seen.insert(
             "1:2".to_string(),
@@ -614,6 +622,8 @@ mod tests {
                 created: String::new(),
                 detected_at: String::new(),
                 state: NotificationState::Pending,
+                source: crate::notification::NotificationSource::Tapd,
+                ai: None,
             },
             200,
         );

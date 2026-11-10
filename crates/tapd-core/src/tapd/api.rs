@@ -335,12 +335,31 @@ pub fn parse_workspaces(root: &Value) -> Result<Vec<Workspace>, String> {
 /// Extracts workspace members from either `get_workspace_members` or
 /// `user_chooser`.
 ///
-/// Both endpoints wrap their users differently (and the chooser nests them by
-/// department), so the response is scanned recursively for user-shaped objects
-/// instead of depending on one brittle payload path.
+/// `get_workspace_members` returns `{"data":{"members":[{"user":"昵称"}]}}`:
+/// each entry carries only the nickname under `user`, so it is read explicitly
+/// before the recursive scan (which looks for `nick`/`user_name` and would
+/// otherwise drop every member). The chooser nests users by department, hence
+/// the generic scan for any remaining user-shaped object.
 pub fn parse_workspace_members(root: &Value) -> Vec<WorkspaceMember> {
     let mut members = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
+
+    if let Some(items) = root.pointer("/data/members").and_then(Value::as_array) {
+        for item in items {
+            let nick = item
+                .get("user")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .unwrap_or_default();
+            if !nick.is_empty() && seen.insert(nick.to_string()) {
+                members.push(WorkspaceMember {
+                    nick: nick.to_string(),
+                    ..Default::default()
+                });
+            }
+        }
+    }
+
     collect_members(root, &mut members, &mut seen);
     members
 }
@@ -897,6 +916,26 @@ mod tests {
         assert_eq!(guo.avatar, "https://a/1.png");
         assert_eq!(zhang.user_id, "u3");
         assert_eq!(zhang.name, "张芳兰");
+    }
+
+    #[test]
+    fn parses_workspace_members_used_by_get_workspace_members() {
+        // Shape returned by `/api/basic/user/get_workspace_members`: the entry
+        // only has `user`, no nick/user_id/name fields.
+        let root = json!({
+            "data": {
+                "members": [
+                    {"user": "范艺"},
+                    {"user": "郭俊宏"},
+                    {"user": "张芳兰"},
+                    {"user": "郭俊宏"}
+                ]
+            },
+            "meta": {"code": "0", "message": "success"}
+        });
+        let members = parse_workspace_members(&root);
+        let nicks: Vec<&str> = members.iter().map(|member| member.nick.as_str()).collect();
+        assert_eq!(nicks, vec!["范艺", "郭俊宏", "张芳兰"]);
     }
 
     #[test]
