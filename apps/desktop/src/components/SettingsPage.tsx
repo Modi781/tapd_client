@@ -1,8 +1,10 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
+import clsx from "clsx";
 import {
   Copy,
   FileJson,
   FolderOpen,
+  Info,
   PackageOpen,
   ShieldCheck,
   Sparkles,
@@ -15,7 +17,6 @@ import type { SettingsSectionProps } from "../lib/feature";
 import { AgentSettings } from "./AgentSettings";
 import { CapturesPage } from "./CapturesPage";
 import { NotificationSettings } from "./NotificationSettings";
-import { UpdatePanel } from "./UpdatePanel";
 import { Button } from "./ui";
 
 type Props = {
@@ -29,6 +30,7 @@ type Props = {
 export function SettingsPage(props: Props) {
   const { info, onOpenPath, onCopy, onShowOnboarding, toast } = props;
   const [capturesOpen, setCapturesOpen] = useState(false);
+  const [detailsOpen, setDetailsOpen] = useState(false);
   const [diagnosing, setDiagnosing] = useState(false);
   const [confirmClear, setConfirmClear] = useState(false);
   const [clearing, setClearing] = useState(false);
@@ -73,7 +75,6 @@ export function SettingsPage(props: Props) {
 
   return (
     <div className="mx-auto max-w-4xl space-y-4">
-      <UpdatePanel toast={toast} />
 
       <NotificationSettings toast={toast} />
 
@@ -81,59 +82,93 @@ export function SettingsPage(props: Props) {
 
       <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
         <div className="flex items-center justify-between gap-3">
-          <h2 className="flex items-center gap-2 text-sm font-semibold text-slate-900">
-            <ShieldCheck size={15} className="text-slate-400" />
-            运行信息
-          </h2>
+          <div className="min-w-0">
+            <h2 className="flex items-center gap-2 text-sm font-semibold text-slate-900">
+              <ShieldCheck size={15} className="text-slate-400" />
+              运行信息
+            </h2>
+            <p className="mt-1 truncate text-xs text-slate-500">
+              {info
+                ? `v${info.version} · MCP ${
+                    info.runtimePort ? `127.0.0.1:${info.runtimePort}` : "未启动"
+                  } · 轮询 ${info.pollIntervalSecs}s`
+                : "正在读取运行信息…"}
+            </p>
+          </div>
           <Button
             size="sm"
-            onClick={() => void exportDiagnostics()}
-            loading={diagnosing}
-            icon={<PackageOpen size={13} />}
+            variant="secondary"
+            onClick={() => setDetailsOpen(true)}
+            icon={<Info size={13} />}
           >
-            导出诊断包
+            查看详情
           </Button>
         </div>
-
-        <p className="mt-1 text-[11px] leading-5 text-slate-500">
-          打包版本、脱敏配置、最近日志与 MCP 审计；不含 Cookie、API token 和请求正文。
-        </p>
-
-        <dl className="mt-3 space-y-1 text-xs">
-          <PlainRow label="版本" value={info?.version ?? "—"} onCopy={onCopy} />
-          <PlainRow
-            label="MCP 本地端口"
-            value={info?.runtimePort ? `127.0.0.1:${info.runtimePort}` : "未启动"}
-            onCopy={onCopy}
-          />
-          <PlainRow label="轮询间隔" value={`${info?.pollIntervalSecs ?? 60}s`} onCopy={onCopy} />
-        </dl>
-
-        <div className="mt-4 divide-y divide-slate-100">
-          {paths.map(([label, value]) => (
-            <div key={label} className="flex items-center gap-3 py-2 text-xs">
-              <span className="w-24 shrink-0 text-slate-400">{label}</span>
-              <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-slate-600" title={value}>
-                {value}
-              </span>
-              <button
-                type="button"
-                onClick={() => onOpenPath(value)}
-                className="inline-flex shrink-0 items-center gap-1 rounded border border-slate-200 px-2 py-1 text-[11px] text-slate-600 transition hover:border-slate-300"
-              >
-                <FolderOpen size={11} />
-              </button>
-              <button
-                type="button"
-                onClick={() => onCopy(value)}
-                className="inline-flex shrink-0 items-center gap-1 rounded border border-slate-200 px-2 py-1 text-[11px] text-slate-600 transition hover:border-slate-300"
-              >
-                <Copy size={11} />
-              </button>
-            </div>
-          ))}
-        </div>
       </section>
+
+      {detailsOpen ? (
+        <Dialog
+          title="运行信息"
+          icon={<ShieldCheck size={15} className="text-slate-400" />}
+          onClose={() => setDetailsOpen(false)}
+          action={
+            <Button
+              size="sm"
+              onClick={() => void exportDiagnostics()}
+              loading={diagnosing}
+              icon={<PackageOpen size={13} />}
+            >
+              导出诊断包
+            </Button>
+          }
+        >
+          <p className="text-[11px] leading-5 text-slate-500">
+            打包版本、脱敏配置、最近日志与 MCP 审计；不含 Cookie、API token 和请求正文。
+          </p>
+
+          <dl className="mt-3 space-y-1 text-xs">
+            <PlainRow label="版本" value={info?.version ?? "—"} onCopy={onCopy} />
+            <PlainRow
+              label="MCP 本地端口"
+              value={info?.runtimePort ? `127.0.0.1:${info.runtimePort}` : "未启动"}
+              onCopy={onCopy}
+            />
+            <PlainRow
+              label="轮询间隔"
+              value={`${info?.pollIntervalSecs ?? 60}s`}
+              onCopy={onCopy}
+            />
+          </dl>
+
+          <div className="mt-4 divide-y divide-slate-100">
+            {paths.map(([label, value]) => (
+              <div key={label} className="flex items-center gap-3 py-2 text-xs">
+                <span className="w-24 shrink-0 text-slate-400">{label}</span>
+                <span
+                  className="min-w-0 flex-1 truncate font-mono text-[11px] text-slate-600"
+                  title={value}
+                >
+                  {value}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => onOpenPath(value)}
+                  className="inline-flex shrink-0 items-center gap-1 rounded border border-slate-200 px-2 py-1 text-[11px] text-slate-600 transition hover:border-slate-300"
+                >
+                  <FolderOpen size={11} />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onCopy(value)}
+                  className="inline-flex shrink-0 items-center gap-1 rounded border border-slate-200 px-2 py-1 text-[11px] text-slate-600 transition hover:border-slate-300"
+                >
+                  <Copy size={11} />
+                </button>
+              </div>
+            ))}
+          </div>
+        </Dialog>
+      ) : null}
 
       <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
         <div className="flex items-start justify-between gap-3">
@@ -237,30 +272,14 @@ export function SettingsPage(props: Props) {
       </section>
 
       {capturesOpen ? (
-        <div
-          className="fixed inset-0 z-[80] flex items-center justify-center bg-slate-900/30 p-6 backdrop-blur-[1px]"
-          onMouseDown={(event) => {
-            if (event.target === event.currentTarget) setCapturesOpen(false);
-          }}
+        <Dialog
+          title="接口抓包"
+          icon={<FileJson size={15} className="text-slate-400" />}
+          onClose={() => setCapturesOpen(false)}
+          size="wide"
         >
-          <div className="flex h-[min(82vh,760px)] w-[min(1180px,94vw)] flex-col overflow-hidden rounded-2xl bg-white shadow-2xl ring-1 ring-black/10">
-            <header className="flex shrink-0 items-center gap-2 border-b border-slate-100 px-4 py-3">
-              <FileJson size={15} className="text-slate-400" />
-              <h2 className="text-[13px] font-semibold text-slate-900">接口抓包</h2>
-              <button
-                type="button"
-                aria-label="关闭抓包"
-                onClick={() => setCapturesOpen(false)}
-                className="ml-auto grid h-8 w-8 place-items-center rounded-lg text-slate-400 transition hover:bg-slate-100 hover:text-slate-700"
-              >
-                <X size={16} />
-              </button>
-            </header>
-            <div className="min-h-0 flex-1 overflow-y-auto p-4">
-              <CapturesPage toast={toast} onOpenPath={onOpenPath} />
-            </div>
-          </div>
-        </div>
+          <CapturesPage toast={toast} onOpenPath={onOpenPath} />
+        </Dialog>
       ) : null}
     </div>
   );
@@ -287,3 +306,51 @@ function PlainRow(props: { label: string; value: string; onCopy: (text: string) 
     </div>
   );
 }
+
+function Dialog(props: {
+  title: string;
+  icon: ReactNode;
+  onClose: () => void;
+  action?: ReactNode;
+  size?: "default" | "wide";
+  children: ReactNode;
+}) {
+  return (
+    <div
+      className="fixed inset-0 z-[80] flex items-center justify-center bg-slate-900/30 p-6 backdrop-blur-[1px]"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) props.onClose();
+      }}
+    >
+      <div
+        className={clsx(
+          "flex flex-col overflow-hidden rounded-2xl bg-white shadow-2xl ring-1 ring-black/10",
+          props.size === "wide"
+            ? "h-[min(82vh,760px)] w-[min(1180px,94vw)]"
+            : "max-h-[min(82vh,760px)] w-[min(560px,92vw)]",
+        )}
+      >
+        <header className="flex shrink-0 items-center gap-2 border-b border-slate-100 px-4 py-3">
+          {props.icon}
+          <h2 className="text-[13px] font-semibold text-slate-900">{props.title}</h2>
+          {props.action ? (
+            <div className="ml-auto flex items-center gap-2">{props.action}</div>
+          ) : null}
+          <button
+            type="button"
+            aria-label={`关闭${props.title}`}
+            onClick={props.onClose}
+            className={clsx(
+              "grid h-8 w-8 place-items-center rounded-lg text-slate-400 transition hover:bg-slate-100 hover:text-slate-700",
+              props.action ? "" : "ml-auto",
+            )}
+          >
+            <X size={16} />
+          </button>
+        </header>
+        <div className="min-h-0 flex-1 overflow-y-auto p-4">{props.children}</div>
+      </div>
+    </div>
+  );
+}
+

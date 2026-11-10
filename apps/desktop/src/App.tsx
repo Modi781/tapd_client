@@ -53,7 +53,6 @@ import { McpPage } from "./components/McpPage";
 import { Onboarding } from "./components/Onboarding";
 import { ProjectSettings } from "./components/ProjectSettings";
 import { SettingsPage } from "./components/SettingsPage";
-import { UpdatePanel } from "./components/UpdatePanel";
 import { ScrollingName } from "./components/ScrollingName";
 import { SkeletonRows } from "./components/Skeleton";
 import { Button } from "./components/ui";
@@ -154,7 +153,6 @@ export default function App() {
     getUpdateSnapshot,
     getUpdateSnapshot,
   );
-  const [updateDialogOpen, setUpdateDialogOpen] = useState(false);
 
   useEffect(() => {
     startUpdateStore();
@@ -646,8 +644,9 @@ export default function App() {
         const name =
           context?.workspaces.find((item) => item.id === target.workspaceId)?.name ?? null;
         const result = await api.exportBugMd(target.workspaceId, target.id, name);
+        // Success is reported by the inline export panel in the detail pane;
+        // a toast on top of it is just noise.
         setLastExport(result);
-        showToast("ok", `已导出 ${result.assetCount} 个资源：${result.markdownPath}`);
       } catch (error) {
         showToast("error", String(error));
       } finally {
@@ -955,7 +954,7 @@ export default function App() {
           <div className="group relative shrink-0">
             <button
               type="button"
-              onClick={() => setUpdateDialogOpen(true)}
+              onClick={() => activateView("account")}
               title={`发现新版本 v${updateState.available.version}`}
               className="grid h-7 w-7 place-items-center rounded-lg text-emerald-600 transition hover:bg-emerald-50"
             >
@@ -977,7 +976,7 @@ export default function App() {
                 {updateState.available.notes}
               </p>
               <p className="mt-2 border-t border-white/10 pt-2 text-[10px] text-slate-400">
-                点击查看详情并更新
+                点击前往账户页更新
               </p>
             </div>
           </div>
@@ -1452,33 +1451,6 @@ export default function App() {
 
       {!info.onboarded ? (
         <Onboarding info={info} onDone={() => void refreshBase()} />
-      ) : null}
-
-      {updateDialogOpen ? (
-        <div
-          className="fixed inset-0 z-[75] flex items-center justify-center bg-slate-900/30 p-6 backdrop-blur-[1px]"
-          onMouseDown={(event) => {
-            if (event.target === event.currentTarget) setUpdateDialogOpen(false);
-          }}
-        >
-          <div className="w-[min(680px,94vw)] overflow-hidden rounded-2xl bg-white p-5 shadow-2xl ring-1 ring-black/10">
-            <div className="mb-3 flex items-center gap-2">
-              <h2 className="text-[13px] font-semibold text-slate-900">更新与版本</h2>
-              <span className="font-mono text-[10px] text-slate-400">
-                v{info.version}
-              </span>
-              <button
-                type="button"
-                aria-label="关闭更新面板"
-                onClick={() => setUpdateDialogOpen(false)}
-                className="ml-auto grid h-8 w-8 place-items-center rounded-lg text-slate-400 transition hover:bg-slate-100 hover:text-slate-700"
-              >
-                <X size={16} />
-              </button>
-            </div>
-            <UpdatePanel toast={showToast} bare />
-          </div>
-        </div>
       ) : null}
 
       {toastNode}
