@@ -10,6 +10,8 @@ pnpm build            # 本机架构；先构建 sidecar，再 tauri build
 pnpm build:universal  # universal；需要 rustup target add x86_64-apple-darwin
 ```
 
+`cargo check --workspace` / `cargo test --workspace` 也会触发 Tauri build script，而它要求 `binaries/` 下的 sidecar 存在；直接用 `pnpm check:rust` / `pnpm test:rust`（会自动先构建 debug sidecar），或先跑 `pnpm build:sidecar:debug`。
+
 产物：
 
 ```text
