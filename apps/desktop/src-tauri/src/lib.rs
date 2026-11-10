@@ -79,6 +79,7 @@ pub fn run() {
             commands::ensure_window_width,
             commands::mcp_config,
             commands::complete_onboarding,
+            commands::reset_onboarding,
             commands::mcp_policy_get,
             commands::mcp_policy_set,
             commands::mcp_audit_list,

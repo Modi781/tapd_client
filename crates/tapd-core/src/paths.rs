@@ -65,7 +65,8 @@ impl AppPaths {
     }
 }
 
-fn home_dir() -> std::io::Result<PathBuf> {
+/// User home directory (`HOME`, falling back to `USERPROFILE` on Windows).
+pub fn home_dir() -> std::io::Result<PathBuf> {
     if let Some(home) = std::env::var_os("HOME") {
         return Ok(PathBuf::from(home));
     }

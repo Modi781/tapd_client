@@ -1,4 +1,5 @@
 import { featureCommand } from "./feature";
+import type { McpClientId } from "./api";
 
 export type McpImportResult = {
   /** Config file that was written. */
@@ -12,6 +13,7 @@ export type McpImportResult = {
 };
 
 export const mcpApi = {
-  /** Merges the bundled tapd-mcp sidecar into the opencode global config. */
-  importOpencode: () => featureCommand<McpImportResult>("mcp_import_opencode"),
+  /** Merges the bundled tapd-mcp sidecar into the client's user-scope config. */
+  importClient: (client: McpClientId) =>
+    featureCommand<McpImportResult>("mcp_import_client", { client }),
 };

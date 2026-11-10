@@ -1,36 +1,47 @@
 import { useState } from "react";
-import { Copy, FileJson, FolderOpen, PackageOpen, ShieldCheck, X } from "lucide-react";
+import {
+  Copy,
+  FileJson,
+  FolderOpen,
+  PackageOpen,
+  ShieldCheck,
+  Sparkles,
+  Trash2,
+  X,
+} from "lucide-react";
 
-import { api, type AppInfo, type WorkspaceContext } from "../lib/api";
+import { api, type AppInfo } from "../lib/api";
 import type { SettingsSectionProps } from "../lib/feature";
 import { AgentSettings } from "./AgentSettings";
 import { CapturesPage } from "./CapturesPage";
-import { ProjectSettings } from "./ProjectSettings";
 import { NotificationSettings } from "./NotificationSettings";
 import { Button } from "./ui";
 
 type Props = {
   info: AppInfo | null;
-  context: WorkspaceContext | null;
   onOpenPath: (path: string) => void;
   onCopy: (text: string) => void;
-  hiddenWorkspaceIds: string[];
-  onSetWorkspaceVisible: (id: string, visible: boolean) => void;
+  onShowOnboarding: () => void;
   toast: SettingsSectionProps["toast"];
 };
 
 export function SettingsPage(props: Props) {
-  const {
-    info,
-    context,
-    onOpenPath,
-    onCopy,
-    hiddenWorkspaceIds,
-    onSetWorkspaceVisible,
-    toast,
-  } = props;
+  const { info, onOpenPath, onCopy, onShowOnboarding, toast } = props;
   const [capturesOpen, setCapturesOpen] = useState(false);
   const [diagnosing, setDiagnosing] = useState(false);
+  const [confirmClear, setConfirmClear] = useState(false);
+  const [clearing, setClearing] = useState(false);
+
+  const clearLocalData = async () => {
+    setClearing(true);
+    try {
+      await api.clearAppData();
+      toast("ok", "本地数据已清理，应用正在重启…");
+    } catch (error) {
+      setClearing(false);
+      toast("error", String(error));
+    }
+  };
 
   const exportDiagnostics = async () => {
     setDiagnosing(true);
@@ -61,13 +72,6 @@ export function SettingsPage(props: Props) {
 
   return (
     <div className="mx-auto max-w-4xl space-y-4">
-      <ProjectSettings
-        context={context}
-        hiddenWorkspaceIds={hiddenWorkspaceIds}
-        onSetWorkspaceVisible={onSetWorkspaceVisible}
-        toast={toast}
-      />
-
       <NotificationSettings toast={toast} />
 
       <AgentSettings toast={toast} />
@@ -129,6 +133,63 @@ export function SettingsPage(props: Props) {
       </section>
 
       <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <h2 className="flex items-center gap-2 text-sm font-semibold text-slate-900">
+              <Trash2 size={15} className="text-slate-400" />
+              本地数据
+            </h2>
+            <p className="mt-1 text-xs leading-5 text-slate-500">
+              删除应用数据目录下的全部配置、离线缓存、日志、抓包与 Agent 任务记录，然后自动重启应用。导出目录不受影响。
+            </p>
+            {info ? (
+              <p
+                className="mt-1 truncate font-mono text-[11px] text-slate-400"
+                title={info.paths.dataDir}
+              >
+                {info.paths.dataDir}
+              </p>
+            ) : null}
+          </div>
+          {confirmClear ? (
+            <div className="flex shrink-0 items-center gap-2">
+              <Button
+                size="sm"
+                variant="ghost"
+                disabled={clearing}
+                onClick={() => setConfirmClear(false)}
+              >
+                取消
+              </Button>
+              <Button
+                size="sm"
+                variant="danger"
+                loading={clearing}
+                onClick={() => void clearLocalData()}
+              >
+                确认清理
+              </Button>
+            </div>
+          ) : (
+            <Button
+              size="sm"
+              variant="danger"
+              icon={<Trash2 size={13} />}
+              onClick={() => setConfirmClear(true)}
+            >
+              清理缓存
+            </Button>
+          )}
+        </div>
+        {confirmClear ? (
+          <p className="mt-3 rounded-lg bg-rose-50 px-3 py-2 text-[11px] leading-5 text-rose-600">
+            操作不可撤销：引导进度、MCP 策略、Agent 任务与离线缓存都会被清除。TAPD Cookie
+            保存在 WebView 会话中，如需退出登录请使用账户页。
+          </p>
+        ) : null}
+      </section>
+
+      <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
         <div className="flex items-center justify-between gap-3">
           <div>
             <h2 className="flex items-center gap-2 text-sm font-semibold text-slate-900">
@@ -146,6 +207,28 @@ export function SettingsPage(props: Props) {
             icon={<FileJson size={13} />}
           >
             打开抓包
+          </Button>
+        </div>
+      </section>
+
+      <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <h2 className="flex items-center gap-2 text-sm font-semibold text-slate-900">
+              <Sparkles size={15} className="text-slate-400" />
+              新手引导
+            </h2>
+            <p className="mt-1 text-xs text-slate-500">
+              重新查看产品卖点与快速开始。
+            </p>
+          </div>
+          <Button
+            size="sm"
+            variant="secondary"
+            onClick={onShowOnboarding}
+            icon={<Sparkles size={13} />}
+          >
+            查看引导
           </Button>
         </div>
       </section>

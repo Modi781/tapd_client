@@ -221,6 +221,17 @@ export type BugDetail = BugSummary & {
   changes: ChangeHistory;
 };
 
+export type McpClientId = "opencode" | "zcode" | "claude" | "cursor" | "codex";
+
+/** Per-client one-click import status. */
+export type McpClientStatus = {
+  id: McpClientId;
+  /** User-scope config file, when it can be located. */
+  path: string | null;
+  /** Whether the config already registers tapd-mcp. */
+  imported: boolean;
+};
+
 export type McpConfigInfo = {
   commandPath: string;
   snippet: string;
@@ -228,10 +239,7 @@ export type McpConfigInfo = {
   readOnly: boolean;
   tools: string[];
   port: number | null;
-  /** opencode global config path, when discoverable. */
-  configPath: string | null;
-  /** Whether the opencode config already registers tapd-mcp. */
-  imported: boolean;
+  clients: McpClientStatus[];
 };
 
 /** User-configurable capability boundary for MCP tool calls. */
@@ -347,6 +355,7 @@ export const api = {
     invoke<void>("set_hidden_workspaces", { ids }),
   mcpConfig: () => invoke<McpConfigInfo>("mcp_config"),
   completeOnboarding: () => invoke<void>("complete_onboarding"),
+  resetOnboarding: () => invoke<void>("reset_onboarding"),
   mcpPolicyGet: () => invoke<McpPolicy>("mcp_policy_get"),
   mcpPolicySet: (policy: McpPolicy) =>
     invoke<McpPolicy>("mcp_policy_set", { policy }),
@@ -355,6 +364,8 @@ export const api = {
   mcpAuditClear: () => invoke<void>("mcp_audit_clear"),
   mcpAuditExport: () => invoke<string>("mcp_audit_export"),
   exportDiagnostics: () => invoke<DiagnosticsResult>("export_diagnostics"),
+  /** Wipes the app data directory and restarts the app. */
+  clearAppData: () => invoke<void>("clear_app_data"),
 };
 
 export const onSessionChanged = (callback: () => void): Promise<UnlistenFn> =>

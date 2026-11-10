@@ -10,13 +10,21 @@ TAPD Client 通过一个独立的 stdio sidecar（`tapd-mcp`）向 AI 客户端�
 
 ## 2. 一键导入（推荐）
 
-打开客户端的 **MCP tab** →「一键导入 opencode」：
+打开客户端的 **MCP tab** →「接入 AI 客户端」，每个客户端一行，直接点「一键导入」写入**用户级**全局配置：
 
-- 通过 `opencode debug paths` 定位全局配置（回退 `$XDG_CONFIG_HOME/opencode` / `~/.config/opencode`），把 `mcp.servers.tapd` 合并进去，保留其他配置与 MCP server。
-- 写入前自动备份为 `opencode.json.bak-<时间戳>`；重复导入不会重复写入（`changed: false`）。
-- 配置文件不是合法 JSON（例如 JSONC 带注释）时会拒绝写入并提示路径，不会覆盖。
-- 之后每次启动 Agent 任务也会幂等确保注入，不需要再手动改配置。
-- 同一页面还提供 Claude Code / Cursor / Codex 的接入片段与复制按钮。
+| 客户端 | 写入位置 | 说明 |
+| --- | --- | --- |
+| opencode | `opencode.json[c]` 的 `mcp.servers.tapd` | 通过 `opencode debug paths` 定位，回退 `$XDG_CONFIG_HOME/opencode` / `~/.config/opencode` |
+| ZCode | `~/.zcode/cli/config.json` 的 `mcp.servers.tapd` | `command` 是字符串（不是数组）；工作区级写 `<repo>/.zcode/config.json` |
+| Claude Code | `~/.claude.json` 的 `mcpServers.tapd` | 执行 `claude mcp add --scope user --transport stdio tapd -- <路径>`；需要已安装 Claude Code CLI |
+| Cursor | `~/.cursor/mcp.json` 的 `mcpServers.tapd` | 保留文件中其他 server |
+| Codex | `~/.codex/config.toml` 的 `[mcp_servers.tapd]` | 优先 `$CODEX_HOME/config.toml`；保留其他配置与注释 |
+
+- 所有导入都是幂等的：重复导入返回 `changed: false`，不会重复写入。
+- 写入前自动备份为 `<文件名>.bak-<时间戳>`；Claude Code 走 CLI 写入，失败时会恢复导入前的文件。
+- 现有配置无法安全解析时（JSONC 注释、非法 TOML、字段类型不符）会拒绝写入并提示路径，不会覆盖。
+- 之后每次启动 Agent 任务也会幂等确保注入 opencode，不需要再手动改配置。
+- 一键导入只改用户级配置。**只想对某个项目生效**时，展开该客户端的「手动配置」，按提示写入项目级配置（Claude Code 用 `--scope project`，Cursor/opencode 用项目内配置文件）。
 
 ## 3. 手动配置（项目级，可选）
 

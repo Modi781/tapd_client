@@ -320,6 +320,12 @@
     return style.display !== "none" && style.visibility !== "hidden" && style.opacity !== "0";
   }
 
+  function sizedAvatar(raw) {
+    var url = absoluteAsset(raw);
+    // WeCom avatar URLs end with a size segment (`/0` = original, ~1MB).
+    return url.replace(/\/0(\?.*)?$/, "/132$1");
+  }
+
   function absoluteAsset(raw) {
     try {
       var resolved = new URL(String(raw || ""), window.location.href).href;
@@ -512,7 +518,7 @@
         var avatarEl = quick.querySelector(".wwLogin_quick_userAvatar");
         state.name = name || null;
         state.corp = corp || null;
-        state.avatarUrl = avatarEl ? absoluteAsset(avatarEl.src) : null;
+        state.avatarUrl = avatarEl ? sizedAvatar(avatarEl.src) : null;
 
         // The desktop quick-login panel can appear either before a scan (the
         // WeCom desktop account) or after one. Only the latter may continue:

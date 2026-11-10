@@ -3,6 +3,7 @@ import type { ReactNode } from "react";
 import clsx from "clsx";
 import {
   CheckCircle2,
+  ChevronDown,
   ClipboardList,
   Copy,
   Download,
@@ -15,11 +16,13 @@ import {
   Terminal,
   Trash2,
   Wrench,
+  Zap,
 } from "lucide-react";
 
 import {
   api,
   type McpAuditEntry,
+  type McpClientId,
   type McpConfigInfo,
   type McpPolicy,
   type Workspace,
@@ -40,15 +43,18 @@ const INPUT_CLASS =
   "w-full rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-700 outline-none transition placeholder:text-slate-300 focus:border-sky-300 focus:ring-2 focus:ring-sky-100";
 
 /**
- * MCP tab: server status, policy/audit, one-click opencode import and
- * integration guides for other agents.
+ * MCP tab: server status, policy/audit, and per-client one-click import
+ * (opencode / Claude Code / Cursor / Codex) with manual project-level config.
  */
 export function McpPage({ workspaces, onCopy, toast }: Props) {
   const [mcp, setMcp] = useState<McpConfigInfo | null>(null);
   const [configError, setConfigError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
-  const [importing, setImporting] = useState(false);
-  const [importResult, setImportResult] = useState<McpImportResult | null>(null);
+  const [importingClient, setImportingClient] = useState<McpClientId | null>(null);
+  const [importResults, setImportResults] = useState<
+    Partial<Record<McpClientId, McpImportResult>>
+  >({});
+  const [expandedClients, setExpandedClients] = useState<Partial<Record<McpClientId, boolean>>>({});
   const [policy, setPolicy] = useState<McpPolicy | null>(null);
   const [audit, setAudit] = useState<McpAuditEntry[]>([]);
   const [auditFilter, setAuditFilter] = useState<"all" | "denied" | "error">("all");
@@ -156,24 +162,22 @@ export function McpPage({ workspaces, onCopy, toast }: Props) {
     }
   };
 
-  const importOpencode = async () => {
-    if (!mcp) return;
-    if (mcp.imported) {
-      toast("ok", "已导入，无需重复写入");
-      return;
-    }
-
-    setImporting(true);
+  const importClient = async (client: McpClientId, label: string) => {
+    setImportingClient(client);
     try {
-      const result = await mcpApi.importOpencode();
-      setImportResult(result);
-      toast("ok", result.changed ? "已写入 opencode 配置" : "已导入，无需重复写入");
+      const result = await mcpApi.importClient(client);
+      setImportResults((previous) => ({ ...previous, [client]: result }));
+      toast("ok", result.changed ? `已写入 ${label} 配置` : `已导入 ${label}，无需重复写入`);
       await loadConfig();
     } catch (error) {
       toast("error", String(error));
     } finally {
-      setImporting(false);
+      setImportingClient(null);
     }
+  };
+
+  const toggleClient = (client: McpClientId) => {
+    setExpandedClients((previous) => ({ ...previous, [client]: !previous[client] }));
   };
 
   if (!mcp) {
@@ -212,29 +216,66 @@ export function McpPage({ workspaces, onCopy, toast }: Props) {
     auditFilter === "all" ? true : entry.decision === auditFilter,
   );
 
-  const guides = [
+  const guides: Array<{
+    id: McpClientId;
+    title: string;
+    hint: string;
+    icon: ReactNode;
+    code: string;
+    manual: string;
+  }> = [
+    {
+      id: "opencode",
+      title: "opencode",
+      hint: "用户级全局配置",
+      icon: <Sparkles size={15} className="text-slate-400" />,
+      code: mcp.snippet,
+      manual: "只想对某个项目生效时，把上面的 JSON 写入项目根目录的 opencode.json。",
+    },
+    {
+      id: "zcode",
+      title: "ZCode",
+      hint: "用户级：~/.zcode/cli/config.json",
+      icon: <Zap size={15} className="text-slate-400" />,
+      code: JSON.stringify(
+        { mcp: { servers: { tapd: { type: "stdio", command: commandPath } } } },
+        null,
+        2,
+      ),
+      manual:
+        "只想对某个项目生效时，把同样的 mcp.servers.tapd 写入项目的 .zcode/config.json（command 是字符串）。写入后重启 ZCode，在 设置 → MCP 确认状态。",
+    },
     {
       id: "claude",
       title: "Claude Code",
-      hint: "命令行注册（stdio）",
+      hint: "用户级：claude mcp add --scope user",
       icon: <Terminal size={15} className="text-slate-400" />,
-      code: `claude mcp add --transport stdio tapd -- ${commandPath}`,
+      code: `claude mcp add --scope user --transport stdio tapd -- "${commandPath}"`,
+      manual:
+        "只想对某个项目生效时，去掉 --scope user；或改用 --scope project 写入项目的 .mcp.json。",
     },
     {
       id: "cursor",
       title: "Cursor",
-      hint: "~/.cursor/mcp.json",
+      hint: "用户级：~/.cursor/mcp.json",
       icon: <FileJson size={15} className="text-slate-400" />,
       code: JSON.stringify({ mcpServers: { tapd: { command: commandPath } } }, null, 2),
+      manual:
+        "只想对某个项目生效时，把同样的 mcpServers.tapd 写入项目的 .cursor/mcp.json。",
     },
     {
       id: "codex",
       title: "Codex",
-      hint: "~/.codex/config.toml",
+      hint: "用户级：~/.codex/config.toml",
       icon: <FileText size={15} className="text-slate-400" />,
       code: `[mcp_servers.tapd]\ncommand = "${commandPath}"`,
+      manual:
+        "只想对某个项目生效时，把上面的配置写入该项目的 Codex 配置，或在启动时用 -c 覆盖。",
     },
   ];
+
+  const clientStatus = (id: McpClientId) =>
+    mcp.clients.find((client) => client.id === id);
 
   return (
     <div className="mx-auto max-w-4xl space-y-4">
@@ -291,23 +332,6 @@ export function McpPage({ workspaces, onCopy, toast }: Props) {
 
         <div className="mt-4 space-y-2">
           <PathRow label="MCP 程序路径" value={mcp.commandPath} onCopy={onCopy} />
-          <PathRow
-            label="opencode 配置"
-            value={mcp.configPath ?? "未找到 opencode 配置目录"}
-            copyable={Boolean(mcp.configPath)}
-            onCopy={onCopy}
-            badge={
-              mcp.configPath ? (
-                mcp.imported ? (
-                  <Badge tone="green">已导入</Badge>
-                ) : (
-                  <Badge tone="amber">未导入</Badge>
-                )
-              ) : (
-                <Badge tone="neutral">未找到</Badge>
-              )
-            }
-          />
         </div>
       </section>
 
@@ -529,121 +553,105 @@ export function McpPage({ workspaces, onCopy, toast }: Props) {
         </div>
       </section>
 
-      <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-        <div className="flex items-start justify-between gap-3">
-          <div>
-            <h2 className="flex items-center gap-2 text-sm font-semibold text-slate-900">
-              <Sparkles size={15} className="text-slate-400" />
-              一键导入 opencode
-            </h2>
-            <p className="mt-1 text-xs leading-5 text-slate-500">
-              自动写入 opencode 全局配置；改动前备份，重复导入不会重复写入。
-            </p>
-          </div>
-          <Badge tone={mcp.imported ? "green" : "amber"}>
-            {mcp.imported ? "已导入" : "待导入"}
-          </Badge>
-        </div>
-
-        <div className="mt-3 rounded-xl border border-slate-100 bg-slate-50 p-3">
-          <div className="text-[10px] uppercase tracking-wide text-slate-400">目标配置</div>
-          <div className="mt-1 break-all font-mono text-[11px] text-slate-600">
-            {mcp.configPath ?? "未找到 opencode 配置目录"}
-          </div>
-          <p className="mt-2 text-[10px] leading-5 text-slate-400">
-            无法安全解析配置时会保留原文件并提示。
-          </p>
-        </div>
-
-        <div className="mt-4 flex flex-wrap items-center gap-2">
-          <Button
-            variant="primary"
-            onClick={() => void importOpencode()}
-            loading={importing}
-            icon={<Download size={13} />}
-          >
-            一键导入 opencode
-          </Button>
-          <Button size="sm" onClick={() => onCopy(mcp.snippet)} icon={<Copy size={13} />}>
-            复制配置片段
-          </Button>
-          <span className="text-[10px] text-slate-400">
-            重启 opencode 后运行 <span className="font-mono">opencode mcp list</span> 确认已连接。
-          </span>
-        </div>
-
-        {importResult ? (
-          <div className="mt-3 rounded-xl border border-emerald-100 bg-emerald-50/60 p-3 text-[11px] leading-5 text-emerald-800">
-            <div className="flex items-center gap-1.5 font-medium">
-              <CheckCircle2 size={12} />
-              {importResult.changed ? "已写入 opencode 配置" : "已导入，无需重复写入"}
-            </div>
-            <div className="mt-1 break-all font-mono text-emerald-700">{importResult.path}</div>
-            {importResult.backupPath ? (
-              <div className="mt-1 break-all text-emerald-700">
-                备份：<span className="font-mono">{importResult.backupPath}</span>
-              </div>
-            ) : null}
-            {!importResult.imported ? (
-              <div className="mt-1 text-emerald-700/80">
-                配置中未检测到 tapd server，请检查写入结果。
-              </div>
-            ) : null}
-          </div>
-        ) : null}
-
-        <div className="mt-4 flex items-center justify-between text-[11px] text-slate-500">
-          <span>配置片段（可手动粘贴到 opencode.json / opencode.jsonc）</span>
-          <button type="button" onClick={() => onCopy(mcp.snippet)} className={COPY_BUTTON}>
-            <Copy size={10} />
-            复制配置
-          </button>
-        </div>
-        <pre className="mt-2 max-h-56 overflow-auto rounded-xl bg-slate-900 p-3 font-mono text-[10px] leading-5 text-slate-200">
-          {mcp.snippet}
-        </pre>
-      </section>
-
       <section className="space-y-3">
         <div className="px-1">
           <h2 className="flex items-center gap-2 text-sm font-semibold text-slate-900">
             <Wrench size={15} className="text-slate-400" />
-            接入其他 AI 客户端
+            接入 AI 客户端
           </h2>
           <p className="mt-1 text-xs leading-5 text-slate-500">
-            复制对应的命令或配置，替换为实际程序路径即可。
+            一键写入各客户端的用户级配置，改动前自动备份；只想对某个项目生效时，展开手动配置。
           </p>
         </div>
 
-        <div className="grid gap-4 lg:grid-cols-3">
-          {guides.map((guide) => (
-            <section
-              key={guide.id}
-              className="flex flex-col rounded-2xl border border-slate-200 bg-white p-4 shadow-sm"
-            >
-              <div className="flex items-start justify-between gap-2">
-                <div className="min-w-0">
-                  <h3 className="flex items-center gap-2 text-xs font-semibold text-slate-900">
+        <div className="space-y-2">
+          {guides.map((guide) => {
+            const status = clientStatus(guide.id);
+            const expanded = Boolean(expandedClients[guide.id]);
+            const result = importResults[guide.id];
+            return (
+              <section
+                key={guide.id}
+                className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm"
+              >
+                <div className="flex flex-wrap items-center gap-3">
+                  <div className="flex min-w-0 flex-1 items-center gap-2.5">
                     {guide.icon}
-                    {guide.title}
-                  </h3>
-                  <p className="mt-1 break-all text-[10px] text-slate-400">{guide.hint}</p>
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2">
+                        <h3 className="text-xs font-semibold text-slate-900">{guide.title}</h3>
+                        <Badge tone={status?.imported ? "green" : "amber"}>
+                          {status?.imported ? "已导入" : "未导入"}
+                        </Badge>
+                      </div>
+                      <p
+                        className="mt-0.5 truncate text-[10px] text-slate-400"
+                        title={status?.path ?? guide.hint}
+                      >
+                        {status?.path ?? guide.hint}
+                      </p>
+                    </div>
+                  </div>
+                  <div className="flex shrink-0 items-center gap-2">
+                    <Button
+                      size="sm"
+                      variant={status?.imported ? "secondary" : "primary"}
+                      loading={importingClient === guide.id}
+                      onClick={() => void importClient(guide.id, guide.title)}
+                      icon={<Download size={13} />}
+                    >
+                      {status?.imported ? "重新导入" : "一键导入"}
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => toggleClient(guide.id)}
+                      icon={
+                        <ChevronDown
+                          size={13}
+                          className={clsx("transition", expanded && "rotate-180")}
+                        />
+                      }
+                    >
+                      手动配置
+                    </Button>
+                  </div>
                 </div>
-                <button
-                  type="button"
-                  onClick={() => onCopy(guide.code)}
-                  title="复制"
-                  className={COPY_BUTTON}
-                >
-                  <Copy size={10} />
-                  复制
-                </button>
-              </div>
-              <pre className="mt-3 min-h-[96px] flex-1 overflow-auto rounded-xl bg-slate-900 p-3 font-mono text-[10px] leading-5 text-slate-200">
-                {guide.code}
-              </pre>
-            </section>
-          ))}
+
+                {result ? (
+                  <div className="mt-2 break-all text-[10px] leading-5 text-emerald-700">
+                    <CheckCircle2 size={11} className="mr-1 inline" />
+                    {result.changed ? "已写入" : "已存在，无需重复写入"}：
+                    <span className="font-mono">{result.path}</span>
+                    {result.backupPath ? (
+                      <span className="text-emerald-600/80">
+                        （备份：<span className="font-mono">{result.backupPath}</span>）
+                      </span>
+                    ) : null}
+                  </div>
+                ) : null}
+
+                {expanded ? (
+                  <div className="mt-3 rounded-xl border border-slate-100 bg-slate-50 p-3">
+                    <div className="flex items-start justify-between gap-3">
+                      <p className="text-[10px] leading-5 text-slate-500">{guide.manual}</p>
+                      <button
+                        type="button"
+                        onClick={() => onCopy(guide.code)}
+                        className={COPY_BUTTON}
+                      >
+                        <Copy size={10} />
+                        复制
+                      </button>
+                    </div>
+                    <pre className="mt-2 overflow-auto rounded-lg bg-slate-900 p-3 font-mono text-[10px] leading-5 text-slate-200">
+                      {guide.code}
+                    </pre>
+                  </div>
+                ) : null}
+              </section>
+            );
+          })}
         </div>
       </section>
     </div>

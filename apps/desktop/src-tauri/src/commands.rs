@@ -607,6 +607,16 @@ pub(crate) async fn fetch_change_history(
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct McpClientInfo {
+    id: String,
+    /// User-scope config file, when it can be located.
+    path: Option<String>,
+    /// Whether that file already registers `tapd-mcp`.
+    imported: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct McpConfigInfo {
     command_path: String,
     snippet: String,
@@ -614,10 +624,8 @@ pub struct McpConfigInfo {
     read_only: bool,
     tools: Vec<&'static str>,
     port: Option<u16>,
-    /// Path of the opencode global config, when it can be discovered.
-    config_path: Option<String>,
-    /// Whether that config already registers `tapd-mcp`.
-    imported: bool,
+    /// One-click import status for every supported client.
+    clients: Vec<McpClientInfo>,
 }
 
 /// Path to the bundled `tapd-mcp` sidecar (falls back to PATH lookup in dev).
@@ -628,6 +636,16 @@ pub(crate) fn sidecar_command_path() -> String {
         .filter(|path| path.exists())
         .map(|path| path.to_string_lossy().to_string())
         .unwrap_or_else(|| "tapd-mcp".to_string())
+}
+
+#[tauri::command]
+pub fn reset_onboarding(state: State<'_, SharedState>) -> Result<(), String> {
+    let snapshot = {
+        let mut config = state.config.lock().expect("config lock");
+        config.onboarded = false;
+        config.clone()
+    };
+    state.save_config(&snapshot).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -691,26 +709,30 @@ pub fn mcp_audit_export(state: State<'_, SharedState>) -> Result<String, String>
 }
 
 #[tauri::command]
-pub async fn mcp_config(
-    state: State<'_, SharedState>,
-) -> Result<McpConfigInfo, String> {
+pub async fn mcp_config(state: State<'_, SharedState>) -> Result<McpConfigInfo, String> {
     let command_path = sidecar_command_path();
 
-    // Discovering the opencode config shells out to `opencode debug paths`
-    // (up to 3s); keep it off the UI thread and discover it only once.
-    let discovery_command = command_path.clone();
-    let (config_path, imported) = tokio::task::spawn_blocking(move || {
-        match crate::mcp_import::opencode_config_path() {
-            Some(path) => {
-                let imported =
-                    crate::mcp_import::is_imported_in(&path, &discovery_command);
-                (Some(path), imported)
-            }
-            None => (None, false),
-        }
+    // Discovering client configs shells out to `opencode debug paths` (up to
+    // 3s); keep the whole probe off the UI thread.
+    let status_command = command_path.clone();
+    let clients = tokio::task::spawn_blocking(move || {
+        crate::mcp_import::CLIENTS
+            .iter()
+            .map(|client| {
+                let path = crate::mcp_import::client_config_path(client);
+                let imported = path.as_deref().is_some_and(|path| {
+                    crate::mcp_import::imported_in_path(client, path, &status_command)
+                });
+                McpClientInfo {
+                    id: (*client).to_string(),
+                    path: path.map(|path| path.to_string_lossy().to_string()),
+                    imported,
+                }
+            })
+            .collect::<Vec<_>>()
     })
     .await
-    .unwrap_or((None, false));
+    .unwrap_or_default();
 
     let snippet = serde_json::to_string_pretty(&serde_json::json!({
         "$schema": "https://opencode.ai/config.json",
@@ -742,8 +764,7 @@ pub async fn mcp_config(
             "tapd_update_bug_status",
         ],
         port: state.runtime_info().map(|runtime| runtime.port),
-        config_path: config_path.map(|path| path.to_string_lossy().to_string()),
-        imported,
+        clients,
     })
 }
 
@@ -1290,6 +1311,21 @@ fn with_content_extension(path: std::path::PathBuf, content_type: &str) -> std::
         );
         path.with_file_name(name)
     }
+}
+
+/// Deletes every entry under the app data directory and restarts the app.
+///
+/// The wipe runs on the next launch, before logging or SQLite opens anything,
+/// because the current process holds those files open (and Windows would
+/// refuse to delete them). The caller gets its result before the restart.
+#[tauri::command]
+pub fn clear_app_data(app: AppHandle, state: State<'_, SharedState>) -> Result<(), String> {
+    crate::reset::request(&state.paths).map_err(|error| error.to_string())?;
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(400));
+        app.restart();
+    });
+    Ok(())
 }
 
 pub(crate) fn is_tapd_media_url(url: &str) -> bool {

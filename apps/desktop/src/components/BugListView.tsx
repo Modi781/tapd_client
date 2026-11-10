@@ -35,6 +35,7 @@ import {
   SEVERITY_TONES,
   STATUS_TONES,
 } from "./ui";
+import { Segmented } from "./Segmented";
 
 const STATUS_ORDER = [
   "new",
@@ -208,40 +209,20 @@ function BugListViewImpl(props: Props) {
         <div className="flex items-center gap-2">
           <h2 className="text-sm font-semibold text-slate-900">缺陷</h2>
           {page ? (
-            <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] text-slate-500">
+            <span className="inline-flex w-[8ch] justify-center rounded-full bg-slate-100 px-1.5 py-0.5 text-[11px] tabular-nums text-slate-500">
               {page.total}
             </span>
           ) : null}
         </div>
 
-        <div className="flex items-center rounded-lg border border-slate-200 bg-slate-50 p-0.5">
-          <button
-            type="button"
-            onClick={() => onScopeChange("mine")}
-            className={clsx(
-              "inline-flex items-center gap-1 rounded-md px-2.5 py-1 text-xs transition",
-              scope === "mine"
-                ? "bg-white text-slate-900 shadow-sm"
-                : "text-slate-500 hover:text-slate-700",
-            )}
-          >
-            <UserRound size={12} />
-            我负责的
-          </button>
-          <button
-            type="button"
-            onClick={() => onScopeChange("all")}
-            className={clsx(
-              "inline-flex items-center gap-1 rounded-md px-2.5 py-1 text-xs transition",
-              scope === "all"
-                ? "bg-white text-slate-900 shadow-sm"
-                : "text-slate-500 hover:text-slate-700",
-            )}
-          >
-            <Users size={12} />
-            全部
-          </button>
-        </div>
+        <Segmented
+          value={scope}
+          onChange={onScopeChange}
+          options={[
+            { value: "mine", label: "我负责的", icon: <UserRound size={12} /> },
+            { value: "all", label: "全部", icon: <Users size={12} /> },
+          ]}
+        />
 
         {scope === "mine" && !me ? (
           <span className="text-[11px] text-amber-600">未能识别当前用户，暂按全部查询</span>
@@ -509,8 +490,10 @@ function BugListViewImpl(props: Props) {
 
       {page && page.total > 0 ? (
         <div className="flex shrink-0 items-center justify-between border-t border-slate-200 bg-white px-5 py-2.5 text-[11px] text-slate-500">
-          <span>
-            共 {page.total} 条 · 第 {pageNo} / {totalPages} 页
+          <span className="tabular-nums">
+            共{" "}
+            <span className="inline-block min-w-[6ch] text-right">{page.total}</span> 条 · 第{" "}
+            {pageNo} / {totalPages} 页
           </span>
           <div className="flex items-center gap-2">
             <Button
