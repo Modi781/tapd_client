@@ -61,6 +61,7 @@ pub fn run() {
             commands::capture_export,
             commands::open_path,
             commands::open_media,
+            commands::media_endpoint,
             commands::open_targets,
             commands::set_open_target,
         ])

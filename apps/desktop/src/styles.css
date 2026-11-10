@@ -49,3 +49,34 @@ body {
 *::-webkit-scrollbar-track {
   background: transparent;
 }
+
+/* Dynamic-island style expansion for the notification capsule. */
+@keyframes island-expand {
+  from {
+    opacity: 0;
+    transform: scale(0.92) translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.island-expand {
+  animation: island-expand 200ms cubic-bezier(0.22, 0.9, 0.24, 1);
+}
+
+@keyframes island-pill {
+  from {
+    opacity: 0;
+    transform: scale(0.94);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.island-pill {
+  animation: island-pill 160ms ease-out;
+}

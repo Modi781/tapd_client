@@ -15,7 +15,7 @@ use std::{
     collections::BTreeMap,
     path::PathBuf,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex, OnceLock,
     },
     time::Duration,
@@ -25,7 +25,7 @@ use chrono::{Duration as ChronoDuration, Local, NaiveDateTime, NaiveTime};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tauri::{
-    AppHandle, Emitter, LogicalSize, Manager, PhysicalPosition, WebviewUrl, WebviewWindow,
+    AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, WebviewUrl, WebviewWindow,
     WebviewWindowBuilder,
 };
 use tapd_core::{
@@ -39,7 +39,7 @@ use tapd_core::{
 use crate::{commands::session_request_json, session, state::SharedState};
 
 /// Tauri label of the self-drawn notification window (see `main.tsx`).
-pub const WINDOW_LABEL: &str = "notification";
+pub const WINDOW_LABEL: &str = "island";
 const STORE_FILE: &str = "notifications.json";
 const MAX_ITEMS: usize = 200;
 const MAX_HISTORY: usize = 100;
@@ -708,23 +708,18 @@ impl NotificationService {
         (items, quiet)
     }
 
-    /// Emits the current pending list and shows/hides the window accordingly.
+    /// Emits the current pending list and lays the island out accordingly.
+    ///
+    /// The capsule is always visible (it doubles as the status indicator), so
+    /// an empty list collapses the island instead of hiding it.
     fn refresh_window(&self) {
         let (items, quiet) = self.pending_payload();
-        let _ = self
-            .app
-            .emit("notification://show", json!({ "items": items }));
+        let _ = self.app.emit(
+            "notification://show",
+            json!({ "items": items, "quiet": quiet }),
+        );
 
-        if items.is_empty() || quiet {
-            if let Some(window) = self.app.get_webview_window(WINDOW_LABEL) {
-                let _ = window.hide();
-            }
-            return;
-        }
-
-        if let Err(error) = show_window(&self.app, items.len()) {
-            tracing::warn!(%error, "failed to show notification window");
-        }
+        apply_island(&self.app, !items.is_empty() && !quiet, items.len(), true);
     }
 
     async fn ensure_identity(&self, workspace_id: &str) -> Result<Option<String>, String> {
@@ -1089,6 +1084,16 @@ fn service() -> Result<Arc<NotificationService>, String> {
 // Window management
 // ---------------------------------------------------------------------------
 
+const PILL_WIDTH: f64 = 210.0;
+const PILL_HEIGHT: f64 = 34.0;
+const CARD_WIDTH: f64 = 384.0;
+const CARD_BASE_HEIGHT: f64 = 150.0;
+const CARD_ROW_HEIGHT: f64 = 112.0;
+const ISLAND_TOP_MARGIN: f64 = 6.0;
+
+/// Bumped on every layout change so a superseded animation stops early.
+static LAYOUT_SEQ: AtomicU64 = AtomicU64::new(0);
+
 fn ensure_window(app: &AppHandle) -> Result<WebviewWindow, String> {
     if let Some(window) = app.get_webview_window(WINDOW_LABEL) {
         return Ok(window);
@@ -1099,13 +1104,15 @@ fn ensure_window(app: &AppHandle) -> Result<WebviewWindow, String> {
         WINDOW_LABEL,
         WebviewUrl::App("index.html".into()),
     )
-    .title("新缺陷通知")
-    .inner_size(400.0, 230.0)
+    .title("TAPD Client")
+    .inner_size(PILL_WIDTH, PILL_HEIGHT)
     .resizable(false)
+    // Transparent, chrome-less window: the capsule/card is drawn by CSS.
     .decorations(false)
+    .transparent(true)
+    .shadow(false)
     .always_on_top(true)
     .skip_taskbar(true)
-    .shadow(true)
     .focused(false)
     .visible(false)
     .build()
@@ -1128,36 +1135,95 @@ fn monitor_for(app: &AppHandle) -> Option<tauri::Monitor> {
         .or_else(|| app.primary_monitor().ok().flatten())
 }
 
-/// Shows the window in the bottom-right corner of the screen hosting the main
-/// window, growing upwards for additional cards.
-fn show_window(app: &AppHandle, count: usize) -> Result<(), String> {
-    const BASE_WIDTH: f64 = 400.0;
-    const BASE_HEIGHT: f64 = 230.0;
-    const EXTRA_PER_CARD: f64 = 112.0;
-    const MARGIN: f64 = 24.0;
-
-    let window = ensure_window(app)?;
-    let height = BASE_HEIGHT + EXTRA_PER_CARD * count.saturating_sub(1) as f64;
-    let _ = window.set_size(LogicalSize::new(BASE_WIDTH, height));
-
-    if let Some(monitor) = monitor_for(app) {
-        let scale = monitor.scale_factor();
-        let size = monitor.size();
-        let position = monitor.position();
-        let width_px = (BASE_WIDTH * scale) as i32;
-        let height_px = (height * scale) as i32;
-        let margin_px = (MARGIN * scale) as i32;
-        let x = position.x + size.width as i32 - width_px - margin_px;
-        let y = position.y + size.height as i32 - height_px - margin_px;
-        let _ = window.set_position(PhysicalPosition::new(
-            x.max(position.x),
-            y.max(position.y),
-        ));
+fn island_size(expanded: bool, count: usize) -> (f64, f64) {
+    if !expanded {
+        return (PILL_WIDTH, PILL_HEIGHT);
     }
+    let rows = count.clamp(1, 5) as f64;
+    (CARD_WIDTH, CARD_BASE_HEIGHT + (rows - 1.0) * CARD_ROW_HEIGHT)
+}
+
+/// Top-centre rectangle (physical pixels) for a logical island size.
+fn island_rect(app: &AppHandle, width: f64, height: f64) -> Option<(i32, i32, u32, u32)> {
+    let monitor = monitor_for(app)?;
+    let scale = monitor.scale_factor();
+    let area = monitor.work_area();
+    let w = (width * scale).round().max(1.0) as u32;
+    let h = (height * scale).round().max(1.0) as u32;
+    let x = area.position.x + (area.size.width as i32 - w as i32).max(0) / 2;
+    let y = area.position.y + (ISLAND_TOP_MARGIN * scale).round() as i32;
+    Some((x, y, w, h))
+}
+
+fn lerp(from: f64, to: f64, t: f64) -> f64 {
+    from + (to - from) * t
+}
+
+/// Places the island at the top centre of the screen. `animated` interpolates
+/// the resize so the card grows out of the capsule (Dynamic Island style).
+fn apply_island(app: &AppHandle, expanded: bool, count: usize, animated: bool) {
+    let (width, height) = island_size(expanded, count);
+    let Some((x, y, w, h)) = island_rect(app, width, height) else {
+        return;
+    };
+    let Ok(window) = ensure_window(app) else {
+        return;
+    };
 
     let _ = window.set_always_on_top(true);
     let _ = window.show();
-    Ok(())
+
+    if !animated {
+        let _ = window.set_size(PhysicalSize::new(w, h));
+        let _ = window.set_position(PhysicalPosition::new(x, y));
+    } else {
+        let sequence = LAYOUT_SEQ.fetch_add(1, Ordering::SeqCst) + 1;
+        let window_for_animation = window.clone();
+        tauri::async_runtime::spawn(async move {
+            let Ok(start_size) = window_for_animation.outer_size() else {
+                return;
+            };
+            let Ok(start_pos) = window_for_animation.outer_position() else {
+                return;
+            };
+
+            const STEPS: u32 = 11;
+            for step in 1..=STEPS {
+                if LAYOUT_SEQ.load(Ordering::SeqCst) != sequence {
+                    // A newer layout superseded this animation.
+                    return;
+                }
+                let t = step as f64 / STEPS as f64;
+                let eased = 1.0 - (1.0 - t).powi(3);
+                let next_w = lerp(start_size.width as f64, w as f64, eased).round() as u32;
+                let next_h = lerp(start_size.height as f64, h as f64, eased).round() as u32;
+                let next_x = lerp(start_pos.x as f64, x as f64, eased).round() as i32;
+                let next_y = lerp(start_pos.y as f64, y as f64, eased).round() as i32;
+                let _ = window_for_animation.set_size(PhysicalSize::new(next_w, next_h));
+                let _ = window_for_animation.set_position(PhysicalPosition::new(next_x, next_y));
+                tokio::time::sleep(Duration::from_millis(14)).await;
+            }
+        });
+    }
+
+    let _ = app.emit(
+        "island://layout",
+        json!({
+            "expanded": expanded,
+            "width": width,
+            "height": height,
+            "count": count,
+        }),
+    );
+}
+
+/// Brings the main window to the front (capsule click without pending items).
+fn focus_main_window(app: &AppHandle) {
+    if let Some(main) = app.get_webview_window("main") {
+        let _ = main.show();
+        let _ = main.unminimize();
+        let _ = main.set_focus();
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1272,6 +1338,21 @@ pub async fn command(
             let id = payload_str(&payload, "notificationId")?;
             preview_accept(app, state, &service, &id).await
         }
+        "notification_island_expand" => {
+            let service = service()?;
+            let expanded = payload
+                .get("expanded")
+                .and_then(Value::as_bool)
+                .unwrap_or(true);
+            let (items, _quiet) = service.pending_payload();
+            let expanded = expanded && !items.is_empty();
+            apply_island(app, expanded, items.len(), true);
+            Ok(json!({ "ok": true, "expanded": expanded, "count": items.len() }))
+        }
+        "notification_open_main" => {
+            focus_main_window(app);
+            Ok(json!({ "ok": true }))
+        }
         "notification_simulate" => {
             let service = service()?;
             simulate_notification(state, &service, &payload)
@@ -1307,11 +1388,7 @@ fn view_notification(
     let item = service.find_item(id)?;
     service.set_state(id, NotificationState::Viewed)?;
 
-    if let Some(main) = app.get_webview_window("main") {
-        let _ = main.show();
-        let _ = main.unminimize();
-        let _ = main.set_focus();
-    }
+    focus_main_window(app);
 
     // Simulated cards have no real bug to open; just bring the main window up.
     let simulated =

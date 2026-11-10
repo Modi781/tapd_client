@@ -47,6 +47,13 @@ export type NotificationStateSnapshot = {
   lastError: string | null;
 };
 
+export type IslandLayout = {
+  expanded: boolean;
+  width: number;
+  height: number;
+  count: number;
+};
+
 export type NotificationHandleResult = {
   ok: boolean;
   owner: string;
@@ -109,15 +116,34 @@ export const notificationApi = {
   preview: (notificationId: string) =>
     featureCommand<NotificationAcceptPreview>("notification_accept_preview", { notificationId }),
   history: () => featureCommand<{ items: NotificationItem[] }>("notification_history"),
+  /** Expands the island into cards (or collapses it back to the capsule). */
+  expandIsland: (expanded: boolean) =>
+    featureCommand<{ ok: boolean; expanded: boolean; count: number }>(
+      "notification_island_expand",
+      { expanded },
+    ),
+  openMain: () => featureCommand<{ ok: boolean }>("notification_open_main"),
 };
 
 /** Subscribes to the pending list pushed by the Rust window manager. */
 export const onNotificationShow = (
-  callback: (items: NotificationItem[]) => void,
+  callback: (payload: { items: NotificationItem[]; quiet: boolean }) => void,
 ): Promise<UnlistenFn> =>
-  listen<{ items: NotificationItem[] }>("notification://show", (event) => {
-    callback(event.payload?.items ?? []);
-  });
+  listen<{ items: NotificationItem[]; quiet?: boolean }>(
+    "notification://show",
+    (event) => {
+      callback({
+        items: event.payload?.items ?? [],
+        quiet: Boolean(event.payload?.quiet),
+      });
+    },
+  );
+
+/** The island reports its own window size so the content can match it. */
+export const onIslandLayout = (
+  callback: (layout: IslandLayout) => void,
+): Promise<UnlistenFn> =>
+  listen<IslandLayout>("island://layout", (event) => callback(event.payload));
 
 export const pendingItems = (items: NotificationItem[]): NotificationItem[] =>
   items.filter((item) => item.state === "pending");

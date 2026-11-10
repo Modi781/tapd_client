@@ -12,6 +12,7 @@ import {
   Download,
   FileArchive,
   FileText,
+  Eye,
   Image as ImageIcon,
   MessageSquare,
   Paperclip,
@@ -23,6 +24,7 @@ import clsx from "clsx";
 
 import {
   api,
+  ensureMediaEndpoint,
   formatBytes,
   mediaSrc,
   type Attachment,
@@ -87,6 +89,13 @@ export function BugDetailDrawer(props: Props) {
   const [showChanges, setShowChanges] = useState(true);
   const [previewIndex, setPreviewIndex] = useState<number | null>(null);
   const [targetSets, setTargetSets] = useState<Record<string, OpenTargetSet>>({});
+  const [, bumpMedia] = useState(0);
+
+  // Media URLs need the loopback proxy; recover if `app_info` raced startup.
+  useEffect(() => {
+    if (!open) return;
+    void ensureMediaEndpoint().then(() => bumpMedia((value) => value + 1));
+  }, [open]);
 
   // Reset collapsible sections each time the drawer is opened. Kept separate
   // from the key handler so opening the preview doesn't reset them again.
@@ -570,6 +579,21 @@ function Thumbnail(props: {
   );
 }
 
+/** Explicit, always-visible entry point for the in-app preview. */
+function PreviewButton(props: { onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={props.onClick}
+      title="预览"
+      aria-label="预览"
+      className="grid h-7 w-7 shrink-0 place-items-center rounded-md border border-slate-200 bg-white text-slate-500 transition hover:border-slate-300 hover:text-slate-800"
+    >
+      <Eye size={13} />
+    </button>
+  );
+}
+
 /**
  * Split button: the icon shows the current default app, the caret picks
  * another one. Only "open" targets live in this menu.
@@ -709,6 +733,9 @@ function AttachmentRow(props: {
           {attachment.owner ? <span>{attachment.owner}</span> : null}
         </div>
       </div>
+      {previewable && previewIndex >= 0 ? (
+        <PreviewButton onClick={() => onPreview(previewIndex)} />
+      ) : null}
       <OpenButton
         kind={kind}
         targets={targetSets[kind]}
@@ -750,6 +777,9 @@ function EmbeddedMediaRow(props: {
         </div>
         <div className="mt-0.5 text-[10px] text-slate-400">{kindLabel} · 描述/评论内嵌</div>
       </div>
+      {previewable && previewIndex >= 0 ? (
+        <PreviewButton onClick={() => onPreview(previewIndex)} />
+      ) : null}
       <OpenButton
         kind={media.kind === "image" || media.kind === "video" ? media.kind : "file"}
         targets={targetSets[media.kind === "image" || media.kind === "video" ? media.kind : "file"]}

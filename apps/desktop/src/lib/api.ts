@@ -286,14 +286,32 @@ export const onSessionUrl = (
 
 let mediaBase: string | null = null;
 
+const buildMediaBase = (port: number, token: string): string =>
+  `http://127.0.0.1:${port}/media?token=${encodeURIComponent(token)}&url=`;
+
 /** Remembers the media proxy base URL once `app_info` has been loaded. */
 export const setMediaEndpoint = (
   info: Pick<AppInfo, "mediaPort" | "mediaToken">,
 ): void => {
   mediaBase =
     info.mediaPort && info.mediaToken
-      ? `http://127.0.0.1:${info.mediaPort}/media?token=${encodeURIComponent(info.mediaToken)}&url=`
+      ? buildMediaBase(info.mediaPort, info.mediaToken)
       : null;
+};
+
+/**
+ * Fetches the media proxy endpoint on demand. `app_info` can be read before the
+ * loopback server has written its runtime info, which would leave every
+ * thumbnail/preview without a URL.
+ */
+export const ensureMediaEndpoint = async (): Promise<void> => {
+  if (mediaBase) return;
+  try {
+    const endpoint = await invoke<{ port: number; token: string }>("media_endpoint");
+    mediaBase = buildMediaBase(endpoint.port, endpoint.token);
+  } catch {
+    // The server is still starting; the next open will retry.
+  }
 };
 
 /**

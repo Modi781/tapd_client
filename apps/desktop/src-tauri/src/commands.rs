@@ -651,6 +651,26 @@ fn run_open(args: &[&str]) -> Result<(), String> {
     }
 }
 
+/// Port and capability of the media proxy, so the UI can (re)build the URL even
+/// when `app_info` was read before the local server was ready.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaEndpoint {
+    port: u16,
+    token: String,
+}
+
+#[tauri::command]
+pub fn media_endpoint(state: State<'_, SharedState>) -> Result<MediaEndpoint, String> {
+    let runtime = state
+        .runtime_info()
+        .ok_or_else(|| "本地服务尚未就绪".to_string())?;
+    Ok(MediaEndpoint {
+        port: runtime.port,
+        token: runtime.media_token,
+    })
+}
+
 /// Lists the "打开方式" options for a resource kind, plus the saved choice.
 #[tauri::command]
 pub async fn open_targets(

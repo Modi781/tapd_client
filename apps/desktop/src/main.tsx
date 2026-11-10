@@ -3,7 +3,7 @@ import ReactDOM from "react-dom/client";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import App from "./App";
 import { AgentConsoleWindow } from "./windows/AgentConsoleWindow";
-import { NotificationWindow } from "./windows/NotificationWindow";
+import { IslandWindow } from "./windows/IslandWindow";
 import "./styles.css";
 
 let label = "main";
@@ -14,8 +14,8 @@ try {
 }
 
 const content =
-  label === "notification" ? (
-    <NotificationWindow />
+  label === "island" || label === "notification" ? (
+    <IslandWindow />
   ) : label === "agent-console" ? (
     <AgentConsoleWindow />
   ) : (
