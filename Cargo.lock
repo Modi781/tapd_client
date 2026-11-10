@@ -3876,7 +3876,7 @@ dependencies = [
 
 [[package]]
 name = "tapd-client"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "axum",
  "base64 0.21.7",
@@ -3901,7 +3901,7 @@ dependencies = [
 
 [[package]]
 name = "tapd-core"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "chrono",
  "htmd",
@@ -3912,7 +3912,7 @@ dependencies = [
 
 [[package]]
 name = "tapd-mcp"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "reqwest",
  "serde",
