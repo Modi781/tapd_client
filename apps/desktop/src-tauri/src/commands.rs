@@ -154,6 +154,12 @@ pub async fn session_logout(
     };
     state.save_config(&snapshot).map_err(|error| error.to_string())?;
 
+    // Drop cached user/project/bug data: it belongs to the session being ended.
+    // Best effort — a broken cache must never block logging out.
+    if let Err(error) = state.cache.clear() {
+        tracing::warn!(%error, "failed to clear offline cache on logout");
+    }
+
     // Keep the URL watcher from resurrecting the old session while we navigate.
     session::begin_logout_guard(6000);
 
@@ -249,7 +255,7 @@ pub async fn session_http(
 #[tauri::command]
 pub async fn workspace_context(
     app: AppHandle,
-    _state: State<'_, SharedState>,
+    state: State<'_, SharedState>,
 ) -> Result<WorkspaceContext, String> {
     let root = session_request_json(
         &app,
@@ -269,13 +275,18 @@ pub async fn workspace_context(
         company: string_field(user_data, "company"),
     };
     let workspaces = parse_workspaces(&root)?;
+    let context = WorkspaceContext { user, workspaces };
 
-    Ok(WorkspaceContext { user, workspaces })
+    // Write-through: the UI renders exactly this payload from cache next time.
+    state.cache.put_workspace_context(&context);
+
+    Ok(context)
 }
 
 #[tauri::command]
 pub async fn bug_list(
     app: AppHandle,
+    state: State<'_, SharedState>,
     query: BugQuery,
 ) -> Result<BugListPage, String> {
     let body = query.body();
@@ -288,16 +299,26 @@ pub async fn bug_list(
     )
     .await?;
 
-    parse_bug_list(&root)
+    let page = parse_bug_list(&root)?;
+    state.cache.put_bug_list(&query, &page);
+    state.cache.put_bug_records(&query.workspace_id, &page.bugs);
+
+    Ok(page)
 }
 
 #[tauri::command]
 pub async fn bug_detail(
     app: AppHandle,
+    state: State<'_, SharedState>,
     workspace_id: String,
     bug_id: String,
 ) -> Result<BugDetail, String> {
-    fetch_bug_detail(&app, &workspace_id, &bug_id).await
+    // Cached here (not in `fetch_bug_detail`) so MCP/export callers, which need
+    // the freshest detail for their own output, don't pay for cache writes.
+    let detail = fetch_bug_detail(&app, &workspace_id, &bug_id).await?;
+    state.cache.put_bug_detail(&workspace_id, &bug_id, &detail);
+
+    Ok(detail)
 }
 
 /// Loads a bug together with its change history.
@@ -396,16 +417,25 @@ pub struct McpConfigInfo {
     read_only: bool,
     tools: Vec<&'static str>,
     port: Option<u16>,
+    /// Path of the opencode global config, when it can be discovered.
+    config_path: Option<String>,
+    /// Whether that config already registers `tapd-mcp`.
+    imported: bool,
 }
 
-#[tauri::command]
-pub fn mcp_config(state: State<'_, SharedState>) -> McpConfigInfo {
-    let command_path = std::env::current_exe()
+/// Path to the bundled `tapd-mcp` sidecar (falls back to PATH lookup in dev).
+pub(crate) fn sidecar_command_path() -> String {
+    std::env::current_exe()
         .ok()
         .and_then(|exe| exe.parent().map(|dir| dir.join("tapd-mcp")))
         .filter(|path| path.exists())
         .map(|path| path.to_string_lossy().to_string())
-        .unwrap_or_else(|| "tapd-mcp".to_string());
+        .unwrap_or_else(|| "tapd-mcp".to_string())
+}
+
+#[tauri::command]
+pub fn mcp_config(state: State<'_, SharedState>) -> McpConfigInfo {
+    let command_path = sidecar_command_path();
 
     let snippet = serde_json::to_string_pretty(&serde_json::json!({
         "$schema": "https://opencode.ai/config.json",
@@ -421,7 +451,7 @@ pub fn mcp_config(state: State<'_, SharedState>) -> McpConfigInfo {
     .unwrap_or_default();
 
     McpConfigInfo {
-        command_path,
+        command_path: command_path.clone(),
         snippet,
         transport: "stdio".to_string(),
         read_only: false,
@@ -437,6 +467,9 @@ pub fn mcp_config(state: State<'_, SharedState>) -> McpConfigInfo {
             "tapd_update_bug_status",
         ],
         port: state.runtime_info().map(|runtime| runtime.port),
+        config_path: crate::mcp_import::opencode_config_path()
+            .map(|path| path.to_string_lossy().to_string()),
+        imported: crate::mcp_import::is_imported(&command_path),
     }
 }
 

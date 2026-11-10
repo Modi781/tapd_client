@@ -12,6 +12,8 @@ pnpm build:universal  # universal；需要 rustup target add x86_64-apple-darwin
 
 `cargo check --workspace` / `cargo test --workspace` 也会触发 Tauri build script，而它要求 `binaries/` 下的 sidecar 存在；直接用 `pnpm check:rust` / `pnpm test:rust`（会自动先构建 debug sidecar），或先跑 `pnpm build:sidecar:debug`。
 
+`binaries/` 下的文件名只含 target triple，不含 profile：`--debug` 会覆盖同一路径的 release 产物。所以不要绕过 `pnpm build` 直接执行 `pnpm -C apps/desktop tauri build`，否则可能把上一次 `pnpm dev` 留下的 debug sidecar 打进安装包。
+
 产物：
 
 ```text
@@ -31,7 +33,7 @@ tapd-mcp-universal-apple-darwin   # 由 lipo 合并，universal 打包使用
 
 | 工作流 | 触发 | 内容 |
 | --- | --- | --- |
-| `.github/workflows/ci.yml` | push `main`、PR、手动 | 前端类型检查、Rust check/test、sidecar 构建 |
+| `.github/workflows/ci.yml` | push `main`、PR、手动 | 前端类型检查、Rust check/test（脚本内先构建 debug sidecar） |
 | `.github/workflows/release.yml` | push `release`、push `v*` tag、手动 | universal app + dmg，上传 artifact |
 
 `release` 分支的每次推送都会跑一次完整打包，产物在 Actions 页面的 artifact 中，名为 `tapd-client-<version>-universal-<run_number>`。推送 `v*` tag（例如 `v0.1.0`）时会额外创建 GitHub Release，附带 dmg 与 `SHA256SUMS.txt`。
@@ -63,8 +65,10 @@ git push origin v0.1.0
 | `APPLE_PASSWORD` | App 专用密码（可选） |
 | `APPLE_TEAM_ID` | Team ID（可选） |
 
+启用签名后，建议对首次产物做一次校验：`codesign --verify --deep --strict "TAPD Client.app"`，并用 `codesign -dv "TAPD Client.app/Contents/MacOS/tapd-mcp"` 确认 sidecar 也在签名范围内（Tauri 打包时会一并签名 `externalBin`）。
+
 ## 5. 常见问题
 
-- **`resource path binaries/tapd-mcp-... doesn't exist`**：还没构建 sidecar，运行 `pnpm build:sidecar` 或直接用 `pnpm build`。
+- **`"…/src-tauri/binaries/tapd-mcp-<triple>" does not exist`**：还没构建 sidecar，运行 `pnpm build:sidecar` 或直接用 `pnpm build`（`pnpm check:rust` / `pnpm test:rust` 会自动构建 debug 版）。
 - **universal 构建报缺少 target**：`rustup target add aarch64-apple-darwin x86_64-apple-darwin`。
 - **CI 安装依赖失败**：确认 `pnpm-lock.yaml` 已随提交更新（`pnpm install` 后提交）。

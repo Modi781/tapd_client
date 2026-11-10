@@ -5,11 +5,21 @@
 //!
 //! Design notes:
 //! - The queue is strictly serial: one tokio worker picks `queued` tasks and
-//!   runs them one at a time. Commands never start tasks directly.
+//!   runs them one at a time. Commands never start tasks directly. Every task
+//!   body runs inside its own `tokio::spawn` so a panic cannot kill the worker.
+//! - Each task gets a private `opencode serve` on a free loopback port. The
+//!   TUI runs in a PTY connected to that server (`--server`), which lets the
+//!   worker observe turn completion/permission asks and advance the queue
+//!   without waiting for the TUI to exit.
 //! - PTY work happens on dedicated std threads (reader, batcher, wait) so the
-//!   async worker only awaits a oneshot result.
+//!   async worker only awaits a oneshot result (or an event-driven completion
+//!   notification).
 //! - All task state changes are persisted atomically and broadcast through
-//!   `agent://state`. Terminal output is batched and sent via `agent://output`.
+//!   `agent://state` plus the lightweight `agent://summary`. Terminal output is
+//!   batched and sent via `agent://output`.
+//! - If the server surface is unavailable the worker falls back to the old
+//!   TUI-only path (the TUI exit code decides), logging the reason instead of
+//!   hanging the queue.
 
 use std::{
     collections::{BTreeMap, HashMap},
@@ -26,21 +36,29 @@ use std::{
 use portable_pty::{native_pty_system, Child, ChildKiller, CommandBuilder, MasterPty, PtySize};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tauri::{
-    AppHandle, Emitter, Listener, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
-};
+use tauri::{AppHandle, Emitter, Listener, Manager};
 use tapd_core::store::{read_json, write_json_atomic};
+use tokio::sync::mpsc as tokio_mpsc;
 
-use crate::state::SharedState;
+use crate::{
+    opencode::{self, PermissionReview, ServerProcess},
+    state::SharedState,
+};
 
-pub const CONSOLE_LABEL: &str = "agent-console";
+pub const MAIN_LABEL: &str = "main";
 
 const CONFIG_FILE: &str = "agent.json";
 const TASKS_FILE: &str = "agent-tasks.json";
 const LOG_DIR: &str = "agent-logs";
+const EVENTS_DIR: &str = "agent-events";
 
 const DEFAULT_BINARY: &str = "opencode";
 const MAX_LOG_TAIL_BYTES: usize = 400 * 1024;
+/// Ignore completion events that arrive immediately after prompt injection
+/// (the TUI may still be replaying history).
+const COMPLETION_GRACE: Duration = Duration::from_secs(2);
+/// Upper bound for waiting on the TUI to exit after a completion/cancel signal.
+const PTY_TEARDOWN_TIMEOUT: Duration = Duration::from_secs(3);
 
 pub const DEFAULT_PROMPT_TEMPLATE: &str = "请修复 TAPD 缺陷：{{title}}\n\n缺陷详情文件：{{md_path}}\n本地仓库：{{repo_path}}\n项目：{{workspace_name}} / 严重程度：{{severity}} / 优先级：{{priority}}\n\n项目规则：\n{{project_rule}}\n\n要求：\n1. 先完整阅读 bug.md 和 assets/ 下的截图、视频。\n2. 定位根因，做最小必要修改。\n3.修复时请遵循团队代码规范，确保代码可读、可维护。\n4. 修复完成后，提交代码并在 TAPD 中更新缺陷状态并简要评论原由以及解决方案和修复影响范围。";
 
@@ -178,19 +196,22 @@ struct AgentConfigPatch {
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 pub enum TaskStatus {
     Queued,
     Preparing,
     Running,
+    WaitingReview,
     Succeeded,
     Failed,
     Canceled,
 }
 
 impl TaskStatus {
+    /// A task occupying the single worker slot. `WaitingReview` still owns the
+    /// slot: the agent is blocked on a human decision, not finished.
     fn is_active(self) -> bool {
-        matches!(self, Self::Preparing | Self::Running)
+        matches!(self, Self::Preparing | Self::Running | Self::WaitingReview)
     }
 
     fn is_terminal(self) -> bool {
@@ -223,6 +244,10 @@ pub struct AgentTask {
     pub error: Option<String>,
     pub prompt: String,
     pub source: String,
+    /// Pending opencode permission ask; present while `status` is
+    /// `waiting_review`. Absent in older persisted files (hence `default`).
+    #[serde(default)]
+    pub review: Option<PermissionReview>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -253,7 +278,54 @@ struct EnqueueRequest {
 pub struct AgentTasksState {
     tasks: Vec<AgentTask>,
     active_task_id: Option<String>,
+    /// Kept for compatibility: number of `queued` tasks.
     queue_length: usize,
+    queued_count: usize,
+    /// `preparing | running | waiting_review`.
+    active_count: usize,
+    waiting_review_count: usize,
+}
+
+/// Lightweight state for the island capsule / tray badge.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentSummary {
+    running: bool,
+    waiting_review: bool,
+    active_task_id: Option<String>,
+    title: Option<String>,
+    workspace_name: Option<String>,
+    bug_id: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TaskCounts {
+    queued: usize,
+    active: usize,
+    waiting_review: usize,
+}
+
+/// Permission decision sent back to opencode.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum PermissionReply {
+    Once,
+    Always,
+    Reject,
+}
+
+impl PermissionReply {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Once => "once",
+            Self::Always => "always",
+            Self::Reject => "reject",
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -275,6 +347,15 @@ struct TaskResizeRequest {
     task_id: String,
     cols: u16,
     rows: u16,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PermissionReplyRequest {
+    task_id: String,
+    response: PermissionReply,
+    #[serde(default = "default_true")]
+    remember: bool,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -352,11 +433,24 @@ fn next_queued_index(tasks: &[AgentTask]) -> Option<usize> {
         .position(|task| task.status == TaskStatus::Queued)
 }
 
-fn queue_length(tasks: &[AgentTask]) -> usize {
-    tasks
-        .iter()
-        .filter(|task| task.status == TaskStatus::Queued)
-        .count()
+fn task_counts(tasks: &[AgentTask]) -> TaskCounts {
+    let mut counts = TaskCounts {
+        queued: 0,
+        active: 0,
+        waiting_review: 0,
+    };
+    for task in tasks {
+        if task.status == TaskStatus::Queued {
+            counts.queued += 1;
+        }
+        if task.status.is_active() {
+            counts.active += 1;
+        }
+        if task.status == TaskStatus::WaitingReview {
+            counts.waiting_review += 1;
+        }
+    }
+    counts
 }
 
 /// Picks the task the console should display: active first, then the next
@@ -370,6 +464,42 @@ fn active_task_id(tasks: &[AgentTask]) -> Option<String> {
         .map(|task| task.id.clone())
 }
 
+fn agent_summary(tasks: &[AgentTask]) -> AgentSummary {
+    let active_id = active_task_id(tasks);
+    let active = active_id
+        .as_ref()
+        .and_then(|id| tasks.iter().find(|task| &task.id == id));
+
+    AgentSummary {
+        running: tasks.iter().any(|task| task.status.is_active()),
+        waiting_review: tasks
+            .iter()
+            .any(|task| task.status == TaskStatus::WaitingReview),
+        active_task_id: active_id,
+        title: active.map(|task| task.title.clone()),
+        workspace_name: active.map(|task| task.workspace_name.clone()),
+        bug_id: active.map(|task| task.bug_id.clone()),
+    }
+}
+
+/// Repository path for a task: the value resolved when the task was enqueued
+/// wins, then the current per-project config. The old `repo_mappings` map is
+/// always empty after `sanitized()`, which used to fail every task.
+fn resolve_repo_path(task: &AgentTask, config: &AgentConfig) -> Result<String, String> {
+    let from_task = task.repo_path.trim();
+    if !from_task.is_empty() {
+        return Ok(from_task.to_string());
+    }
+
+    let from_config = config.repo_path_for(&task.workspace_id);
+    let from_config = from_config.trim();
+    if !from_config.is_empty() {
+        return Ok(from_config.to_string());
+    }
+
+    Err("未配置项目仓库路径，请在 设置 → Agent 修复 中配置".to_string())
+}
+
 fn finish_status(canceled: bool, exit_code: Option<i32>) -> TaskStatus {
     if canceled {
         TaskStatus::Canceled
@@ -378,6 +508,48 @@ fn finish_status(canceled: bool, exit_code: Option<i32>) -> TaskStatus {
     } else {
         TaskStatus::Failed
     }
+}
+
+/// Applies a PTY/event outcome to a task. Returns whether anything changed.
+///
+/// A task that already reached a terminal state is never downgraded: a late
+/// `finish_task` must not turn an event-driven `succeeded` into `failed`.
+fn apply_finish(task: &mut AgentTask, outcome: &PtyOutcome, now: &str) -> bool {
+    if task.status.is_terminal() {
+        return false;
+    }
+
+    if task.status == TaskStatus::Canceled || outcome.canceled {
+        task.status = TaskStatus::Canceled;
+        task.finished_at = Some(now.to_string());
+        if task.error.is_none() {
+            task.error = Some("已取消".to_string());
+        }
+        task.review = None;
+        return true;
+    }
+
+    task.finished_at = Some(now.to_string());
+    task.exit_code = outcome.exit_code;
+    task.review = None;
+
+    let status = if outcome.completed {
+        TaskStatus::Succeeded
+    } else {
+        finish_status(false, outcome.exit_code)
+    };
+    if status == TaskStatus::Succeeded {
+        task.status = TaskStatus::Succeeded;
+        task.error = None;
+    } else {
+        task.status = TaskStatus::Failed;
+        let message = outcome.error.clone().unwrap_or_else(|| match outcome.exit_code {
+            Some(code) => format!("Agent 进程退出码 {code}"),
+            None => "Agent 进程异常结束".to_string(),
+        });
+        task.error = Some(message);
+    }
+    true
 }
 
 /// Marks tasks that were mid-flight when the client exited as failed, so the
@@ -407,7 +579,14 @@ struct PtyHandles {
     child: Box<dyn Child + Send + Sync>,
 }
 
-fn open_pty(binary: &str, cwd: &Path, cols: u16, rows: u16) -> Result<PtyHandles, String> {
+fn open_pty(
+    binary: &str,
+    args: &[String],
+    envs: &[(String, String)],
+    cwd: &Path,
+    cols: u16,
+    rows: u16,
+) -> Result<PtyHandles, String> {
     let pty_system = native_pty_system();
     let pair = pty_system
         .openpty(PtySize {
@@ -422,6 +601,12 @@ fn open_pty(binary: &str, cwd: &Path, cols: u16, rows: u16) -> Result<PtyHandles
     command.cwd(cwd);
     command.env("TERM", "xterm-256color");
     command.env("COLORTERM", "truecolor");
+    for arg in args {
+        command.arg(arg);
+    }
+    for (key, value) in envs {
+        command.env(key, value);
+    }
 
     let child = pair
         .slave
@@ -446,15 +631,67 @@ struct AgentRuntime {
     master: Box<dyn MasterPty + Send>,
     writer: Box<dyn Write + Send>,
     killer: Box<dyn ChildKiller + Send + Sync>,
+    /// The TUI is started with `setsid`, so its pid is also the process-group
+    /// id used to kill the whole TUI tree.
+    pid: Option<u32>,
     canceled: Arc<AtomicBool>,
+}
+
+impl AgentRuntime {
+    /// Signals the TUI process group and the direct child.
+    fn kill(&mut self) {
+        if let Some(pid) = self.pid {
+            opencode::kill_process_group(pid, opencode::SIGTERM);
+        }
+        // portable-pty sends SIGHUP to the direct child on Unix.
+        let _ = self.killer.kill();
+        if let Some(pid) = self.pid {
+            // The TUI is in its own session, so this also reaps grandchildren
+            // (MCP servers, tool subprocesses) that ignore SIGHUP/SIGTERM.
+            opencode::kill_process_group(pid, opencode::SIGKILL);
+        }
+    }
 }
 
 #[derive(Debug, Default)]
 struct PtyOutcome {
     exit_code: Option<i32>,
     canceled: bool,
+    /// Turn completion was observed through the server event stream; the TUI
+    /// was torn down by the worker instead of exiting on its own.
+    completed: bool,
     warning: Option<String>,
     error: Option<String>,
+}
+
+/// Tracks whether the initial prompt has been injected and when. Completion
+/// events are ignored until the grace period has elapsed.
+#[derive(Debug, Default)]
+struct PromptGuard {
+    injected: AtomicBool,
+    injected_at: Mutex<Option<Instant>>,
+}
+
+impl PromptGuard {
+    fn mark_injected(&self) {
+        *self.injected_at.lock().expect("prompt guard lock") = Some(Instant::now());
+        self.injected.store(true, Ordering::SeqCst);
+    }
+
+    fn injected(&self) -> bool {
+        self.injected.load(Ordering::SeqCst)
+    }
+
+    fn completion_allowed(&self) -> bool {
+        if !self.injected() {
+            return false;
+        }
+        self.injected_at
+            .lock()
+            .expect("prompt guard lock")
+            .map(|at| at.elapsed() >= COMPLETION_GRACE)
+            .unwrap_or(false)
+    }
 }
 
 fn flush_output(app: &AppHandle, task_id: &str, log: &mut Option<std::fs::File>, pending: &mut Vec<u8>) {
@@ -478,12 +715,25 @@ fn flush_output(app: &AppHandle, task_id: &str, log: &mut Option<std::fs::File>,
 // Runtime core
 // ---------------------------------------------------------------------------
 
+/// Per-task server state. The process is kept even when the SSE subscription
+/// failed so cancel can still abort the turn over HTTP.
+struct ActiveServer {
+    process: Arc<ServerProcess>,
+    pump: Option<tauri::async_runtime::JoinHandle<()>>,
+    consumer: Option<tauri::async_runtime::JoinHandle<()>>,
+    session_id: Option<String>,
+}
+
 pub struct AgentCore {
     app: AppHandle,
     state: SharedState,
     config: Mutex<AgentConfig>,
     tasks: Mutex<Vec<AgentTask>>,
     runtimes: Mutex<HashMap<String, Arc<Mutex<AgentRuntime>>>>,
+    servers: Mutex<HashMap<String, ActiveServer>>,
+    /// Per-task cancel flag; created when the worker takes a queued task so a
+    /// cancel can interrupt server startup before the PTY exists.
+    cancels: Mutex<HashMap<String, Arc<AtomicBool>>>,
     wake: tokio::sync::Notify,
 }
 
@@ -495,6 +745,8 @@ impl AgentCore {
             config: Mutex::new(AgentConfig::default()),
             tasks: Mutex::new(Vec::new()),
             runtimes: Mutex::new(HashMap::new()),
+            servers: Mutex::new(HashMap::new()),
+            cancels: Mutex::new(HashMap::new()),
             wake: tokio::sync::Notify::new(),
         }
     }
@@ -509,6 +761,10 @@ impl AgentCore {
 
     fn logs_dir(&self) -> PathBuf {
         self.state.paths.data_dir.join(LOG_DIR)
+    }
+
+    fn events_dir(&self) -> PathBuf {
+        self.state.paths.data_dir.join(EVENTS_DIR)
     }
 
     fn load(&self) {
@@ -530,6 +786,7 @@ impl AgentCore {
         *self.tasks.lock().expect("agent tasks lock") = tasks;
 
         let _ = std::fs::create_dir_all(self.logs_dir());
+        let _ = std::fs::create_dir_all(self.events_dir());
         self.persist_tasks();
     }
 
@@ -548,16 +805,43 @@ impl AgentCore {
 
     fn tasks_state(&self) -> AgentTasksState {
         let tasks = self.tasks.lock().expect("agent tasks lock").clone();
+        let counts = task_counts(&tasks);
         AgentTasksState {
             active_task_id: active_task_id(&tasks),
-            queue_length: queue_length(&tasks),
+            queue_length: counts.queued,
+            queued_count: counts.queued,
+            active_count: counts.active,
+            waiting_review_count: counts.waiting_review,
             tasks,
         }
     }
 
+    fn summary(&self) -> AgentSummary {
+        agent_summary(&self.tasks.lock().expect("agent tasks lock"))
+    }
+
     fn emit_state(&self) {
         let state = self.tasks_state();
+        let summary = agent_summary(&state.tasks);
         let _ = self.app.emit("agent://state", state);
+        let _ = self.app.emit("agent://summary", summary);
+    }
+
+    /// Runs `mutate` under the tasks lock and only persists/broadcasts when it
+    /// reports a change.
+    fn mutate_tasks<F>(&self, mutate: F) -> bool
+    where
+        F: FnOnce(&mut Vec<AgentTask>) -> bool,
+    {
+        let changed = {
+            let mut tasks = self.tasks.lock().expect("agent tasks lock");
+            mutate(&mut tasks)
+        };
+        if changed {
+            self.persist_tasks();
+            self.emit_state();
+        }
+        changed
     }
 
     fn update_task<F>(&self, task_id: &str, mutate: F) -> Option<AgentTask>
@@ -590,15 +874,15 @@ impl AgentCore {
 
     fn fail_task(&self, task_id: &str, message: String) {
         let changed = self.update_task(task_id, |task| {
-            if task.status == TaskStatus::Canceled {
-                if task.finished_at.is_none() {
-                    task.finished_at = Some(now());
-                }
+            // Never downgrade a task that already reached a terminal state
+            // (e.g. event-driven `succeeded` followed by a late teardown).
+            if task.status.is_terminal() {
                 return;
             }
             task.status = TaskStatus::Failed;
             task.error = Some(message);
             task.finished_at = Some(now());
+            task.review = None;
         });
         if changed.is_none() {
             tracing::warn!(task_id, "agent task disappeared while failing");
@@ -688,6 +972,7 @@ impl AgentCore {
             error: None,
             prompt: String::new(),
             source: source.to_string(),
+            review: None,
         };
 
         self.tasks
@@ -702,8 +987,10 @@ impl AgentCore {
         Ok(task)
     }
 
-    fn cancel(&self, task_id: &str) -> Result<AgentTask, String> {
-        let snapshot = {
+    /// Cancels a task: aborts the active turn over HTTP (best effort), kills
+    /// the TUI process group and, later, the per-task server.
+    async fn cancel(&self, task_id: &str) -> Result<AgentTask, String> {
+        let (snapshot, server, session_id) = {
             let mut tasks = self.tasks.lock().expect("agent tasks lock");
             let task = tasks
                 .iter_mut()
@@ -713,31 +1000,339 @@ impl AgentCore {
             if task.status.is_terminal() {
                 return Err("任务已经结束，无需取消".to_string());
             }
+            let review_session = task.review.as_ref().map(|review| review.session_id.clone());
             task.status = TaskStatus::Canceled;
             task.finished_at = Some(now());
+            task.review = None;
             if task.error.is_none() {
                 task.error = Some("已取消".to_string());
             }
-            task.clone()
+            let snapshot = task.clone();
+
+            let (server, session_id) = self
+                .servers
+                .lock()
+                .expect("agent servers lock")
+                .get(task_id)
+                .map(|state| {
+                    (
+                        Some(state.process.clone()),
+                        state.session_id.clone().or(review_session),
+                    )
+                })
+                .unwrap_or((None, None));
+
+            (snapshot, server, session_id)
         };
 
+        if let Some(flag) = self
+            .cancels
+            .lock()
+            .expect("agent cancels lock")
+            .get(task_id)
+            .cloned()
+        {
+            flag.store(true, Ordering::SeqCst);
+        }
+
+        if let (Some(server), Some(session_id)) = (server, session_id) {
+            match tokio::time::timeout(
+                Duration::from_secs(3),
+                server.abort_session(&session_id),
+            )
+            .await
+            {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    tracing::warn!(task_id, %error, "failed to abort opencode session");
+                }
+                Err(_) => tracing::warn!(task_id, "opencode abort timed out"),
+            }
+        }
+
+        self.stop_runtime(task_id);
+        self.persist_tasks();
+        self.emit_state();
+        Ok(snapshot)
+    }
+
+    /// Kills the TUI process group and closes its PTY handles. Idempotent.
+    fn stop_runtime(&self, task_id: &str) {
         let runtime = self
             .runtimes
             .lock()
             .expect("agent runtimes lock")
-            .get(task_id)
-            .cloned();
+            .remove(task_id);
         if let Some(runtime) = runtime {
             let mut runtime = runtime.lock().expect("agent runtime lock");
             runtime.canceled.store(true, Ordering::SeqCst);
-            if let Err(error) = runtime.killer.kill() {
-                tracing::warn!(task_id, %error, "failed to kill agent process");
-            }
+            runtime.kill();
+        }
+    }
+
+    /// Full teardown for a task: cancel flag, TUI process group, server process
+    /// group and the background SSE tasks. Safe to call repeatedly.
+    fn teardown_task(&self, task_id: &str) {
+        if let Some(flag) = self
+            .cancels
+            .lock()
+            .expect("agent cancels lock")
+            .remove(task_id)
+        {
+            flag.store(true, Ordering::SeqCst);
         }
 
-        self.persist_tasks();
-        self.emit_state();
-        Ok(snapshot)
+        self.stop_runtime(task_id);
+
+        let server = self
+            .servers
+            .lock()
+            .expect("agent servers lock")
+            .remove(task_id);
+        if let Some(state) = server {
+            if let Some(pump) = state.pump {
+                pump.abort();
+            }
+            if let Some(consumer) = state.consumer {
+                consumer.abort();
+            }
+            state.process.stop();
+        }
+    }
+
+    fn server_for(&self, task_id: &str) -> Option<Arc<ServerProcess>> {
+        self.servers
+            .lock()
+            .expect("agent servers lock")
+            .get(task_id)
+            .map(|state| state.process.clone())
+    }
+
+    /// Persists a session id discovered from server events.
+    fn remember_session(&self, task_id: &str, session_id: &str) {
+        if session_id.is_empty() {
+            return;
+        }
+        if let Some(state) = self
+            .servers
+            .lock()
+            .expect("agent servers lock")
+            .get_mut(task_id)
+        {
+            state.session_id = Some(session_id.to_string());
+        }
+    }
+
+    /// Marks a task succeeded from a turn-boundary event. Returns whether the
+    /// status changed; terminal tasks are never touched.
+    fn mark_succeeded(&self, task_id: &str) -> bool {
+        self.mutate_tasks(|tasks| {
+            let Some(task) = tasks.iter_mut().find(|task| task.id == task_id) else {
+                return false;
+            };
+            if task.status.is_terminal() {
+                return false;
+            }
+            // A permission prompt keeps the turn alive; an idle event that
+            // races with it must not silently complete the task.
+            if task.status == TaskStatus::WaitingReview {
+                return false;
+            }
+            task.status = TaskStatus::Succeeded;
+            task.finished_at = Some(now());
+            task.exit_code = Some(0);
+            task.error = None;
+            task.review = None;
+            true
+        })
+    }
+
+    /// Fails a task from a turn-boundary event (guarded like `fail_task`).
+    fn fail_from_event(&self, task_id: &str, message: String) -> bool {
+        self.mutate_tasks(|tasks| {
+            let Some(task) = tasks.iter_mut().find(|task| task.id == task_id) else {
+                return false;
+            };
+            if task.status.is_terminal() {
+                return false;
+            }
+            task.status = TaskStatus::Failed;
+            task.finished_at = Some(now());
+            task.error = Some(message);
+            task.review = None;
+            true
+        })
+    }
+
+    fn set_review(&self, task_id: &str, review: PermissionReview) {
+        self.mutate_tasks(|tasks| {
+            let Some(task) = tasks.iter_mut().find(|task| task.id == task_id) else {
+                return false;
+            };
+            if task.status.is_terminal() {
+                return false;
+            }
+            let unchanged = task.review.as_ref() == Some(&review)
+                && task.status == TaskStatus::WaitingReview;
+            if unchanged {
+                return false;
+            }
+            task.review = Some(review);
+            task.status = TaskStatus::WaitingReview;
+            true
+        });
+    }
+
+    fn clear_review(&self, task_id: &str, permission_id: Option<&str>) {
+        self.mutate_tasks(|tasks| {
+            let Some(task) = tasks.iter_mut().find(|task| task.id == task_id) else {
+                return false;
+            };
+            let Some(current) = task.review.as_ref() else {
+                return false;
+            };
+            if let Some(permission_id) = permission_id {
+                if current.id != permission_id {
+                    return false;
+                }
+            }
+            task.review = None;
+            if task.status == TaskStatus::WaitingReview {
+                task.status = TaskStatus::Running;
+            }
+            true
+        });
+    }
+
+    /// Replies to the pending permission ask and resumes the task.
+    async fn reply_permission(
+        &self,
+        task_id: &str,
+        response: PermissionReply,
+        remember: bool,
+    ) -> Result<AgentTask, String> {
+        let task = self
+            .task_snapshot(task_id)
+            .ok_or_else(|| "任务不存在".to_string())?;
+        if task.status.is_terminal() {
+            return Err("任务已经结束".to_string());
+        }
+        let review = task
+            .review
+            .clone()
+            .ok_or_else(|| "没有待处理的权限请求".to_string())?;
+        let server = self
+            .server_for(task_id)
+            .ok_or_else(|| "Agent 服务未运行，无法回复权限请求".to_string())?;
+
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            server.reply_permission(
+                &review.session_id,
+                &review.id,
+                response.as_str(),
+                remember,
+            ),
+        )
+        .await
+        .map_err(|_| "回复权限请求超时".to_string())?
+        .map_err(|error| format!("回复权限请求失败：{error}"))?;
+
+        let updated = self.mutate_tasks(|tasks| {
+            let Some(task) = tasks.iter_mut().find(|task| task.id == task_id) else {
+                return false;
+            };
+            task.review = None;
+            if !task.status.is_terminal() {
+                task.status = TaskStatus::Running;
+            }
+            true
+        });
+        if !updated {
+            return Err("任务不存在".to_string());
+        }
+
+        self.task_snapshot(task_id)
+            .ok_or_else(|| "任务不存在".to_string())
+    }
+
+    /// Handles one decoded opencode event for a task.
+    fn handle_server_event(
+        &self,
+        task_id: &str,
+        event: &Value,
+        guard: &PromptGuard,
+        done: &tokio::sync::Notify,
+    ) {
+        let event_type = opencode::event_type(event);
+        if event_type.is_empty() {
+            return;
+        }
+
+        if let Some(session_id) = opencode::event_session_id(event) {
+            self.remember_session(task_id, &session_id);
+        }
+
+        if event_type.contains("permission") {
+            // A permission ask can only belong to our turn once the prompt was
+            // injected. This also filters asks replayed by the server on
+            // connect (from a previous session in the same project).
+            if !guard.injected() {
+                return;
+            }
+            if opencode::is_permission_resolution(&event_type) {
+                let permission_id = opencode::parse_review(event).map(|review| review.id);
+                self.clear_review(task_id, permission_id.as_deref());
+            } else if let Some(review) = opencode::parse_review(event) {
+                self.set_review(task_id, review);
+            }
+            return;
+        }
+
+        match opencode::turn_signal(&event_type, event) {
+            Some(opencode::TurnSignal::Succeeded) => {
+                if !guard.completion_allowed() {
+                    tracing::debug!(
+                        task_id,
+                        event_type = %event_type,
+                        "ignoring completion before the prompt grace period"
+                    );
+                    return;
+                }
+                if self.mark_succeeded(task_id) {
+                    // Tear down the TUI so the worker immediately takes the
+                    // next queued task.
+                    self.stop_runtime(task_id);
+                    done.notify_one();
+                }
+            }
+            Some(opencode::TurnSignal::Failed(message)) => {
+                if !guard.completion_allowed() {
+                    return;
+                }
+                if self.fail_from_event(task_id, message) {
+                    self.stop_runtime(task_id);
+                    done.notify_one();
+                }
+            }
+            Some(opencode::TurnSignal::Busy) | None => {}
+        }
+    }
+
+    fn spawn_event_consumer(
+        self: &Arc<Self>,
+        task_id: &str,
+        mut receiver: tokio_mpsc::UnboundedReceiver<Value>,
+        guard: Arc<PromptGuard>,
+        done: Arc<tokio::sync::Notify>,
+    ) -> tauri::async_runtime::JoinHandle<()> {
+        let core = self.clone();
+        let task_id = task_id.to_string();
+        tauri::async_runtime::spawn(async move {
+            while let Some(event) = receiver.recv().await {
+                core.handle_server_event(&task_id, &event, &guard, &done);
+            }
+        })
     }
 
     fn retry(&self, task_id: &str) -> Result<AgentTask, String> {
@@ -758,6 +1353,7 @@ impl AgentCore {
         task.finished_at = None;
         task.exit_code = None;
         task.error = None;
+        task.review = None;
         task.log_path = self.logs_dir().join(format!("{id}.log")).to_string_lossy().to_string();
 
         self.tasks
@@ -829,7 +1425,24 @@ impl AgentCore {
                     core.wake.notified().await;
                     continue;
                 };
-                core.run_task(task).await;
+                let task_id = task.id.clone();
+
+                // Each task body runs in its own tokio task: a panic inside
+                // `run_task` must not kill the single worker loop.
+                let runner = core.clone();
+                let handle = tauri::async_runtime::spawn(async move {
+                    runner.run_task(task).await;
+                });
+
+                if let Err(error) = handle.await {
+                    tracing::error!(task_id, %error, "agent task runner failed");
+                    core.fail_task(&task_id, format!("Agent 任务执行异常：{error}"));
+                }
+
+                core.teardown_task(&task_id);
+                // Belt and braces: no task may stay active after its runner
+                // returned, otherwise the queue would never advance.
+                core.recover_active_tasks("任务意外中断");
             }
         });
 
@@ -837,6 +1450,23 @@ impl AgentCore {
         if next_queued_index(&self.tasks.lock().expect("agent tasks lock")).is_some() {
             self.wake.notify_one();
         }
+    }
+
+    /// Fails any task still marked active. Called after each worker iteration.
+    fn recover_active_tasks(&self, reason: &str) {
+        self.mutate_tasks(|tasks| {
+            let mut changed = false;
+            for task in tasks.iter_mut() {
+                if task.status.is_active() {
+                    task.status = TaskStatus::Failed;
+                    task.error = Some(reason.to_string());
+                    task.finished_at = Some(now());
+                    task.review = None;
+                    changed = true;
+                }
+            }
+            changed
+        });
     }
 
     fn take_next_queued(&self) -> Option<AgentTask> {
@@ -851,6 +1481,10 @@ impl AgentCore {
             task.started_at = Some(now());
             task.clone()
         };
+        self.cancels
+            .lock()
+            .expect("agent cancels lock")
+            .insert(task.id.clone(), Arc::new(AtomicBool::new(false)));
         self.persist_tasks();
         self.emit_state();
         Some(task)
@@ -894,18 +1528,14 @@ impl AgentCore {
             return;
         }
 
-        // 2. Resolve the repository mapping.
-        let Some(repo_path) = config
-            .repo_mappings
-            .get(&task.workspace_id)
-            .map(|path| path.trim().to_string())
-            .filter(|path| !path.is_empty())
-        else {
-            self.fail_task(
-                &task.id,
-                "未配置项目仓库路径，请在 设置 → Agent 修复 中配置".to_string(),
-            );
-            return;
+        // 2. Resolve the repository path. The task carries the path resolved at
+        // enqueue time; `repo_mappings` is only a legacy fallback.
+        let repo_path = match resolve_repo_path(&task, &config) {
+            Ok(repo_path) => repo_path,
+            Err(error) => {
+                self.fail_task(&task.id, error);
+                return;
+            }
         };
 
         if !Path::new(&repo_path).is_dir() {
@@ -923,11 +1553,33 @@ impl AgentCore {
             return;
         }
 
+        // 3b. Make sure the opencode global config exposes the tapd MCP server.
+        //     Only for the opencode binary, idempotent and best effort: a failure
+        //     only warns and never blocks the task.
+        if is_opencode_binary(&config.binary_path) {
+            let sidecar = crate::commands::sidecar_command_path();
+            match tokio::task::spawn_blocking(move || {
+                crate::mcp_import::ensure_opencode_mcp(&sidecar)
+            })
+            .await
+            {
+                Ok(Ok(result)) => {
+                    tracing::info!(task_id = %task.id, result = %result, "opencode MCP injection checked");
+                }
+                Ok(Err(error)) => {
+                    tracing::warn!(task_id = %task.id, %error, "failed to inject tapd MCP into opencode");
+                }
+                Err(error) => {
+                    tracing::warn!(task_id = %task.id, %error, "MCP injection task panicked");
+                }
+            }
+        }
+
         let mut vars = PromptVars::from_task(&task);
         vars.project_rule = config.rule_for(&task.workspace_id);
         task.prompt = render_prompt(&config.prompt_template, &vars);
 
-        // 4. Move to `running` with the resolved paths, then start the PTY.
+        // 4. Move to `running` with the resolved paths.
         let Some(running_task) = self.update_task(&task.id, |current| {
             if current.status == TaskStatus::Canceled {
                 return;
@@ -948,39 +1600,216 @@ impl AgentCore {
             return;
         }
 
-        // 5. Reveal the console so the user can watch / take over.
-        if config.auto_open_console {
-            if let Err(error) = open_console_window(&self.app) {
-                tracing::warn!(%error, "failed to open agent console window");
+        // 5. Start a private opencode server and subscribe to its event stream.
+        //    Failures fall back to the TUI-only path instead of hanging.
+        let cancel = self
+            .cancels
+            .lock()
+            .expect("agent cancels lock")
+            .get(&task.id)
+            .cloned()
+            .unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
+        let done = Arc::new(tokio::sync::Notify::new());
+        let guard = Arc::new(PromptGuard::default());
+        let mut warnings: Vec<String> = Vec::new();
+
+        let server_log = self.logs_dir().join(format!("{}-server.log", task.id));
+        let server = match ServerProcess::spawn(
+            &config.binary_path,
+            Path::new(&task.repo_path),
+            &server_log,
+        ) {
+            Ok(server) => Some(Arc::new(server)),
+            Err(error) => {
+                let message = format!("无法启动 opencode 服务（{error}），回退为仅终端模式");
+                warnings.push(message.clone());
+                self.log_server_warning(&task.id, &message);
+                None
+            }
+        };
+
+        let mut server_active = false;
+        if let Some(server) = server {
+            match server.wait_ready(opencode::READY_TIMEOUT, &cancel).await {
+                Ok(()) => {
+                    server_active = true;
+                    let events_path = self.events_dir().join(format!("{}.jsonl", task.id));
+                    let (sink, receiver) = tokio_mpsc::unbounded_channel();
+                    match server.subscribe_events(sink, events_path, cancel.clone()).await {
+                        Ok((pump, flavor)) => {
+                            tracing::info!(
+                                task_id = %task.id,
+                                base = server.base_url(),
+                                ?flavor,
+                                "subscribed to opencode events"
+                            );
+                            let consumer = self.spawn_event_consumer(
+                                &task.id,
+                                receiver,
+                                guard.clone(),
+                                done.clone(),
+                            );
+                            self.servers
+                                .lock()
+                                .expect("agent servers lock")
+                                .insert(
+                                    task.id.clone(),
+                                    ActiveServer {
+                                        process: server.clone(),
+                                        pump: Some(pump),
+                                        consumer: Some(consumer),
+                                        session_id: None,
+                                    },
+                                );
+                        }
+                        Err(error) => {
+                            let message = format!(
+                                "无法订阅 opencode 事件流（{error}），回退为终端退出判定"
+                            );
+                            warnings.push(message.clone());
+                            self.log_server_warning(&task.id, &message);
+                            // The TUI still uses the server; keep it for abort.
+                            self.servers
+                                .lock()
+                                .expect("agent servers lock")
+                                .insert(
+                                    task.id.clone(),
+                                    ActiveServer {
+                                        process: server.clone(),
+                                        pump: None,
+                                        consumer: None,
+                                        session_id: None,
+                                    },
+                                );
+                        }
+                    }
+                }
+                Err(error) => {
+                    let message = format!("opencode 服务未就绪（{error}），回退为仅终端模式");
+                    warnings.push(message.clone());
+                    self.log_server_warning(&task.id, &message);
+                    server.stop();
+                }
             }
         }
 
-        // 6. Run the PTY on a dedicated thread and await its exit result.
-        let (sender, receiver) = tokio::sync::oneshot::channel::<PtyOutcome>();
+        if cancel.load(Ordering::SeqCst)
+            || self.current_status(&task.id) == Some(TaskStatus::Canceled)
+        {
+            self.teardown_task(&task.id);
+            return;
+        }
+
+        // 6. Run the TUI in the PTY, connected to the server when available.
+        let (tui_args, tui_envs) = if server_active {
+            match self.server_for(&task.id) {
+                Some(server) => (
+                    vec!["--server".to_string(), server.base_url().to_string()],
+                    vec![(
+                        opencode::SERVER_PASSWORD_ENV.to_string(),
+                        server.password().to_string(),
+                    )],
+                ),
+                None => (Vec::new(), Vec::new()),
+            }
+        } else {
+            (Vec::new(), Vec::new())
+        };
+
+        let (sender, mut receiver) = tokio::sync::oneshot::channel::<PtyOutcome>();
         let core = self.clone();
         let pty_task = running_task.clone();
         let pty_config = config.clone();
+        let pty_guard = guard.clone();
         std::thread::Builder::new()
             .name(format!("agent-pty-{}", pty_task.id))
             .spawn(move || {
-                let outcome = core.run_pty(&pty_task, &pty_config);
+                let outcome = core.run_pty(
+                    &pty_task,
+                    &pty_config,
+                    tui_args,
+                    tui_envs,
+                    pty_guard,
+                );
                 let _ = sender.send(outcome);
             })
             .map_err(|error| tracing::warn!(%error, "failed to spawn agent pty thread"))
             .ok();
 
-        let outcome = match receiver.await {
-            Ok(outcome) => outcome,
-            Err(_) => PtyOutcome {
-                error: Some("Agent 终端线程意外结束".to_string()),
-                ..PtyOutcome::default()
+        // Wait for the TUI to exit or for a server event to close the turn.
+        let mut outcome = tokio::select! {
+            result = &mut receiver => match result {
+                Ok(outcome) => outcome,
+                Err(_) => PtyOutcome {
+                    error: Some("Agent 终端线程意外结束".to_string()),
+                    ..PtyOutcome::default()
+                },
             },
+            _ = done.notified() => {
+                // The turn already reached a terminal state. Kill the TUI so
+                // the queue advances immediately, then collect its exit code.
+                self.stop_runtime(&task.id);
+                match tokio::time::timeout(PTY_TEARDOWN_TIMEOUT, &mut receiver).await {
+                    Ok(Ok(mut outcome)) => {
+                        outcome.completed = true;
+                        outcome
+                    }
+                    _ => PtyOutcome {
+                        completed: true,
+                        ..PtyOutcome::default()
+                    },
+                }
+            }
         };
 
+        if !warnings.is_empty() {
+            let message = warnings.join("；");
+            self.append_task_log(&task.log_path, &message);
+            outcome.warning = Some(match outcome.warning.take() {
+                Some(existing) => format!("{existing}；{message}"),
+                None => message,
+            });
+        }
+
+        // Always tear down the TUI + server before the worker takes the next
+        // task, even when the task panicked further up.
+        self.teardown_task(&task.id);
         self.finish_task(&task.id, outcome);
     }
 
-    fn run_pty(&self, task: &AgentTask, config: &AgentConfig) -> PtyOutcome {
+    fn append_task_log(&self, log_path: &str, message: &str) {
+        let line = format!("\r\n[tapd-client] {message}\r\n");
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log_path)
+        {
+            let _ = file.write_all(line.as_bytes());
+            let _ = file.flush();
+        }
+    }
+
+    fn log_server_warning(&self, task_id: &str, message: &str) {
+        tracing::warn!(task_id, %message, "agent server fallback");
+        let path = self.logs_dir().join(format!("{task_id}-server.log"));
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            let _ = writeln!(file, "[tapd-client] {message}");
+            let _ = file.flush();
+        }
+    }
+
+    fn run_pty(
+        &self,
+        task: &AgentTask,
+        config: &AgentConfig,
+        args: Vec<String>,
+        envs: Vec<(String, String)>,
+        guard: Arc<PromptGuard>,
+    ) -> PtyOutcome {
         // A cancel can land between the status update and this thread starting;
         // don't spawn a process that is already doomed.
         if self.current_status(&task.id) == Some(TaskStatus::Canceled) {
@@ -992,6 +1821,8 @@ impl AgentCore {
 
         let handles = match open_pty(
             &config.binary_path,
+            &args,
+            &envs,
             Path::new(&task.repo_path),
             120,
             32,
@@ -1017,6 +1848,7 @@ impl AgentCore {
             master,
             writer,
             killer: child.clone_killer(),
+            pid: child.process_id(),
             canceled: canceled.clone(),
         }));
         self.runtimes
@@ -1029,7 +1861,7 @@ impl AgentCore {
         if self.current_status(&task.id) == Some(TaskStatus::Canceled) {
             canceled.store(true, Ordering::SeqCst);
             if let Ok(mut runtime) = runtime.lock() {
-                let _ = runtime.killer.kill();
+                runtime.kill();
             }
         }
 
@@ -1138,11 +1970,14 @@ impl AgentCore {
                     .and_then(|_| runtime.writer.write_all(b"\r"))
                     .and_then(|_| runtime.writer.flush())
             };
-            if let Err(error) = injected {
-                warning = Some(match warning {
-                    Some(existing) => format!("{existing}；注入任务失败：{error}"),
-                    None => format!("注入任务失败：{error}"),
-                });
+            match injected {
+                Ok(()) => guard.mark_injected(),
+                Err(error) => {
+                    warning = Some(match warning {
+                        Some(existing) => format!("{existing}；注入任务失败：{error}"),
+                        None => format!("注入任务失败：{error}"),
+                    });
+                }
             }
         }
 
@@ -1181,32 +2016,7 @@ impl AgentCore {
     fn finish_task(&self, task_id: &str, outcome: PtyOutcome) {
         let warning = outcome.warning.clone();
         let snapshot = self.update_task(task_id, |task| {
-            let was_canceled = task.status == TaskStatus::Canceled || outcome.canceled;
-            task.finished_at = Some(now());
-            task.exit_code = outcome.exit_code;
-
-            if was_canceled {
-                task.status = TaskStatus::Canceled;
-                if task.error.is_none() {
-                    task.error = Some("已取消".to_string());
-                }
-                return;
-            }
-
-            let status = finish_status(false, outcome.exit_code);
-            if status == TaskStatus::Succeeded {
-                task.status = TaskStatus::Succeeded;
-                task.error = None;
-            } else {
-                let message = outcome.error.clone().unwrap_or_else(|| {
-                    match outcome.exit_code {
-                        Some(code) => format!("Agent 进程退出码 {code}"),
-                        None => "Agent 进程异常结束".to_string(),
-                    }
-                });
-                task.status = TaskStatus::Failed;
-                task.error = Some(message);
-            }
+            apply_finish(task, &outcome, &now());
         });
 
         if let Some(task) = &snapshot {
@@ -1215,7 +2025,7 @@ impl AgentCore {
                     tracing::warn!(task_id, %warning, "agent finished with a warning");
                 }
                 tracing::info!(task_id, exit_code = ?task.exit_code, "agent task succeeded");
-            } else {
+            } else if task.status == TaskStatus::Failed || task.status == TaskStatus::Canceled {
                 tracing::warn!(
                     task_id,
                     status = ?task.status,
@@ -1297,6 +2107,16 @@ fn validate_binary(binary: &str) -> Result<(), String> {
     Err(format!("在 PATH 中找不到 Agent 可执行文件：{binary}"))
 }
 
+/// True when the configured agent is opencode (MCP injection only applies to it).
+fn is_opencode_binary(binary: &str) -> bool {
+    Path::new(binary)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(binary)
+        .to_ascii_lowercase()
+        .contains("opencode")
+}
+
 fn detect_version(binary: &str) -> Result<String, String> {
     let binary = binary.trim();
     if binary.is_empty() {
@@ -1340,28 +2160,12 @@ fn detect_version(binary: &str) -> Result<String, String> {
     Ok(version.lines().next().unwrap_or_default().trim().to_string())
 }
 
-fn open_console_window(app: &AppHandle) -> Result<WebviewWindow, String> {
-    if let Some(window) = app.get_webview_window(CONSOLE_LABEL) {
+fn focus_main_window(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window(MAIN_LABEL) {
         let _ = window.show();
         let _ = window.unminimize();
         let _ = window.set_focus();
-        return Ok(window);
     }
-
-    let window = WebviewWindowBuilder::new(
-        app,
-        CONSOLE_LABEL,
-        WebviewUrl::App("index.html".into()),
-    )
-    .title("Agent 控制台")
-    // Compact by default: this is a side console, not a second main window.
-    .inner_size(860.0, 560.0)
-    .min_inner_size(600.0, 400.0)
-    .build()
-    .map_err(|error| error.to_string())?;
-
-    let _ = window.set_focus();
-    Ok(window)
 }
 
 // ---------------------------------------------------------------------------
@@ -1417,13 +2221,40 @@ pub async fn command(
             Ok(json!({ "task": task }))
         }
         "agent_tasks_list" => Ok(json!(core.tasks_state())),
+        "agent_summary" => Ok(json!(core.summary())),
+        "agent_open_task" => {
+            let request: TaskIdRequest = serde_json::from_value(payload)
+                .map_err(|error| format!("无效的任务参数：{error}"))?;
+            let task_id = request.task_id.trim();
+            if task_id.is_empty() {
+                return Err("缺少 taskId".to_string());
+            }
+            if core.task_snapshot(task_id).is_none() {
+                return Err("任务不存在".to_string());
+            }
+            focus_main_window(app);
+            let _ = app.emit("agent://focus", json!({ "taskId": task_id }));
+            Ok(json!({ "opened": true }))
+        }
+        "agent_permission_reply" => {
+            let request: PermissionReplyRequest = serde_json::from_value(payload)
+                .map_err(|error| format!("无效的权限回复参数：{error}"))?;
+            let task_id = request.task_id.trim();
+            if task_id.is_empty() {
+                return Err("缺少 taskId".to_string());
+            }
+            let task = core
+                .reply_permission(task_id, request.response, request.remember)
+                .await?;
+            Ok(json!({ "task": task }))
+        }
         "agent_task_cancel" => {
             let request: TaskIdRequest = serde_json::from_value(payload)
                 .map_err(|error| format!("无效的取消参数：{error}"))?;
             if request.task_id.trim().is_empty() {
                 return Err("缺少 taskId".to_string());
             }
-            let task = core.cancel(request.task_id.trim())?;
+            let task = core.cancel(request.task_id.trim()).await?;
             Ok(json!({ "task": task }))
         }
         "agent_task_retry" => {
@@ -1440,10 +2271,6 @@ pub async fn command(
                 .map_err(|error| format!("无效的日志参数：{error}"))?;
             let data = core.read_log(request.task_id.trim())?;
             Ok(json!({ "data": data }))
-        }
-        "agent_console_open" => {
-            open_console_window(app)?;
-            Ok(json!({ "opened": true }))
         }
         "agent_input" => {
             let request: TaskInputRequest = serde_json::from_value(payload)
@@ -1499,6 +2326,7 @@ mod tests {
             error: None,
             prompt: "prompt".to_string(),
             source: "manual".to_string(),
+            review: None,
         }
     }
 
@@ -1608,7 +2436,10 @@ mod tests {
             sample_task("c", TaskStatus::Queued),
         ];
         assert_eq!(next_queued_index(&tasks), Some(1));
-        assert_eq!(queue_length(&tasks), 2);
+        let counts = task_counts(&tasks);
+        assert_eq!(counts.queued, 2);
+        assert_eq!(counts.active, 0);
+        assert_eq!(counts.waiting_review, 0);
         assert_eq!(active_task_id(&tasks).as_deref(), Some("b"));
 
         let mut running = tasks.clone();
@@ -1640,22 +2471,205 @@ mod tests {
     }
 
     #[test]
+    fn statuses_serialize_as_snake_case() {
+        let cases = [
+            (TaskStatus::Queued, "\"queued\""),
+            (TaskStatus::Preparing, "\"preparing\""),
+            (TaskStatus::Running, "\"running\""),
+            (TaskStatus::WaitingReview, "\"waiting_review\""),
+            (TaskStatus::Succeeded, "\"succeeded\""),
+            (TaskStatus::Failed, "\"failed\""),
+            (TaskStatus::Canceled, "\"canceled\""),
+        ];
+        for (status, expected) in cases {
+            assert_eq!(serde_json::to_string(&status).unwrap(), expected);
+            let parsed: TaskStatus = serde_json::from_str(expected).unwrap();
+            assert_eq!(parsed, status);
+        }
+    }
+
+    #[test]
+    fn task_review_defaults_to_none_for_old_files() {
+        let mut value = serde_json::to_value(sample_task("a", TaskStatus::Running)).unwrap();
+        value.as_object_mut().unwrap().remove("review");
+        let parsed: AgentTask = serde_json::from_value(value).unwrap();
+        assert_eq!(parsed.review, None);
+    }
+
+    #[test]
+    fn repo_path_uses_the_task_value_before_config() {
+        let config = AgentConfig::default();
+        assert!(config.repo_mappings.is_empty());
+
+        let mut task = sample_task("a", TaskStatus::Queued);
+        task.repo_path = "/tmp/repo".to_string();
+        assert_eq!(
+            resolve_repo_path(&task, &config),
+            Ok("/tmp/repo".to_string())
+        );
+
+        // A blank task path falls back to the per-project setting.
+        let config = AgentConfig {
+            projects: BTreeMap::from([(
+                "45336192".to_string(),
+                ProjectAgentConfig {
+                    repo_path: "/configured/repo".to_string(),
+                    rule: String::new(),
+                },
+            )]),
+            ..AgentConfig::default()
+        };
+        let mut task = sample_task("b", TaskStatus::Queued);
+        task.repo_path = "  ".to_string();
+        assert_eq!(
+            resolve_repo_path(&task, &config),
+            Ok("/configured/repo".to_string())
+        );
+
+        let missing = AgentConfig::default();
+        let mut blank = sample_task("c", TaskStatus::Queued);
+        blank.repo_path = String::new();
+        assert!(resolve_repo_path(&blank, &missing).is_err());
+    }
+
+    #[test]
+    fn state_and_summary_serialize_camel_case() {
+        let tasks = vec![sample_task("a", TaskStatus::WaitingReview)];
+        let state = AgentTasksState {
+            tasks: tasks.clone(),
+            active_task_id: Some("a".to_string()),
+            queue_length: 0,
+            queued_count: 0,
+            active_count: 1,
+            waiting_review_count: 1,
+        };
+        let value = serde_json::to_value(&state).unwrap();
+        assert_eq!(value["queueLength"], 0);
+        assert_eq!(value["queuedCount"], 0);
+        assert_eq!(value["activeCount"], 1);
+        assert_eq!(value["waitingReviewCount"], 1);
+        assert_eq!(value["activeTaskId"], "a");
+
+        let summary = serde_json::to_value(agent_summary(&tasks)).unwrap();
+        assert_eq!(summary["running"], true);
+        assert_eq!(summary["waitingReview"], true);
+        assert_eq!(summary["activeTaskId"], "a");
+        assert_eq!(summary["workspaceName"], "UU");
+        assert_eq!(summary["bugId"], "1145336192001234567");
+    }
+
+    #[test]
+    fn counts_and_summary_track_review_tasks() {
+        let mut tasks = vec![
+            sample_task("done", TaskStatus::Succeeded),
+            sample_task("running", TaskStatus::Running),
+            sample_task("waiting", TaskStatus::WaitingReview),
+            sample_task("queued", TaskStatus::Queued),
+        ];
+        tasks[2].review = Some(PermissionReview {
+            id: "per_1".to_string(),
+            session_id: "ses_1".to_string(),
+            action: "edit".to_string(),
+            resource: "src/main.rs".to_string(),
+            title: "允许编辑".to_string(),
+        });
+
+        let counts = task_counts(&tasks);
+        assert_eq!(counts.queued, 1);
+        assert_eq!(counts.active, 2);
+        assert_eq!(counts.waiting_review, 1);
+
+        let summary = agent_summary(&tasks);
+        assert!(summary.running);
+        assert!(summary.waiting_review);
+        // The first active task in list order is the running one.
+        assert_eq!(summary.active_task_id.as_deref(), Some("running"));
+        assert_eq!(summary.title.as_deref(), Some("示例缺陷"));
+        assert_eq!(summary.workspace_name.as_deref(), Some("UU"));
+        assert_eq!(summary.bug_id.as_deref(), Some("1145336192001234567"));
+
+        let mut only_waiting = vec![sample_task("waiting", TaskStatus::WaitingReview)];
+        assert_eq!(
+            agent_summary(&only_waiting).active_task_id.as_deref(),
+            Some("waiting")
+        );
+        only_waiting.clear();
+        assert_eq!(agent_summary(&only_waiting), AgentSummary::default());
+    }
+
+    #[test]
+    fn finish_never_downgrades_a_terminal_task() {
+        let mut task = sample_task("a", TaskStatus::Running);
+        let outcome = PtyOutcome {
+            exit_code: Some(0),
+            ..PtyOutcome::default()
+        };
+        assert!(apply_finish(&mut task, &outcome, "2026-11-10T01:00:00Z"));
+        assert_eq!(task.status, TaskStatus::Succeeded);
+
+        // A later PTY exit with a non-zero code must not downgrade it.
+        let late = PtyOutcome {
+            exit_code: Some(2),
+            error: Some("late".to_string()),
+            ..PtyOutcome::default()
+        };
+        assert!(!apply_finish(&mut task, &late, "2026-11-10T01:00:01Z"));
+        assert_eq!(task.status, TaskStatus::Succeeded);
+        assert_eq!(task.error, None);
+    }
+
+    #[test]
+    fn completion_marks_success_without_an_exit_code() {
+        let mut task = sample_task("a", TaskStatus::Running);
+        let outcome = PtyOutcome {
+            completed: true,
+            ..PtyOutcome::default()
+        };
+        assert!(apply_finish(&mut task, &outcome, "2026-11-10T01:00:00Z"));
+        assert_eq!(task.status, TaskStatus::Succeeded);
+        assert_eq!(task.exit_code, None);
+        assert_eq!(task.finished_at.as_deref(), Some("2026-11-10T01:00:00Z"));
+    }
+
+    #[test]
+    fn cancellation_and_failure_are_applied() {
+        let mut task = sample_task("a", TaskStatus::WaitingReview);
+        let outcome = PtyOutcome {
+            canceled: true,
+            ..PtyOutcome::default()
+        };
+        assert!(apply_finish(&mut task, &outcome, "2026-11-10T01:00:00Z"));
+        assert_eq!(task.status, TaskStatus::Canceled);
+
+        let mut task = sample_task("b", TaskStatus::Running);
+        let outcome = PtyOutcome {
+            exit_code: Some(1),
+            ..PtyOutcome::default()
+        };
+        assert!(apply_finish(&mut task, &outcome, "2026-11-10T01:00:00Z"));
+        assert_eq!(task.status, TaskStatus::Failed);
+        assert_eq!(task.error.as_deref(), Some("Agent 进程退出码 1"));
+    }
+
+    #[test]
     fn recovery_marks_only_in_flight_tasks() {
         let mut tasks = vec![
             sample_task("queued", TaskStatus::Queued),
             sample_task("preparing", TaskStatus::Preparing),
             sample_task("running", TaskStatus::Running),
+            sample_task("waiting", TaskStatus::WaitingReview),
             sample_task("done", TaskStatus::Succeeded),
         ];
 
         let recovered = recover_incomplete(&mut tasks, "2026-11-10T01:00:00Z");
-        assert_eq!(recovered, 2);
+        assert_eq!(recovered, 3);
         assert_eq!(tasks[0].status, TaskStatus::Queued);
         assert_eq!(tasks[1].status, TaskStatus::Failed);
         assert_eq!(tasks[1].error.as_deref(), Some("客户端重启"));
         assert_eq!(tasks[1].finished_at.as_deref(), Some("2026-11-10T01:00:00Z"));
         assert_eq!(tasks[2].status, TaskStatus::Failed);
-        assert_eq!(tasks[3].status, TaskStatus::Succeeded);
+        assert_eq!(tasks[3].status, TaskStatus::Failed);
+        assert_eq!(tasks[4].status, TaskStatus::Succeeded);
     }
 
     #[test]
@@ -1684,7 +2698,7 @@ mod tests {
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
             .expect("chmod");
 
-        let handles = open_pty(script.to_str().unwrap(), &dir, 80, 24).expect("open pty");
+        let handles = open_pty(script.to_str().unwrap(), &[], &[], &dir, 80, 24).expect("open pty");
         let PtyHandles {
             master,
             writer,

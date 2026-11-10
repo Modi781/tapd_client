@@ -1,10 +1,13 @@
 mod agent;
+mod cache;
 mod commands;
 mod export;
 mod feature_router;
 mod mcp;
+mod mcp_import;
 mod notification;
 mod open_with;
+mod opencode;
 mod server;
 mod session;
 mod state;

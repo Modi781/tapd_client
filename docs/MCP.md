@@ -8,7 +8,17 @@ TAPD Client 通过一个独立的 stdio sidecar（`tapd-mcp`）向 AI 客户端�
 - sidecar 与客户端使用同一个用户数据目录（`~/Library/Application Support/com.tapdclient.desktop`）。
 - 客户端未运行时，sidecar 会尝试拉起已安装的 App；开发模式下请先运行 `pnpm dev`。
 
-## 2. opencode 配置（v2.0.29 已验证）
+## 2. 一键导入（推荐）
+
+打开客户端的 **MCP tab** →「一键导入 opencode」：
+
+- 通过 `opencode debug paths` 定位全局配置（回退 `$XDG_CONFIG_HOME/opencode` / `~/.config/opencode`），把 `mcp.servers.tapd` 合并进去，保留其他配置与 MCP server。
+- 写入前自动备份为 `opencode.json.bak-<时间戳>`；重复导入不会重复写入（`changed: false`）。
+- 配置文件不是合法 JSON（例如 JSONC 带注释）时会拒绝写入并提示路径，不会覆盖。
+- 之后每次启动 Agent 任务也会幂等确保注入，不需要再手动改配置。
+- 同一页面还提供 Claude Code / Cursor / Codex 的接入片段与复制按钮。
+
+## 3. 手动配置（项目级，可选）
 
 在项目的 `opencode.json` 中加入（注意是 `mcp.servers`）：
 
@@ -47,7 +57,7 @@ opencode mcp list
 
 > 注意：`opencode mcp list` 第一次执行时可能尚未加载项目配置，重跑一次即可；新增/修改工具后需要重启 opencode 让它重新拉取 `tools/list`。
 
-## 3. 工具
+## 4. 工具
 
 共 9 个工具：6 个查询/导出 + 3 个修复后回写（评论、状态、状态查询）。
 
@@ -89,7 +99,7 @@ opencode mcp list
 - `tapd_update_bug_status` 的 `comment` 会先追加评论，再进行状态流转；状态流转失败时评论仍保留，便于追溯。
 - 如果需要填流转必填字段，可传 `fields` 数组，原样透传给 TAPD（通常留空）。
 
-## 4. 导出产物
+## 5. 导出产物
 
 `tapd_export_bug_md` 返回：
 
@@ -114,7 +124,7 @@ opencode mcp list
 
 图片以内联 Markdown 引用，视频以链接引用；下载失败时保留 TAPD 原始 URL 并在 `warnings` 中说明。
 
-## 5. 安全与边界
+## 6. 安全与边界
 
 - sidecar 只能访问 `127.0.0.1` 上的客户端，使用每次启动轮换的 Bearer token（`runtime.json`，权限 0600）。
 - Cookie 不写入文件、不返回给 AI；资源下载在客户端进程内完成。
@@ -122,7 +132,7 @@ opencode mcp list
 - 写操作使用当前 TAPD 会话 Cookie + `dsc-token`，受 TAPD 工作流与权限约束；非法流转会被拒绝并把允许的下一步返回给 AI。
 - 所有工具调用（含写操作）记录在客户端日志（数据目录 `logs/`），包含工具名、客户端、耗时与结果；写操作额外记录 bug id。
 
-## 6. 常见问题
+## 7. 常见问题
 
 **`TAPD Client 未运行`**
 启动桌面客户端，确认已登录，然后重试。开发模式需先 `pnpm dev`。

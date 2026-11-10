@@ -39,13 +39,13 @@ import {
   type OpenTargetSet,
 } from "../lib/api";
 import { MediaPreview, type PreviewItem } from "./MediaPreview";
+import { SkeletonBlock } from "./Skeleton";
 import {
   Badge,
   Button,
   PRIORITY_TONES,
   SEVERITY_TONES,
   STATUS_TONES,
-  Spinner,
 } from "./ui";
 
 type Props = {
@@ -235,9 +235,17 @@ export function BugDetailDrawer(props: Props) {
                 </>
               ) : null}
             </div>
-            <h2 className="mt-2 text-base font-semibold leading-6 text-slate-900">
-              {detail?.title || (loading ? "正在读取缺陷…" : "缺陷详情")}
-            </h2>
+            {detail ? (
+              <h2 className="mt-2 text-base font-semibold leading-6 text-slate-900">
+                {detail.title}
+              </h2>
+            ) : loading ? (
+              <SkeletonBlock className="mt-3 h-4 w-3/4 rounded" />
+            ) : (
+              <h2 className="mt-2 text-base font-semibold leading-6 text-slate-900">
+                缺陷详情
+              </h2>
+            )}
           </div>
           <button
             type="button"
@@ -255,12 +263,7 @@ export function BugDetailDrawer(props: Props) {
             </div>
           ) : null}
 
-          {!error && loading && !detail ? (
-            <div className="flex h-48 items-center justify-center gap-2 text-xs text-slate-400">
-              <Spinner />
-              正在加载详情…
-            </div>
-          ) : null}
+          {!error && loading && !detail ? <DetailSkeleton /> : null}
 
           {detail ? (
             <div className="space-y-5">
@@ -511,6 +514,68 @@ export function BugDetailDrawer(props: Props) {
           }
         />
       ) : null}
+    </div>
+  );
+}
+
+/**
+ * Placeholder that mirrors the drawer's loaded layout (actions, meta grid,
+ * description, resources, comments) so content does not jump into place.
+ */
+function DetailSkeleton() {
+  return (
+    <div role="status" aria-busy="true" className="space-y-5">
+      <span className="sr-only">正在加载缺陷详情</span>
+
+      <div className="flex flex-wrap gap-2">
+        <SkeletonBlock className="h-7 w-[88px] rounded-lg" />
+        <SkeletonBlock className="h-7 w-[96px] rounded-lg" />
+        <SkeletonBlock className="h-7 w-[76px] rounded-lg" />
+        <SkeletonBlock className="h-7 w-[76px] rounded-lg" />
+      </div>
+
+      <div className="grid grid-cols-2 gap-x-4 gap-y-3 rounded-xl border border-slate-100 bg-white p-3 sm:grid-cols-4">
+        {Array.from({ length: 8 }, (_, index) => (
+          <div key={index} className="space-y-1.5">
+            <SkeletonBlock className="h-2.5 w-10" />
+            <SkeletonBlock className="h-3 w-16" />
+          </div>
+        ))}
+      </div>
+
+      <div>
+        <SkeletonBlock className="h-3 w-16" />
+        <div className="mt-2 space-y-2 rounded-xl border border-slate-100 bg-slate-50/70 p-4">
+          <SkeletonBlock className="h-3 w-full" />
+          <SkeletonBlock className="h-3 w-11/12" />
+          <SkeletonBlock className="h-3 w-2/3" />
+        </div>
+      </div>
+
+      <div>
+        <SkeletonBlock className="h-3 w-20" />
+        <div className="mt-2 flex items-center gap-3 rounded-xl border border-slate-100 bg-white p-3">
+          <SkeletonBlock className="h-10 w-10 shrink-0 rounded-lg" />
+          <div className="min-w-0 flex-1 space-y-1.5">
+            <SkeletonBlock className="h-3 w-1/2" />
+            <SkeletonBlock className="h-2.5 w-1/4" />
+          </div>
+          <SkeletonBlock className="h-6 w-14 shrink-0 rounded-md" />
+        </div>
+      </div>
+
+      <div>
+        <SkeletonBlock className="h-3 w-16" />
+        <div className="mt-2 space-y-2 rounded-xl border border-slate-100 bg-white p-3">
+          <div className="flex items-center gap-2">
+            <SkeletonBlock className="h-5 w-5 rounded-full" />
+            <SkeletonBlock className="h-2.5 w-16" />
+            <SkeletonBlock className="h-2.5 w-24" />
+          </div>
+          <SkeletonBlock className="h-3 w-full" />
+          <SkeletonBlock className="h-3 w-4/5" />
+        </div>
+      </div>
     </div>
   );
 }

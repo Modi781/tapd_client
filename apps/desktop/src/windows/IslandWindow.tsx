@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
 import clsx from "clsx";
 import { Check, Eye, Loader2, X } from "lucide-react";
 
+import { agentApi, type AgentSummary } from "../lib/agent";
 import {
   formatNotificationTime,
   NOTIFICATION_KIND_LABELS,
@@ -28,6 +30,7 @@ export function IslandWindow() {
   const [layout, setLayout] = useState<IslandLayout>(PILL_LAYOUT);
   const [items, setItems] = useState<NotificationItem[]>([]);
   const [snapshot, setSnapshot] = useState<NotificationStateSnapshot | null>(null);
+  const [agentSummary, setAgentSummary] = useState<AgentSummary | null>(null);
   const [busy, setBusy] = useState<Busy>(null);
   const [errors, setErrors] = useState<Record<string, string>>({});
   // Click vs double-click: a single click waits briefly so a double-click can
@@ -87,6 +90,12 @@ export function IslandWindow() {
     // initial `island://layout` was emitted before the webview loaded.
     const timer = window.setInterval(() => {
       void refreshStatus();
+      void agentApi
+        .summary()
+        .then((summary) => {
+          if (!cancelled) setAgentSummary(summary);
+        })
+        .catch(() => undefined);
     }, 6000);
 
     return () => {
@@ -97,6 +106,31 @@ export function IslandWindow() {
       if (clickTimer.current !== null) window.clearTimeout(clickTimer.current);
     };
   }, [refreshStatus]);
+
+  // Agent capsule state: initial snapshot plus live `agent://summary` pushes.
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+
+    void agentApi
+      .summary()
+      .then((summary) => {
+        if (!cancelled) setAgentSummary(summary);
+      })
+      .catch(() => undefined);
+
+    void listen<AgentSummary>("agent://summary", (event) => {
+      if (!cancelled) setAgentSummary(event.payload);
+    }).then((fn) => {
+      if (cancelled) fn();
+      else unlisten = fn;
+    });
+
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, []);
 
   // Sync the window size with the pending list on first load.
   useEffect(() => {
@@ -128,13 +162,21 @@ export function IslandWindow() {
     }
   };
 
+  // Only treat the agent as clickable when there is actually something to show.
+  const agentTaskId =
+    agentSummary && (agentSummary.waitingReview || agentSummary.running)
+      ? agentSummary.activeTaskId
+      : null;
+
   const { label: statusLabel, tone } = useMemo(() => {
+    if (agentSummary?.waitingReview) return { label: "Agent 待审核", tone: "review" as const };
+    if (agentSummary?.running) return { label: "Agent 运行中", tone: "agent" as const };
     if (!snapshot) return { label: "连接中", tone: "idle" as const };
     if (!snapshot.running) return { label: "通知已暂停", tone: "paused" as const };
     if (snapshot.lastError) return { label: "同步异常", tone: "error" as const };
     if (items.length > 0) return { label: "待处理", tone: "alert" as const };
-    return { label: "运行中", tone: "ok" as const };
-  }, [snapshot, items.length]);
+    return { label: "待命", tone: "ok" as const };
+  }, [agentSummary, snapshot, items.length]);
 
   if (!layout.expanded) {
     return (
@@ -160,8 +202,13 @@ export function IslandWindow() {
             if (clickTimer.current !== null) return;
             clickTimer.current = window.setTimeout(() => {
               clickTimer.current = null;
-              if (items.length > 0) void notificationApi.expandIsland(true);
-              else void notificationApi.openMain();
+              if (agentTaskId) {
+                void agentApi.openTask(agentTaskId).catch(() => undefined);
+              } else if (items.length > 0) {
+                void notificationApi.expandIsland(true);
+              } else {
+                void notificationApi.openMain();
+              }
             }, 240);
           }}
           onDoubleClick={() => {
@@ -172,9 +219,11 @@ export function IslandWindow() {
             void notificationApi.openMain();
           }}
           title={
-            items.length > 0
-              ? "单击展开通知 · 双击打开客户端 · 可拖动"
-              : "双击打开客户端 · 可拖动"
+            agentTaskId
+              ? `${agentSummary?.waitingReview ? "Agent 待审核" : "Agent 运行中"} · 单击打开任务 · 可拖动`
+              : items.length > 0
+                ? "单击展开通知 · 双击打开客户端 · 可拖动"
+                : "双击打开客户端 · 可拖动"
           }
           className="island-pill group flex cursor-grab items-center gap-2 rounded-full bg-slate-900/90 px-3 py-1.5 text-[11px] text-slate-200 shadow-lg shadow-black/25 ring-1 ring-white/10 backdrop-blur-xl transition hover:bg-slate-900/95 active:cursor-grabbing"
         >
@@ -297,7 +346,11 @@ export function IslandWindow() {
   );
 }
 
-function StatusDot({ tone }: { tone: "ok" | "alert" | "paused" | "error" | "idle" }) {
+function StatusDot({
+  tone,
+}: {
+  tone: "ok" | "alert" | "paused" | "error" | "idle" | "review" | "agent";
+}) {
   return (
     <span className="relative grid h-2 w-2 shrink-0 place-items-center">
       <span
@@ -305,6 +358,8 @@ function StatusDot({ tone }: { tone: "ok" | "alert" | "paused" | "error" | "idle
           "absolute h-full w-full rounded-full",
           tone === "ok" && "animate-ping bg-emerald-400/60",
           tone === "alert" && "animate-ping bg-sky-400/60",
+          tone === "review" && "animate-ping bg-rose-400/60",
+          tone === "agent" && "animate-ping bg-sky-400/60",
         )}
       />
       <span
@@ -315,6 +370,8 @@ function StatusDot({ tone }: { tone: "ok" | "alert" | "paused" | "error" | "idle
           tone === "paused" && "bg-slate-400",
           tone === "error" && "bg-rose-400",
           tone === "idle" && "bg-amber-400",
+          tone === "review" && "bg-rose-400",
+          tone === "agent" && "bg-sky-400",
         )}
       />
     </span>

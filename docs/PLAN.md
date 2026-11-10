@@ -549,28 +549,28 @@ exporter: "tapd-client/1.0"
 | --- | --- | --- |
 | M0 技术验证 | ✅ | 登录、隐藏会话、同步/异步桥、接口抓包；结论见 `docs/spike.md` |
 | M1 骨架与登录 | ✅ | Tauri 2 + React、配置/日志、本地 HTTP、runtime 握手 |
-| M2 数据层 | ✅（不含 SQLite） | 模型、过滤器、响应解析、Tauri 命令；目前实时请求，未落库 |
-| M3 主界面 | ✅ | 项目切换、我的/全部、状态/优先级/严重度/关键词、分页、详情抽屉 |
+| M2 数据层 | ✅ | 模型、过滤器、响应解析、Tauri 命令；SQLite 离线快照缓存（项目/缺陷列表/详情）已接入 |
+| M3 主界面 | ✅ | 项目切换、我的/全部、状态/优先级/严重度/关键词、分页、详情抽屉、离线优先渲染与骨架屏 |
 | M4 MD 导出 | ✅ | `bug.md` + `assets/` + `bug.json`；带 Cookie 下载图片/视频/日志 |
-| M5 MCP | ✅ | stdio sidecar、查询/导出 + 评论/状态写回共 9 个工具、opencode v2 联调通过 |
+| M5 MCP | ✅ | stdio sidecar、查询/导出 + 评论/状态写回共 9 个工具、opencode v2 联调通过；MCP tab 一键导入 |
 | M6 通知 | ✅ | 可配置范围（我的/项目、新建/转移/重新打开）、自绘弹窗、忽略/查看、处理=改派+接受 |
-| M7 Agent | ✅ | opencode PTY TUI、串行队列、prompt 注入、xterm 控制台、取消/重试、任务恢复 |
+| M7 Agent | ✅ | opencode TUI 内嵌 Agent tab、串行队列、server 事件完成/审核、胶囊状态、历史与日志 |
 | M8 打包 | ✅（打包链路） | `tapd-mcp` 作为 externalBin 打进 App；`pnpm build:universal` 本地出 dmg；push `release` 分支由 GitHub Actions 出 universal dmg 与 artifact，tag 额外发 Release。MCP 策略/审计 UI 尚未做 |
 
 ### 与计划的偏差
 
 1. **异步桥改为结果桶轮询**：远程页面不允许调用应用 IPC 命令（`bridge_result not allowed`），`eval_with_callback` 又不 await Promise。最终用 `window.__TAPDCB_RESULTS__` + 120ms 原生 eval 轮询，稳定且不需要远程权限。
-2. **SQLite 延后**：列表/详情/导出全部实时请求，先保证数据正确；缓存、增量同步与离线能力留到后续 SQLite 里程碑。
-3. **MCP 写回已开放**：在查询/导出之外新增评论与状态更新（含自动先接受再流转）；删除/改处理人/批量操作仍未开放，按客户端策略档案与审计界面待 M8。
-4. **opencode v2 配置结构**：使用 `mcp.servers.<name>`，而不是旧文档里的 `mcp.<name>`；已实测 `opencode mcp list` 显示 connected。
-5. **通知采用自绘窗口 + JSON 游标**：未落 SQLite，`notifications.json` 保存设置、seen、ignored、cursor 与 baseline；首轮只建 baseline，避免历史缺陷轰炸。
-6. **处理动作会写 TAPD**：点击「处理」自动改派给自己，并把 `new`/`open`/`reopened` 流转到 `in_progress`/`progressing`；成功后通过 `agent://enqueue` 交给 M7。
-7. **Agent 严格串行**：单 worker，PTY 跑 opencode 完整 TUI，静默检测后就绪注入 prompt；控制台为独立 `agent-console` 窗口。
+2. **SQLite 已接入**：`cache.sqlite3` 保存项目、缺陷列表快照与详情；UI 先读缓存再后台刷新，只有首次登录无缓存时显示骨架屏。跨项目增量轮询仍待做。
+3. **MCP 写回已开放**：在查询/导出之外新增评论与状态更新（含自动先接受再流转）；删除/改处理人/批量操作仍未开放，按客户端策略档案与审计界面待补。
+4. **opencode v2 配置结构**：使用 `mcp.servers.<name>`，而不是旧文档里的 `mcp.<name>`；已实测 `opencode mcp list` 显示 connected；MCP tab 可一键合并到全局配置并自动备份。
+5. **通知采用自绘窗口 + JSON 游标**：`notifications.json` 保存设置、seen、ignored、cursor 与 baseline；首轮只建 baseline，避免历史缺陷轰炸。
+6. **处理动作会写 TAPD**：点击「处理」自动改派给自己，并把 `new`/`open`/`reopened` 流转到 `in_progress`/`progressing`；成功后通过 `agent://enqueue` 交给 Agent。
+7. **Agent 严格串行 + server 旁路**：单 worker；每个任务启动私有 `opencode serve`，TUI 通过 `--server` 连接，Rust 订阅 `/event` 判断 idle/权限请求；终端内嵌在 Agent tab，不再创建独立窗口。
 
 ### 已知待办
 
 - M8 剩余：MCP 策略设置与审计 UI、首启引导、诊断包（sidecar 打包与 universal dmg 已完成）。
-- SQLite 缓存与跨项目增量轮询（当前实时请求 + 单项目通知游标）。
+- 跨项目增量轮询与离线搜索（缓存快照已支持当前查询）。
 - 通知历史视图、托盘角标、未读计数。
-- Agent 任务常驻面板、并发数配置（当前固定 1）、进程树取消。
+- Agent 并发数配置（当前固定 1）、进程树彻底回收（已按进程组 kill）、更细粒度的事件适配。
 - 细节：MCP 调用限流、按 `clientInfo.name` 的权限档案、导出进度提示。

@@ -787,8 +787,20 @@ impl NotificationService {
             return;
         }
 
+        let before = self
+            .store
+            .lock()
+            .expect("notification store lock")
+            .items
+            .len();
         let result = self.poll_inner().await;
         self.polling.store(false, Ordering::SeqCst);
+        let after = self
+            .store
+            .lock()
+            .expect("notification store lock")
+            .items
+            .len();
 
         match result {
             Ok(()) => {
@@ -802,6 +814,12 @@ impl NotificationService {
                 *self.last_error.lock().expect("last error lock") = Some(error.clone());
                 tracing::debug!(%error, "notification poll failed");
             }
+        }
+
+        // New bugs found by the background poll: let the main window refresh its
+        // (offline-first) lists so cached data does not silently go stale.
+        if after > before {
+            let _ = self.app.emit("data://refresh", ());
         }
 
         self.refresh_window();

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import {
   Bug,
@@ -13,10 +13,20 @@ import {
   Sparkles,
   UserRound,
   Users,
+  WifiOff,
 } from "lucide-react";
 import clsx from "clsx";
 
-import { api, type BugListPage, type BugSummary, type Workspace } from "../lib/api";
+import {
+  api,
+  type BugListPage,
+  type BugQuery,
+  type BugSummary,
+  type Workspace,
+} from "../lib/api";
+import { cacheApi, type Cached } from "../lib/cache";
+import { beginRefresh } from "../lib/refresh";
+import { SkeletonRows } from "./Skeleton";
 import {
   Badge,
   Button,
@@ -24,7 +34,6 @@ import {
   PRIORITY_TONES,
   SEVERITY_TONES,
   STATUS_TONES,
-  Spinner,
 } from "./ui";
 
 const STATUS_ORDER = [
@@ -91,6 +100,10 @@ export function BugListView(props: Props) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [reloadTick, setReloadTick] = useState(0);
+  /** Sync time (Unix seconds) of the cached snapshot currently on screen. */
+  const [snapshotAt, setSnapshotAt] = useState<number | null>(null);
+  /** Newest request wins; older responses (filters/page changed) are dropped. */
+  const requestIdRef = useRef(0);
 
   useEffect(() => {
     const timer = window.setTimeout(() => setDebouncedKeyword(keyword.trim()), 300);
@@ -103,30 +116,63 @@ export function BugListView(props: Props) {
 
   const load = useCallback(async () => {
     if (!workspace) return;
-    setLoading(true);
-    setError(null);
+
+    const query: BugQuery = {
+      workspaceId: workspace.id,
+      owner: scope === "mine" ? me : null,
+      statuses: statusFilter,
+      priorities: priority ? [priority] : [],
+      severities: severity ? [severity] : [],
+      keyword: debouncedKeyword || null,
+      modifiedAfter: null,
+      createdAfter: null,
+      sortName: "created",
+      order: "desc",
+      page: pageNo,
+      perpage: 50,
+      confId: null,
+    };
+
+    const requestId = ++requestIdRef.current;
+
+    // Cache-first: paint the last snapshot for exactly this query before the
+    // network round-trip, so a slow/offline TAPD never shows an empty table.
+    let cached: Cached<BugListPage> | null = null;
     try {
-      const result = await api.bugList({
-        workspaceId: workspace.id,
-        owner: scope === "mine" ? me : null,
-        statuses: statusFilter,
-        priorities: priority ? [priority] : [],
-        severities: severity ? [severity] : [],
-        keyword: debouncedKeyword || null,
-        modifiedAfter: null,
-        createdAfter: null,
-        sortName: "created",
-        order: "desc",
-        page: pageNo,
-        perpage: 50,
-        confId: null,
-      });
+      cached = await cacheApi.bugList(query);
+    } catch {
+      // A cache read failure is not a page failure; the live request decides.
+    }
+    if (requestId !== requestIdRef.current) return;
+
+    const snapshot = cached?.data ?? null;
+    const snapshotFetchedAt = cached?.fetchedAt ?? null;
+    if (snapshot) {
+      setPage(snapshot);
+      setSnapshotAt(snapshotFetchedAt);
+    }
+
+    setError(null);
+    setLoading(true);
+    const done = beginRefresh();
+    try {
+      const result = await api.bugList(query);
+      if (requestId !== requestIdRef.current) return;
       setPage(result);
+      setSnapshotAt(null);
     } catch (cause) {
-      setError(String(cause));
-      setPage(null);
+      if (requestId !== requestIdRef.current) return;
+      if (snapshot) {
+        // Offline: keep the cached table and let the inline notice explain it.
+        setSnapshotAt(snapshotFetchedAt);
+      } else {
+        setError(String(cause));
+        setPage(null);
+        setSnapshotAt(null);
+      }
     } finally {
-      setLoading(false);
+      done();
+      if (requestId === requestIdRef.current) setLoading(false);
     }
   }, [workspace, scope, me, statusFilter, priority, severity, debouncedKeyword, pageNo]);
 
@@ -217,10 +263,7 @@ export function BugListView(props: Props) {
         <Button
           size="sm"
           variant="secondary"
-          onClick={() => {
-            setReloadTick((tick) => tick + 1);
-            void load();
-          }}
+          onClick={() => setReloadTick((tick) => tick + 1)}
           loading={loading}
           icon={<RefreshCw size={13} />}
         >
@@ -294,6 +337,23 @@ export function BugListView(props: Props) {
         ) : null}
       </div>
 
+      {page && snapshotAt !== null && !loading && !error ? (
+        <div className="flex items-center gap-2 border-b border-amber-100 bg-amber-50/80 px-5 py-1.5 text-[11px] text-amber-700">
+          <WifiOff size={12} className="shrink-0" />
+          <span className="truncate">
+            离线数据 · 上次同步 {formatSnapshotTime(snapshotAt)}
+          </span>
+          <button
+            type="button"
+            onClick={() => setReloadTick((tick) => tick + 1)}
+            className="ml-auto inline-flex shrink-0 items-center gap-1 rounded border border-amber-200 bg-white px-1.5 py-0.5 text-[10px] text-amber-700 transition hover:bg-amber-100"
+          >
+            <RefreshCw size={10} />
+            重试
+          </button>
+        </div>
+      ) : null}
+
       <div className="min-h-0 flex-1 overflow-auto">
         {error ? (
           <div className="m-5 rounded-xl border border-rose-200 bg-rose-50 p-4 text-xs leading-6 text-rose-700">
@@ -308,10 +368,12 @@ export function BugListView(props: Props) {
         ) : null}
 
         {!error && !page && loading ? (
-          <div className="flex h-64 items-center justify-center gap-2 text-xs text-slate-400">
-            <Spinner />
-            正在读取缺陷…
-          </div>
+          <SkeletonRows
+            className="pt-1"
+            rows={9}
+            columns={["w-[36%]", "w-12", "w-9", "w-14", "w-16", "w-12", "w-24"]}
+            label="正在读取缺陷列表"
+          />
         ) : null}
 
         {!error && page && page.bugs.length === 0 ? (
@@ -523,4 +585,24 @@ function initials(name: string): string {
 function formatTs(value: string): string {
   if (!value) return "—";
   return value.length >= 16 ? value.slice(0, 16) : value;
+}
+
+/** "上次同步" label: time only for today, date + time for older snapshots. */
+function formatSnapshotTime(fetchedAt: number): string {
+  const date = new Date(fetchedAt * 1000);
+  if (Number.isNaN(date.getTime())) return "未知";
+
+  const now = new Date();
+  const sameDay =
+    date.getFullYear() === now.getFullYear() &&
+    date.getMonth() === now.getMonth() &&
+    date.getDate() === now.getDate();
+
+  const options: Intl.DateTimeFormatOptions = {
+    hour12: false,
+    hour: "2-digit",
+    minute: "2-digit",
+    ...(sameDay ? {} : { month: "2-digit", day: "2-digit" }),
+  };
+  return date.toLocaleString("zh-CN", options);
 }

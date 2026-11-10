@@ -1,15 +1,17 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { listen } from "@tauri-apps/api/event";
 import type { MouseEvent as ReactMouseEvent, ReactNode } from "react";
 import clsx from "clsx";
 import {
   AlertTriangle,
+  Bot,
   Bug,
   CheckCircle2,
   FileJson,
   Loader2,
   PanelLeftClose,
   PanelLeftOpen,
+  Plug,
   RefreshCw,
   Settings as SettingsIcon,
   Wifi,
@@ -31,16 +33,24 @@ import {
   type WorkspaceContext,
 } from "./lib/api";
 import { agentApi } from "./lib/agent";
+import { cacheApi } from "./lib/cache";
+import {
+  beginRefresh,
+  getRefreshing,
+  subscribeRefresh,
+} from "./lib/refresh";
+import { AgentPage } from "./components/AgentPage";
 import { BugDetailDrawer } from "./components/BugDetailDrawer";
 import { FolderPicker } from "./components/FolderPicker";
 import { BugListView } from "./components/BugListView";
 import { CapturesPage } from "./components/CapturesPage";
 import { LoginGate } from "./components/LoginGate";
+import { McpPage } from "./components/McpPage";
 import { SettingsPage } from "./components/SettingsPage";
-import { Button, Spinner } from "./components/ui";
-import { featureCommand } from "./lib/feature";
+import { SkeletonRows } from "./components/Skeleton";
+import { Button } from "./components/ui";
 
-type View = "bugs" | "captures" | "settings";
+type View = "bugs" | "captures" | "agent" | "mcp" | "settings";
 type Scope = "mine" | "all";
 type Toast = { kind: "ok" | "error"; text: string };
 
@@ -67,6 +77,8 @@ const defaultSidebarWidth = (viewport: number): number =>
 const NAV: Array<{ id: View; label: string; icon: ReactNode }> = [
   { id: "bugs", label: "缺陷", icon: <Bug size={15} /> },
   { id: "captures", label: "接口抓包", icon: <FileJson size={15} /> },
+  { id: "agent", label: "Agent", icon: <Bot size={15} /> },
+  { id: "mcp", label: "MCP", icon: <Plug size={15} /> },
   { id: "settings", label: "设置", icon: <SettingsIcon size={15} /> },
 ];
 
@@ -90,6 +102,14 @@ export default function App() {
   const [resizingSidebar, setResizingSidebar] = useState(false);
   /** Set when the user asks for an Agent fix without a configured folder. */
   const [pendingAgent, setPendingAgent] = useState<AgentTarget | null>(null);
+  /** Task the island capsule asked us to focus in the Agent tab. */
+  const [agentFocusTaskId, setAgentFocusTaskId] = useState<string | null>(null);
+  /** Any live (network) refresh currently in flight; drives the title bar. */
+  const refreshing = useSyncExternalStore(
+    subscribeRefresh,
+    getRefreshing,
+    getRefreshing,
+  );
 
   // The sidebar follows the window until the user drags it once.
   useEffect(() => {
@@ -123,6 +143,54 @@ export default function App() {
     setToast({ kind, text });
   }, []);
 
+  /** Monotonic id so a slow detail response cannot replace a newer bug. */
+  const detailSeq = useRef(0);
+
+  /**
+   * Opens the detail drawer cache-first: an existing snapshot renders
+   * immediately (no skeleton), then the live request refreshes it.
+   */
+  const loadBugDetail = useCallback((targetWorkspaceId: string, bugId: string) => {
+    const seq = ++detailSeq.current;
+    setDetailOpen(true);
+    setDetail(null);
+    setDetailError(null);
+    setLastExport(null);
+    setDetailLoading(true);
+    const done = beginRefresh();
+
+    void (async () => {
+      let hasCache = false;
+      try {
+        const cached = await cacheApi.bugDetail(targetWorkspaceId, bugId);
+        if (seq === detailSeq.current && cached.data) {
+          hasCache = true;
+          setDetail(cached.data);
+          setDetailLoading(false);
+        }
+      } catch {
+        // Cache misses are not errors.
+      }
+      if (seq !== detailSeq.current) {
+        done();
+        return;
+      }
+      try {
+        const next = await api.bugDetail(targetWorkspaceId, bugId);
+        if (seq !== detailSeq.current) return;
+        setDetail(next);
+        setDetailError(null);
+      } catch (error) {
+        if (seq === detailSeq.current && !hasCache) {
+          setDetailError(String(error));
+        }
+      } finally {
+        if (seq === detailSeq.current) setDetailLoading(false);
+        done();
+      }
+    })();
+  }, []);
+
   useEffect(() => {
     if (!toast) return;
     const timer = window.setTimeout(() => setToast(null), 4200);
@@ -146,6 +214,31 @@ export default function App() {
   const loadContext = useCallback(async () => {
     setContextLoading(true);
     setContextError(null);
+
+    // Offline-first: render the last snapshot immediately (unless the user
+    // already has newer data in memory), then refresh in the background.
+    let hasCache = false;
+    try {
+      const cached = await cacheApi.workspaceContext();
+      if (cached.data) {
+        hasCache = true;
+        const next = cached.data;
+        setContext((current) => current ?? next);
+        if (next.user.nick) {
+          void api.setCurrentUser(next.user.nick);
+        }
+        const lastId = infoRef.current?.lastWorkspaceId;
+        setWorkspaceId((current) => {
+          if (current) return current;
+          if (lastId && next.workspaces.some((item) => item.id === lastId)) return lastId;
+          return next.workspaces[0]?.id ?? "";
+        });
+      }
+    } catch {
+      // A missing cache is not an error; the live request below decides.
+    }
+
+    const done = beginRefresh();
     try {
       for (let attempt = 0; attempt < 3; attempt += 1) {
         try {
@@ -163,7 +256,8 @@ export default function App() {
           return;
         } catch (error) {
           if (attempt === 2) {
-            setContextError(String(error));
+            // Keep offline data on screen instead of replacing it with an error.
+            if (!hasCache) setContextError(String(error));
             return;
           }
           await new Promise((resolve) => window.setTimeout(resolve, 700));
@@ -171,6 +265,7 @@ export default function App() {
       }
     } finally {
       setContextLoading(false);
+      done();
     }
   }, []);
 
@@ -197,18 +292,20 @@ export default function App() {
         setView("bugs");
         setWorkspaceId(workspaceId);
         void api.setLastWorkspace(workspaceId);
-        setDetailOpen(true);
-        setDetail(null);
-        setDetailError(null);
-        setLastExport(null);
-        setDetailLoading(true);
-        void api
-          .bugDetail(workspaceId, bugId)
-          .then((next) => setDetail(next))
-          .catch((error) => setDetailError(String(error)))
-          .finally(() => setDetailLoading(false));
+        loadBugDetail(workspaceId, bugId);
       },
     ).then((fn) => {
+      unlisten = fn;
+    });
+    return () => unlisten?.();
+  }, [loadBugDetail]);
+
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    void listen<{ taskId: string }>("agent://focus", (event) => {
+      setView("agent");
+      setAgentFocusTaskId(event.payload.taskId);
+    }).then((fn) => {
       unlisten = fn;
     });
     return () => unlisten?.();
@@ -246,20 +343,16 @@ export default function App() {
     void api.setLastWorkspace(id);
   };
 
-  const openBug = async (bug: BugSummary) => {
-    setDetailOpen(true);
-    setDetail(null);
-    setDetailError(null);
-    setLastExport(null);
-    setDetailLoading(true);
-    try {
-      const next = await api.bugDetail(bug.workspaceId, bug.id);
-      setDetail(next);
-    } catch (error) {
-      setDetailError(String(error));
-    } finally {
-      setDetailLoading(false);
-    }
+  const openBug = (bug: BugSummary) => {
+    loadBugDetail(bug.workspaceId, bug.id);
+  };
+
+  /** Opens a bug from an agent history row: select its workspace first. */
+  const openBugById = (workspaceId: string, bugId: string) => {
+    setView("bugs");
+    setWorkspaceId(workspaceId);
+    void api.setLastWorkspace(workspaceId);
+    loadBugDetail(workspaceId, bugId);
   };
 
   const handleExport = async (target: BugDetail) => {
@@ -284,7 +377,7 @@ export default function App() {
       null;
 
     try {
-      await featureCommand("agent_enqueue_bug", {
+      const { task } = await agentApi.enqueueBug({
         workspaceId: target.workspaceId,
         bugId: target.id,
         workspaceName,
@@ -293,13 +386,8 @@ export default function App() {
         priority: target.priorityLabel,
       });
       showToast("ok", "已加入 Agent 队列");
-    } catch (error) {
-      showToast("error", String(error));
-      return;
-    }
-
-    try {
-      await featureCommand("agent_console_open");
+      setAgentFocusTaskId(task.id);
+      setView("agent");
     } catch (error) {
       showToast("error", String(error));
     }
@@ -480,7 +568,11 @@ export default function App() {
       ? workspace?.name ?? "缺陷"
       : view === "captures"
         ? "接口抓包"
-        : "设置";
+        : view === "agent"
+          ? "Agent"
+          : view === "mcp"
+            ? "MCP"
+            : "设置";
   const subtitle =
     view === "bugs"
       ? workspace
@@ -488,7 +580,11 @@ export default function App() {
         : "选择左侧项目开始"
       : view === "captures"
         ? "查看隐藏 WebView 捕获的 TAPD 接口"
-        : "账户、项目与本地数据";
+        : view === "agent"
+          ? "运行 opencode、审核权限与查看执行历史"
+          : view === "mcp"
+            ? "接入 AI 客户端与一键导入 opencode"
+            : "账户、项目与本地数据";
 
   return (
     <div
@@ -499,12 +595,17 @@ export default function App() {
     >
       {/* macOS traffic lights live over this strip; whole strip drags the window. */}
       <div
-        className="flex h-11 shrink-0 items-center gap-2 px-4"
+        className="relative flex h-11 shrink-0 items-center gap-2 px-4"
         data-tauri-drag-region
       >
         {/* No window title: the strip only hosts the traffic lights + drag. */}
         <span className="ml-[62px] flex-1" data-tauri-drag-region />
-        {contextLoading ? <Spinner className="text-slate-300" /> : null}
+        {refreshing ? (
+          <div className="pointer-events-none absolute inset-x-0 flex items-center justify-center gap-1.5 text-[11px] text-slate-400">
+            <Loader2 size={12} className="animate-spin" />
+            更新中
+          </div>
+        ) : null}
       </div>
 
       <div className="flex min-h-0 flex-1">
@@ -554,18 +655,22 @@ export default function App() {
           )}
           style={{ width: sidebarCollapsed ? 0 : effectiveSidebarWidth }}
         >
-          <div className="flex h-9 shrink-0 items-center gap-1 pr-1" data-tauri-drag-region>
-            <span className="min-w-0 flex-1 truncate px-2 text-[13px] font-semibold text-slate-800">
-              项目
-            </span>
-            {context?.workspaces.length ? (
-              <span className="text-[11px] tabular-nums text-slate-400">
-                {context.workspaces.length}
+          <div className="flex min-h-0 flex-1 flex-col px-2 pb-2">
+            <div
+              className="flex h-9 shrink-0 items-center justify-between pr-2"
+              data-tauri-drag-region
+            >
+              <span className="min-w-0 flex-1 truncate px-2 text-[13px] font-semibold text-slate-800">
+                项目
               </span>
-            ) : null}
-          </div>
+              {context?.workspaces.length ? (
+                <span className="shrink-0 text-[11px] tabular-nums text-slate-400">
+                  {context.workspaces.length}
+                </span>
+              ) : null}
+            </div>
 
-          <div className="min-h-0 flex-1 space-y-0.5 overflow-y-auto px-2 pb-2">
+            <div className="min-h-0 flex-1 space-y-0.5 overflow-y-auto [scrollbar-gutter:stable]">
             {contextError ? (
               <div className="rounded-xl bg-rose-50 p-2.5 text-[11px] leading-5 text-rose-700 ring-1 ring-rose-100">
                 <div className="break-all">{contextError}</div>
@@ -581,7 +686,13 @@ export default function App() {
             ) : null}
 
             {!context && contextLoading ? (
-              <div className="px-2 py-2 text-[11px] text-slate-400">读取项目…</div>
+              <SkeletonRows
+                rows={7}
+                columns={["w-2/3", "w-6"]}
+                className="pt-1"
+                rowClassName="px-3 py-2.5"
+                label="正在读取项目…"
+              />
             ) : null}
 
             {context?.workspaces.map((item) => {
@@ -609,28 +720,16 @@ export default function App() {
                 </button>
               );
             })}
+            </div>
           </div>
 
-          <div className="space-y-1.5 border-t border-black/[0.06] px-3 py-2.5 text-[11px] text-slate-500">
-            <div className="flex items-center gap-2">
-              {info.loggedIn ? (
-                <Wifi size={12} className="text-emerald-500" />
-              ) : (
-                <WifiOff size={12} className="text-amber-500" />
-              )}
-              <span className="truncate">
-                {context?.user.nick || info.me || "已登录"}
-                {context?.user.userId ? ` · ${context.user.userId}` : ""}
-              </span>
-            </div>
-            <div className="flex items-center justify-between">
-              <span className="text-slate-400">v{info.version}</span>
-              {info.runtimePort ? (
-                <span className="rounded-md bg-black/[0.05] px-1.5 py-0.5 text-[10px] text-slate-500">
-                  MCP :{info.runtimePort}
-                </span>
-              ) : null}
-            </div>
+          <div className="flex items-center gap-2 border-t border-black/[0.06] px-3 py-2.5 text-[11px] text-slate-500">
+            {info.loggedIn ? (
+              <Wifi size={12} className="text-emerald-500" />
+            ) : (
+              <WifiOff size={12} className="text-amber-500" />
+            )}
+            <span className="truncate">{context?.user.nick || info.me || "已登录"}</span>
           </div>
 
           <button
@@ -697,13 +796,24 @@ export default function App() {
                 refreshToken={refreshToken}
               />
             ) : (
-              <div className="flex flex-1 items-center justify-center">
-                <div className="text-center">
-                  <Spinner className="mx-auto" />
-                  <p className="mt-2 text-xs text-slate-400">正在加载项目…</p>
-                </div>
+              <div className="min-h-0 flex-1 p-4">
+                <SkeletonRows
+                  rows={10}
+                  columns={["w-2/5", "w-16", "w-12", "w-16", "w-20", "w-16", "w-24"]}
+                  label="正在加载项目…"
+                />
               </div>
             )
+          ) : view === "agent" ? (
+            <AgentPage
+              focusTaskId={agentFocusTaskId}
+              onOpenBug={openBugById}
+              toast={showToast}
+            />
+          ) : view === "mcp" ? (
+            <div className="min-h-0 flex-1 overflow-y-auto p-5">
+              <McpPage onCopy={copy} toast={showToast} />
+            </div>
           ) : (
             <div className="min-h-0 flex-1 overflow-y-auto p-5">
               {view === "captures" ? (

@@ -1,4 +1,3 @@
-import { useEffect, useState } from "react";
 import {
   Copy,
   FolderOpen,
@@ -6,22 +5,15 @@ import {
   LogIn,
   LogOut,
   RefreshCw,
-  Server,
   ShieldCheck,
 } from "lucide-react";
 
-import {
-  api,
-  type AppInfo,
-  type McpConfigInfo,
-  type SessionStatus,
-  type WorkspaceContext,
-} from "../lib/api";
+import type { AppInfo, SessionStatus, WorkspaceContext } from "../lib/api";
 import type { SettingsSectionProps } from "../lib/feature";
 import { AgentSettings } from "./AgentSettings";
 import { ProjectSettings } from "./ProjectSettings";
 import { NotificationSettings } from "./NotificationSettings";
-import { Badge, Button } from "./ui";
+import { Button } from "./ui";
 
 type Props = {
   info: AppInfo | null;
@@ -37,14 +29,6 @@ type Props = {
 
 export function SettingsPage(props: Props) {
   const { info, status, context, onShowLogin, onLogout, onRefresh, onOpenPath, onCopy, toast } = props;
-  const [mcp, setMcp] = useState<McpConfigInfo | null>(null);
-
-  useEffect(() => {
-    void api
-      .mcpConfig()
-      .then(setMcp)
-      .catch(() => setMcp(null));
-  }, []);
 
   const paths: Array<[string, string]> = info
     ? [
@@ -102,76 +86,6 @@ export function SettingsPage(props: Props) {
       <AgentSettings toast={toast} />
 
       <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-        <div className="flex items-start justify-between gap-3">
-          <div>
-            <h2 className="flex items-center gap-2 text-sm font-semibold text-slate-900">
-              <Server size={15} className="text-slate-400" />
-              MCP 服务
-            </h2>
-            <p className="mt-1 text-xs text-slate-500">
-              AI 客户端通过 stdio 连接本应用，读取当前账号可见的缺陷；修复完成后可追加评论、更新状态。
-            </p>
-          </div>
-          <div className="flex items-center gap-2">
-            <Badge tone="green">已启用</Badge>
-            <Badge tone={mcp?.readOnly ? "neutral" : "green"}>{mcp?.readOnly ? "只读" : "读写"}</Badge>
-          </div>
-        </div>
-
-        <div className="mt-4 grid gap-2 text-[11px] text-slate-500 sm:grid-cols-3">
-          <div className="rounded-lg border border-slate-100 bg-slate-50 p-2.5">
-            <div className="text-[10px] uppercase tracking-wide text-slate-400">传输</div>
-            <div className="mt-1 font-mono text-slate-700">{mcp?.transport ?? "stdio"}</div>
-          </div>
-          <div className="rounded-lg border border-slate-100 bg-slate-50 p-2.5">
-            <div className="text-[10px] uppercase tracking-wide text-slate-400">本地端口</div>
-            <div className="mt-1 font-mono text-slate-700">
-              {mcp?.port ? `127.0.0.1:${mcp.port}` : info?.runtimePort ? `127.0.0.1:${info.runtimePort}` : "—"}
-            </div>
-          </div>
-          <div className="rounded-lg border border-slate-100 bg-slate-50 p-2.5">
-            <div className="text-[10px] uppercase tracking-wide text-slate-400">工具</div>
-            <div className="mt-1 text-slate-700">{mcp?.tools.length ?? 6} 个</div>
-          </div>
-        </div>
-
-        <div className="mt-3 flex flex-wrap gap-1.5">
-          {(mcp?.tools ?? []).map((tool) => (
-            <span
-              key={tool}
-              className="rounded-md bg-slate-100 px-2 py-0.5 font-mono text-[10px] text-slate-600"
-            >
-              {tool}
-            </span>
-          ))}
-        </div>
-
-        <div className="mt-4">
-          <div className="flex items-center justify-between text-[11px] text-slate-500">
-            <span>opencode 配置（写入项目的 opencode.json）</span>
-            <button
-              type="button"
-              onClick={() => onCopy(mcp?.snippet ?? "")}
-              className="inline-flex items-center gap-1 rounded border border-slate-200 px-2 py-1 text-[10px] text-slate-600 transition hover:border-slate-300"
-            >
-              <Copy size={10} />
-              复制配置
-            </button>
-          </div>
-          <pre className="mt-2 max-h-56 overflow-auto rounded-xl bg-slate-900 p-3 font-mono text-[10px] leading-5 text-slate-200">
-            {mcp?.snippet ?? "正在读取 MCP 配置…"}
-          </pre>
-          <p className="mt-2 text-[10px] leading-5 text-slate-400">
-            也可以用命令行注册：
-            <span className="ml-1 rounded bg-slate-100 px-1.5 py-0.5 font-mono text-slate-600">
-              opencode mcp add tapd -- {mcp?.commandPath ?? "tapd-mcp"}
-            </span>
-            。重启 opencode 后运行 <span className="font-mono">opencode mcp list</span> 确认已连接。
-          </p>
-        </div>
-      </section>
-
-      <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
         <h2 className="flex items-center gap-2 text-sm font-semibold text-slate-900">
           <ShieldCheck size={15} className="text-slate-400" />
           运行信息
@@ -214,7 +128,7 @@ export function SettingsPage(props: Props) {
       </section>
 
       <p className="px-1 text-[11px] leading-5 text-slate-400">
-        当前里程碑：登录会话、项目/缺陷列表、筛选与详情。SQLite 缓存、MD 导出、MCP 工具、通知窗口与 opencode 队列在后续接入。
+        当前里程碑：登录会话、项目/缺陷列表、筛选与详情。SQLite 缓存、MD 导出、通知窗口与 opencode 队列在后续接入。
       </p>
     </div>
   );

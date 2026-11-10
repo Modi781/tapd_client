@@ -215,6 +215,10 @@ export type McpConfigInfo = {
   readOnly: boolean;
   tools: string[];
   port: number | null;
+  /** opencode global config path, when discoverable. */
+  configPath: string | null;
+  /** Whether the opencode config already registers tapd-mcp. */
+  imported: boolean;
 };
 
 export type OpenMediaMode = "file" | "browser" | "reveal" | "path";

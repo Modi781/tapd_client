@@ -27,6 +27,7 @@ percent-encoding = "2"
 portable-pty = "0.9"
 reqwest = "0.13"
 base64 = "0.21"
+rusqlite = { version = "0.41", features = ["bundled"] }
 tapd-core = { path = "../../../crates/tapd-core" }
 
 [features]
