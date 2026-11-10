@@ -1105,8 +1105,9 @@ fn service() -> Result<Arc<NotificationService>, String> {
 const PILL_WIDTH: f64 = 210.0;
 const PILL_HEIGHT: f64 = 34.0;
 const CARD_WIDTH: f64 = 384.0;
-const CARD_BASE_HEIGHT: f64 = 150.0;
-const CARD_ROW_HEIGHT: f64 = 112.0;
+/// Room for a two-line title, the metadata row and the two action buttons.
+const CARD_BASE_HEIGHT: f64 = 160.0;
+const CARD_ROW_HEIGHT: f64 = 148.0;
 const ISLAND_TOP_MARGIN: f64 = 6.0;
 
 /// Bumped on every layout change so a superseded animation stops early.

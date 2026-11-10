@@ -92,6 +92,19 @@ pub fn run() {
                 tracing::error!(%error, "failed to create TAPD session window");
             }
 
+            // Closing the main window only hides it: the app stays in the
+            // Dock and reopens on click. Quitting from the app menu or the
+            // Dock menu still exits the process normally.
+            if let Some(window) = handle.get_webview_window("main") {
+                let window_for_close = window.clone();
+                window.on_window_event(move |event| {
+                    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                        api.prevent_close();
+                        let _ = window_for_close.hide();
+                    }
+                });
+            }
+
             notification::init(&handle, state.clone());
             agent::init(&handle, state.clone());
             session::spawn_session_watcher(handle, state);
@@ -100,12 +113,21 @@ pub fn run() {
         })
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
-        .run(|app, event| {
-            if let RunEvent::Exit = event {
+        .run(|app, event| match event {
+            RunEvent::Exit => {
                 if let Some(state) = app.try_state::<Arc<AppState>>() {
                     RuntimeInfo::clear(&state.paths.runtime_file);
                 }
             }
+            // macOS: clicking the Dock icon brings the hidden main window back.
+            #[cfg(target_os = "macos")]
+            RunEvent::Reopen { .. } => {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                }
+            }
+            _ => {}
         });
 }
 

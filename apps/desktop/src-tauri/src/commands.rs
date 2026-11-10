@@ -284,23 +284,19 @@ pub async fn session_logout(
         tracing::warn!(%error, "failed to clear offline cache on logout");
     }
 
-    // Keep the URL watcher from resurrecting the old session while we navigate.
-    session::begin_logout_guard(6000);
+    // Keep the URL watcher from resurrecting the old session while TAPD boots.
+    // The login page takes a few seconds to settle, so cover the whole window.
+    session::begin_logout_guard(30_000);
 
     if let Some(window) = app.get_webview_window(session::SESSION_LABEL) {
+        // Clear page storage while the webview is still on the TAPD origin.
+        let _ = window.eval(
+            "try { localStorage.clear(); sessionStorage.clear(); } catch (error) {}",
+        );
+
         // Deleting cookies explicitly is more reliable than the bulk clear on
         // macOS, where the removal is asynchronous.
-        let mut removed = 0usize;
-        if let Ok(cookies) = window.cookies() {
-            for cookie in cookies {
-                let domain = cookie.domain().unwrap_or_default().to_ascii_lowercase();
-                if domain == "tapd.cn" || domain.ends_with(".tapd.cn") {
-                    if window.delete_cookie(cookie.clone()).is_ok() {
-                        removed += 1;
-                    }
-                }
-            }
-        }
+        let removed = clear_tapd_cookies(&window);
         let _ = window.clear_all_browsing_data();
 
         // Park the SPA first: navigating straight to tapd.cn would let the
@@ -312,21 +308,45 @@ pub async fn session_logout(
         let window_for_reload = window.clone();
         let app_for_emit = app.clone();
         tauri::async_runtime::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(400)).await;
+            // Give WKWebsiteDataStore time to actually remove the cookies
+            // before loading TAPD again, otherwise the SPA signs straight back
+            // in with the still-valid session.
+            tokio::time::sleep(Duration::from_millis(1200)).await;
             let _ = window_for_reload.clear_all_browsing_data();
+            let removed_again = clear_tapd_cookies(&window_for_reload);
+
             if let Ok(home) = tauri::Url::parse(session::TAPD_HOME) {
                 let _ = window_for_reload.navigate(home);
             }
             // Stay hidden: the login screen shows the new QR code in place.
             let _ = window_for_reload.hide();
             let _ = app_for_emit.emit("session://changed", ());
-        });
 
-        tracing::info!(cookies_removed = removed, "session cleared");
+            tracing::info!(
+                cookies_removed = removed + removed_again,
+                "session cleared"
+            );
+        });
     }
 
     let _ = app.emit("session://changed", ());
     Ok(())
+}
+
+/// Removes every TAPD cookie from a webview and returns how many were deleted.
+fn clear_tapd_cookies(window: &tauri::WebviewWindow) -> usize {
+    let mut removed = 0usize;
+    if let Ok(cookies) = window.cookies() {
+        for cookie in cookies {
+            let domain = cookie.domain().unwrap_or_default().to_ascii_lowercase();
+            if domain == "tapd.cn" || domain.ends_with(".tapd.cn") {
+                if window.delete_cookie(cookie.clone()).is_ok() {
+                    removed += 1;
+                }
+            }
+        }
+    }
+    removed
 }
 
 #[tauri::command]

@@ -511,7 +511,6 @@ function BugListViewImpl(props: Props) {
         <div className="flex shrink-0 items-center justify-between border-t border-slate-200 bg-white px-5 py-2.5 text-[11px] text-slate-500">
           <span>
             共 {page.total} 条 · 第 {pageNo} / {totalPages} 页
-            {loading ? <span className="ml-2 text-sky-600">同步中…</span> : null}
           </span>
           <div className="flex items-center gap-2">
             <Button

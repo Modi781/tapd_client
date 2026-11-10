@@ -1,17 +1,7 @@
 import { useState } from "react";
-import {
-  Copy,
-  FileJson,
-  FolderOpen,
-  KeyRound,
-  LogOut,
-  RefreshCw,
-  RotateCcw,
-  ShieldCheck,
-  X,
-} from "lucide-react";
+import { Copy, FileJson, FolderOpen, ShieldCheck, X } from "lucide-react";
 
-import type { AppInfo, SessionStatus, WorkspaceContext } from "../lib/api";
+import type { AppInfo, WorkspaceContext } from "../lib/api";
 import type { SettingsSectionProps } from "../lib/feature";
 import { AgentSettings } from "./AgentSettings";
 import { CapturesPage } from "./CapturesPage";
@@ -21,11 +11,7 @@ import { Button } from "./ui";
 
 type Props = {
   info: AppInfo | null;
-  status: SessionStatus | null;
   context: WorkspaceContext | null;
-  onReloadLogin: () => void;
-  onLogout: () => void;
-  onRefresh: () => void;
   onOpenPath: (path: string) => void;
   onCopy: (text: string) => void;
   hiddenWorkspaceIds: string[];
@@ -36,11 +22,7 @@ type Props = {
 export function SettingsPage(props: Props) {
   const {
     info,
-    status,
     context,
-    onReloadLogin,
-    onLogout,
-    onRefresh,
     onOpenPath,
     onCopy,
     hiddenWorkspaceIds,
@@ -62,44 +44,6 @@ export function SettingsPage(props: Props) {
 
   return (
     <div className="mx-auto max-w-4xl space-y-4">
-      <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-        <div className="flex items-start justify-between gap-3">
-          <div>
-            <h2 className="flex items-center gap-2 text-sm font-semibold text-slate-900">
-              <KeyRound size={15} className="text-slate-400" />
-              账户与会话
-            </h2>
-          </div>
-          <Button size="sm" onClick={onRefresh} icon={<RefreshCw size={13} />}>
-            刷新状态
-          </Button>
-        </div>
-
-        <div className="mt-4 grid gap-3 sm:grid-cols-3">
-          <InfoTile label="登录状态" value={info?.loggedIn ? "已登录" : "未登录"} />
-          <InfoTile label="当前用户" value={context?.user.nick || info?.me || "—"} />
-          <InfoTile label="公司" value={context?.user.company || "—"} />
-        </div>
-
-        <div className="mt-3 break-all rounded-xl border border-slate-100 bg-slate-50 p-3 font-mono text-[11px] text-slate-500">
-          {status?.url || info?.sessionUrl || "会话窗口尚未创建"}
-        </div>
-
-        <div className="mt-3 flex flex-wrap gap-2">
-          <Button
-            size="sm"
-            variant="primary"
-            onClick={onReloadLogin}
-            icon={<RotateCcw size={13} />}
-          >
-            重新加载登录页
-          </Button>
-          <Button size="sm" variant="danger" onClick={onLogout} icon={<LogOut size={13} />}>
-            退出登录并清除数据
-          </Button>
-        </div>
-      </section>
-
       <ProjectSettings
         context={context}
         hiddenWorkspaceIds={hiddenWorkspaceIds}
@@ -201,15 +145,6 @@ export function SettingsPage(props: Props) {
           </div>
         </div>
       ) : null}
-    </div>
-  );
-}
-
-function InfoTile({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="rounded-xl border border-slate-100 bg-slate-50/70 p-3">
-      <div className="text-[10px] uppercase tracking-wide text-slate-400">{label}</div>
-      <div className="mt-1 truncate text-sm font-medium text-slate-800">{value}</div>
     </div>
   );
 }

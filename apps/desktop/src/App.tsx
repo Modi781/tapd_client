@@ -7,14 +7,13 @@ import {
   Bot,
   Bug,
   CheckCircle2,
+  ChevronRight,
   Loader2,
   PanelLeftClose,
   PanelLeftOpen,
   Plug,
   RefreshCw,
   Settings as SettingsIcon,
-  Wifi,
-  WifiOff,
   X,
 } from "lucide-react";
 
@@ -39,6 +38,7 @@ import {
   subscribeRefresh,
 } from "./lib/refresh";
 import { AgentPage } from "./components/AgentPage";
+import { AccountPage } from "./components/AccountPage";
 import { BugDetailDrawer } from "./components/BugDetailDrawer";
 import { FolderPicker } from "./components/FolderPicker";
 import { BugListView } from "./components/BugListView";
@@ -49,7 +49,7 @@ import { ScrollingName } from "./components/ScrollingName";
 import { SkeletonRows } from "./components/Skeleton";
 import { Button } from "./components/ui";
 
-type View = "bugs" | "agent" | "mcp" | "settings";
+type View = "bugs" | "agent" | "mcp" | "settings" | "account";
 type Scope = "mine" | "all";
 type Toast = { kind: "ok" | "error"; text: string };
 
@@ -294,15 +294,15 @@ export default function App() {
         .catch(() => 0)
         .finally(() => {
           if (seq !== detailSeq.current) return;
-          // Put the pane in layout first, then flip the transform on the next
-          // frame so the slide-in animates without animating layout widths.
+          // Mount the pane at zero width, then grow it on the next frame so the
+          // width transition runs from a painted starting value.
           setDetailRendered(true);
           window.requestAnimationFrame(() => {
             if (seq === detailSeq.current) setDetailOpen(true);
           });
         });
     } else {
-      // Reopening during the close animation: keep the layout, slide back in.
+      // Reopening during the close animation: grow back from the current width.
       if (detailCloseTimer.current !== null) {
         window.clearTimeout(detailCloseTimer.current);
         detailCloseTimer.current = null;
@@ -342,7 +342,7 @@ export default function App() {
     })();
   }, []);
 
-  /** Slides the pane out, then removes it from layout to free the content area. */
+  /** Shrinks the pane away, then removes it from layout to free the content area. */
   const closeDetail = useCallback(() => {
     detailSeq.current += 1;
     setDetailOpen(false);
@@ -676,13 +676,16 @@ export default function App() {
   );
 
   const handleLogout = () => {
-    if (!window.confirm("退出登录会清除本地 TAPD 会话数据，确定继续吗？")) return;
+    // No `window.confirm` here: WKWebView has no confirm panel delegate in the
+    // Tauri window, so the callback always resolved to `false` and the button
+    // appeared dead. Logging out is reversible (scan the QR again).
     void (async () => {
       try {
         await api.logout();
         setContext(null);
         setWorkspaceId("");
         closeDetail();
+        setView("bugs");
         showToast("ok", "已退出登录");
         await refreshBase();
       } catch (error) {
@@ -850,7 +853,9 @@ export default function App() {
         ? "Agent"
         : view === "mcp"
           ? "MCP"
-          : "设置";
+          : view === "account"
+            ? "账户与会话"
+            : "设置";
   const subtitle =
     view === "bugs"
       ? workspace
@@ -860,7 +865,13 @@ export default function App() {
         ? "运行 opencode、审核权限与查看执行历史"
         : view === "mcp"
           ? "接入 AI 客户端与一键导入 opencode"
-          : "账户、项目与本地数据";
+          : view === "account"
+            ? "登录状态、当前用户与会话窗口"
+            : "项目、通知与 AI 配置";
+
+  const accountName = context?.user.nick || info.me || "TAPD";
+  const accountInitial =
+    Array.from(accountName.trim())[0]?.toUpperCase() ?? "T";
 
   return (
     <div
@@ -907,6 +918,27 @@ export default function App() {
             ))}
           </div>
           <div className="flex-1" data-tauri-drag-region />
+          {/* The user chip lives at the sidebar bottom; when the project list
+              is collapsed it eases into the rail just above Settings. */}
+          <div
+            className={clsx(
+              "grid h-9 w-9 place-items-center transition-all duration-300 ease-out",
+              sidebarHidden
+                ? "translate-y-0 scale-100 opacity-100"
+                : "pointer-events-none translate-y-2 scale-75 opacity-0",
+            )}
+          >
+            <button
+              type="button"
+              title="账户与会话"
+              aria-label="账户与会话"
+              onClick={() => setView("account")}
+              className="relative grid h-8 w-8 place-items-center rounded-full bg-gradient-to-br from-sky-400 to-emerald-400 text-[11px] font-semibold text-white shadow-sm ring-2 ring-white transition hover:brightness-105"
+            >
+              {accountInitial}
+              <span className="absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 rounded-full border-2 border-[#f4f4f2] bg-emerald-500" />
+            </button>
+          </div>
           <button
             type="button"
             title="设置"
@@ -1016,14 +1048,34 @@ export default function App() {
             </div>
           </div>
 
-          <div className="flex items-center gap-2 border-t border-black/[0.06] px-3 py-2.5 text-[11px] text-slate-500">
-            {info.loggedIn ? (
-              <Wifi size={12} className="text-emerald-500" />
-            ) : (
-              <WifiOff size={12} className="text-amber-500" />
+          <button
+            type="button"
+            onClick={() => setView("account")}
+            title="账户与会话"
+            className={clsx(
+              "group flex w-full items-center gap-2.5 border-t border-black/[0.06] px-3 py-2.5 text-left transition",
+              view === "account"
+                ? "bg-black/[0.05]"
+                : "hover:bg-black/[0.035]",
             )}
-            <span className="truncate">{context?.user.nick || info.me || "已登录"}</span>
-          </div>
+          >
+            <span className="relative grid h-7 w-7 shrink-0 place-items-center rounded-full bg-gradient-to-br from-sky-400 to-emerald-400 text-[10px] font-semibold text-white shadow-sm">
+              {accountInitial}
+              <span className="absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 rounded-full border-2 border-[#f4f4f2] bg-emerald-500" />
+            </span>
+            <span className="min-w-0 flex-1">
+              <span className="block truncate text-[12px] font-medium text-slate-700">
+                {context?.user.nick || info.me || "已登录"}
+              </span>
+              <span className="block truncate text-[10px] text-slate-400">
+                {context?.user.company || "账户与会话"}
+              </span>
+            </span>
+            <ChevronRight
+              size={13}
+              className="shrink-0 text-slate-300 transition group-hover:text-slate-500"
+            />
+          </button>
 
           <button
             type="button"
@@ -1120,29 +1172,33 @@ export default function App() {
             <div className="min-h-0 flex-1 overflow-y-auto p-5">
               <McpPage onCopy={copy} toast={showToast} />
             </div>
+          ) : view === "account" ? (
+            <div className="min-h-0 flex-1 overflow-y-auto p-5">
+              <AccountPage
+                info={info}
+                status={status}
+                context={context}
+                onShowLogin={() => {
+                  void api
+                    .sessionShow()
+                    .then(() => showToast("ok", "已打开 TAPD"))
+                    .catch((error) => showToast("error", String(error)));
+                }}
+                onLogout={handleLogout}
+                onRefresh={() => void refreshBase()}
+              />
+            </div>
           ) : (
             <div className="min-h-0 flex-1 overflow-y-auto p-5">
               <SettingsPage
-                  info={info}
-                  status={status}
-                  context={context}
-                  onReloadLogin={() => {
-                    void api
-                      .reloadLogin()
-                      .then(() => showToast("ok", "已重新加载登录页"))
-                      .catch((error) => showToast("error", String(error)));
-                  }}
-                  onLogout={handleLogout}
-                  onRefresh={() => {
-                    void refreshBase();
-                    setRefreshToken((token) => token + 1);
-                  }}
-                  onOpenPath={openPath}
-                  onCopy={(text) => void copy(text)}
-                  hiddenWorkspaceIds={hiddenWorkspaceIds}
-                  onSetWorkspaceVisible={setWorkspaceVisible}
-                  toast={showToast}
-                />
+                info={info}
+                context={context}
+                onOpenPath={openPath}
+                onCopy={(text) => void copy(text)}
+                hiddenWorkspaceIds={hiddenWorkspaceIds}
+                onSetWorkspaceVisible={setWorkspaceVisible}
+                toast={showToast}
+              />
             </div>
           )}
         </main>
@@ -1153,11 +1209,18 @@ export default function App() {
           <div
             aria-hidden={!detailOpen}
             inert={!detailOpen}
-            className="relative h-full shrink-0 overflow-hidden"
-            style={{ width: effectiveDetailWidth }}
+            // Animate the pane's own width instead of sliding it in: the list
+            // beside it shrinks in the same frames, so the shared edge moves as
+            // one piece. The content is pinned to the right edge of the pane so
+            // it is revealed rather than dragged across the screen.
+            className={clsx(
+              "relative flex h-full shrink-0 justify-end overflow-hidden",
+              !resizingDetail && "transition-[width] duration-300 ease-out",
+            )}
+            style={{ width: detailOpen ? effectiveDetailWidth : 0 }}
           >
             <div
-              className="flex h-full flex-col pb-2 pr-2"
+              className="flex h-full shrink-0 flex-col pb-2 pr-2"
               style={{ width: effectiveDetailWidth }}
             >
               <BugDetailDrawer

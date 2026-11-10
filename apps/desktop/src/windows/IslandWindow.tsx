@@ -225,7 +225,7 @@ export function IslandWindow() {
                 ? "单击展开通知 · 双击打开客户端 · 可拖动"
                 : "双击打开客户端 · 可拖动"
           }
-          className="island-pill group flex cursor-grab items-center gap-2 rounded-full bg-slate-900/90 px-3 py-1.5 text-[11px] text-slate-200 shadow-lg shadow-black/25 ring-1 ring-white/10 backdrop-blur-xl transition hover:bg-slate-900/95 active:cursor-grabbing"
+          className="island-pill group flex cursor-grab items-center gap-2 rounded-full bg-slate-900/90 px-3 py-1.5 text-[11px] text-slate-200 ring-1 ring-white/10 backdrop-blur-xl transition hover:bg-slate-900/95 active:cursor-grabbing"
         >
           <StatusDot tone={tone} />
           <span className="font-semibold tracking-wide text-slate-100">TAPD</span>
@@ -254,7 +254,7 @@ export function IslandWindow() {
           return (
             <article
               key={item.id}
-              className="island-expand relative flex min-h-0 flex-1 flex-col rounded-2xl bg-slate-900/92 p-3 shadow-2xl shadow-black/40 ring-1 ring-white/10 backdrop-blur-xl"
+              className="island-expand relative flex min-h-0 flex-1 flex-col rounded-2xl bg-slate-900/92 p-3 ring-1 ring-white/10 backdrop-blur-xl"
             >
               <button
                 type="button"
