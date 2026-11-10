@@ -1,0 +1,10 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "tapd-session",
+  "description": "Allow the hidden TAPD webview to talk to the bridge commands.",
+  "windows": ["tapd-session"],
+  "remote": {
+    "urls": ["https://www.tapd.cn/*", "https://*.tapd.cn/*"]
+  },
+  "permissions": ["core:default"]
+}

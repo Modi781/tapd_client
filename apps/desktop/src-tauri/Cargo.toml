@@ -1,0 +1,31 @@
+[package]
+name = "tapd-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "TAPD enhanced desktop client"
+
+[lib]
+name = "tapd_client_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
+axum = "0.8"
+uuid = { version = "1", features = ["v4"] }
+percent-encoding = "2"
+reqwest = "0.13"
+tapd-core = { path = "../../../crates/tapd-core" }
+
+[features]
+custom-protocol = ["tauri/custom-protocol"]

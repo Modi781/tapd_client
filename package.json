@@ -1,0 +1,14 @@
+{
+  "name": "tapd-client",
+  "private": true,
+  "version": "0.1.0",
+  "description": "TAPD enhanced desktop client with MCP support",
+  "scripts": {
+    "dev": "pnpm -C apps/desktop tauri dev",
+    "build": "pnpm -C apps/desktop tauri build",
+    "typecheck": "pnpm -C apps/desktop typecheck",
+    "check:rust": "cargo check --workspace",
+    "build:mcp": "cargo build -p tapd-mcp",
+    "test:rust": "cargo test --workspace"
+  }
+}

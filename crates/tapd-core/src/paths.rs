@@ -1,0 +1,67 @@
+use std::path::PathBuf;
+
+use serde::{Deserialize, Serialize};
+
+/// All local paths used by the client.
+///
+/// macOS layout:
+/// - data:    ~/Library/Application Support/com.tapdclient.desktop
+/// - exports: ~/Documents/TAPDClient/exports
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppPaths {
+    pub data_dir: PathBuf,
+    pub logs_dir: PathBuf,
+    pub captures_dir: PathBuf,
+    pub exports_dir: PathBuf,
+    pub runtime_file: PathBuf,
+    pub config_file: PathBuf,
+}
+
+impl AppPaths {
+    pub fn resolve() -> std::io::Result<Self> {
+        let home = home_dir()?;
+
+        #[cfg(target_os = "macos")]
+        let data_dir = home.join("Library/Application Support/com.tapdclient.desktop");
+        #[cfg(target_os = "windows")]
+        let data_dir = std::env::var_os("APPDATA")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join("AppData/Roaming"))
+            .join("com.tapdclient.desktop");
+        #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+        let data_dir = home.join(".local/share/com.tapdclient.desktop");
+
+        let logs_dir = data_dir.join("logs");
+        let captures_dir = data_dir.join("captures");
+        let exports_dir = home.join("Documents/TAPDClient/exports");
+        let runtime_file = data_dir.join("runtime.json");
+        let config_file = data_dir.join("config.json");
+
+        for dir in [&data_dir, &logs_dir, &captures_dir, &exports_dir] {
+            std::fs::create_dir_all(dir)?;
+        }
+
+        Ok(Self {
+            data_dir,
+            logs_dir,
+            captures_dir,
+            exports_dir,
+            runtime_file,
+            config_file,
+        })
+    }
+}
+
+fn home_dir() -> std::io::Result<PathBuf> {
+    if let Some(home) = std::env::var_os("HOME") {
+        return Ok(PathBuf::from(home));
+    }
+    if let Some(home) = std::env::var_os("USERPROFILE") {
+        return Ok(PathBuf::from(home));
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::NotFound,
+        "cannot determine home directory",
+    ))
+}
