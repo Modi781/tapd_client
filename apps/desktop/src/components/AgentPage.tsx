@@ -8,10 +8,11 @@ import {
   Bug,
   Check,
   CheckCheck,
+  ExternalLink,
   FolderOpen,
   Loader2,
   RefreshCw,
-  RotateCcw,
+  ScrollText,
   ShieldAlert,
   Square,
   Terminal,
@@ -29,7 +30,7 @@ import {
   type PermissionReply,
 } from "../lib/agent";
 import { AgentHistory } from "./AgentHistory";
-import { AgentTerminal } from "./AgentTerminal";
+import { AgentLogViewer } from "./AgentLogViewer";
 import { Badge, Button } from "./ui";
 
 const ACTIVE_STATUSES: AgentTaskStatus[] = [
@@ -38,7 +39,7 @@ const ACTIVE_STATUSES: AgentTaskStatus[] = [
   "running",
   "waiting_review",
 ];
-const RETRYABLE_STATUSES: AgentTaskStatus[] = ["failed", "canceled", "succeeded"];
+const isActiveStatus = (status: AgentTaskStatus) => ACTIVE_STATUSES.includes(status);
 
 type Props = {
   /** Task selected by the island capsule (`agent://focus`). */
@@ -62,12 +63,16 @@ export function AgentPage({ focusTaskId, onOpenBug, toast }: Props) {
   const [explicitTaskId, setExplicitTaskId] = useState<string | null>(null);
   const [permissionBusy, setPermissionBusy] = useState<PermissionReply | null>(null);
   const [actionBusy, setActionBusy] = useState<string | null>(null);
+  const [logTask, setLogTask] = useState<AgentTask | null>(null);
+  const [resumeBusy, setResumeBusy] = useState<string | null>(null);
 
   const appliedFocusRef = useRef<string | null>(null);
   const focusRefreshRef = useRef<string | null>(null);
 
   const tasks = tasksState?.tasks ?? [];
   const activeTaskId = tasksState?.activeTaskId ?? null;
+  const runTasks = tasks.filter((task) => isActiveStatus(task.status));
+  const historyTasks = tasks.filter((task) => !isActiveStatus(task.status));
 
   const refresh = useCallback(async () => {
     try {
@@ -103,7 +108,8 @@ export function AgentPage({ focusTaskId, onOpenBug, toast }: Props) {
     setExplicitTaskId(null);
   }, [activeTaskId]);
 
-  // Follow the island capsule's focus request.
+  // Follow the island capsule's focus request. Terminal tasks belong to the
+  // history tab; active/queued ones to the run tab.
   useEffect(() => {
     if (!focusTaskId) {
       appliedFocusRef.current = null;
@@ -112,10 +118,15 @@ export function AgentPage({ focusTaskId, onOpenBug, toast }: Props) {
     }
     if (appliedFocusRef.current === focusTaskId) return;
 
-    if (tasksState?.tasks.some((task) => task.id === focusTaskId)) {
+    const focused = tasksState?.tasks.find((task) => task.id === focusTaskId);
+    if (focused) {
       appliedFocusRef.current = focusTaskId;
-      setExplicitTaskId(focusTaskId);
-      setTab("run");
+      if (isActiveStatus(focused.status)) {
+        setExplicitTaskId(focusTaskId);
+        setTab("run");
+      } else {
+        setTab("history");
+      }
       return;
     }
 
@@ -126,19 +137,26 @@ export function AgentPage({ focusTaskId, onOpenBug, toast }: Props) {
     }
   }, [focusTaskId, tasksState, refresh]);
 
-  // Prefer a pending permission prompt, then the active task, then the newest.
-  const reviewTask = tasks.find(
+  // Prefer a pending permission prompt, then the active task, then the first
+  // queued task. Terminal tasks never leak into the run tab.
+  const reviewTask = runTasks.find(
     (task) => task.status === "waiting_review" && task.review,
   );
   const selectedId =
-    (explicitTaskId && tasks.some((task) => task.id === explicitTaskId)
+    (explicitTaskId && runTasks.some((task) => task.id === explicitTaskId)
       ? explicitTaskId
       : null) ??
     reviewTask?.id ??
-    activeTaskId ??
-    tasks[tasks.length - 1]?.id ??
+    (activeTaskId && runTasks.some((task) => task.id === activeTaskId)
+      ? activeTaskId
+      : null) ??
+    runTasks[0]?.id ??
     null;
-  const runTask = tasks.find((task) => task.id === selectedId) ?? null;
+  const runTask = runTasks.find((task) => task.id === selectedId) ?? null;
+  /** The PTY log file exists once the TUI is actually running. */
+  const logReady =
+    runTask !== null &&
+    (runTask.status === "running" || runTask.status === "waiting_review");
 
   const counts = useMemo(() => {
     const queued =
@@ -154,7 +172,7 @@ export function AgentPage({ focusTaskId, onOpenBug, toast }: Props) {
     return { queued, active, waiting };
   }, [tasksState, tasks]);
 
-  const queuedTasks = tasks.filter((task) => task.status === "queued");
+  const queuedTasks = runTasks.filter((task) => task.status === "queued");
 
   const runAction = useCallback(
     async (key: string, action: () => Promise<unknown>, okMessage: string) => {
@@ -205,8 +223,23 @@ export function AgentPage({ focusTaskId, onOpenBug, toast }: Props) {
     );
   };
 
+  const resumeSession = async (task: AgentTask) => {
+    if (!task.sessionId) {
+      toast("error", "该任务还没有 opencode 会话 ID");
+      return;
+    }
+    setResumeBusy(task.id);
+    try {
+      await agentApi.openSession(task.id);
+      toast("ok", "已在 Terminal 中恢复该会话");
+    } catch (error) {
+      toast("error", String(error));
+    } finally {
+      setResumeBusy(null);
+    }
+  };
+
   const canCancel = runTask !== null && ACTIVE_STATUSES.includes(runTask.status);
-  const canRetry = runTask !== null && RETRYABLE_STATUSES.includes(runTask.status);
 
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-3 p-4 pt-2.5">
@@ -249,7 +282,12 @@ export function AgentPage({ focusTaskId, onOpenBug, toast }: Props) {
       </div>
 
       {tab === "history" ? (
-        <AgentHistory tasks={tasks} onOpenBug={onOpenBug} toast={toast} />
+        <AgentHistory
+          tasks={historyTasks}
+          focusTaskId={focusTaskId}
+          onOpenBug={onOpenBug}
+          toast={toast}
+        />
       ) : (
         <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
           {!loaded ? (
@@ -264,10 +302,10 @@ export function AgentPage({ focusTaskId, onOpenBug, toast }: Props) {
                   <Bot size={22} />
                 </div>
                 <h3 className="mt-3 text-sm font-semibold text-slate-800">
-                  还没有 Agent 任务
+                  当前没有运行中的任务
                 </h3>
                 <p className="mt-1 text-xs leading-5 text-slate-500">
-                  在缺陷详情点击「用 Agent 修复」，任务会自动开始并在这里显示终端。
+                  在缺陷详情点击「用 Agent 修复」后，任务会出现在这里；已结束的任务在「历史」中查看日志或恢复会话。
                 </p>
               </div>
             </div>
@@ -337,17 +375,26 @@ export function AgentPage({ focusTaskId, onOpenBug, toast }: Props) {
                     <Button
                       size="sm"
                       variant="secondary"
-                      icon={<RotateCcw size={11} />}
-                      disabled={!canRetry || actionBusy !== null}
-                      onClick={() =>
-                        void runAction(
-                          `retry:${runTask.id}`,
-                          () => agentApi.retry(runTask.id),
-                          "已重新加入队列",
+                      icon={<ScrollText size={11} />}
+                      disabled={!logReady}
+                      onClick={() => setLogTask(runTask)}
+                    >
+                      查看日志
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      icon={
+                        resumeBusy === runTask.id ? (
+                          <Loader2 size={11} className="animate-spin" />
+                        ) : (
+                          <ExternalLink size={11} />
                         )
                       }
+                      disabled={!runTask.sessionId || resumeBusy !== null}
+                      onClick={() => void resumeSession(runTask)}
                     >
-                      重试
+                      终端恢复
                     </Button>
                     <Button
                       size="sm"
@@ -492,13 +539,62 @@ export function AgentPage({ focusTaskId, onOpenBug, toast }: Props) {
                 </div>
               ) : null}
 
-              <div className="relative min-h-0 flex-1 bg-zinc-950">
-                <AgentTerminal taskId={runTask.id} />
+              <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 overflow-y-auto bg-slate-50/70 p-6 text-center">
+                <div className="grid h-12 w-12 place-items-center rounded-2xl bg-slate-900 text-sky-300">
+                  <Terminal size={22} />
+                </div>
+                <div>
+                  <p className="text-sm font-medium text-slate-700">
+                    {runTask.status === "queued" || runTask.status === "preparing"
+                      ? "任务尚未开始"
+                      : "终端输出已写入日志"}
+                  </p>
+                  <p className="mt-1 max-w-md text-[11px] leading-5 text-slate-500">
+                    {runTask.status === "queued" || runTask.status === "preparing"
+                      ? "任务开始后，opencode 的 IO 输出会写入本地日志；可在此查看日志或在 Terminal 中恢复会话。"
+                      : "界面不再渲染 TUI，避免 ANSI/换行被终端宽度破坏。可以查看保留换行的日志，或在 Terminal 中恢复这个 opencode 会话继续操作。"}
+                  </p>
+                  <p className="mt-2 break-all font-mono text-[10px] text-slate-400">
+                    {runTask.logPath}
+                  </p>
+                </div>
+                <div className="flex flex-wrap justify-center gap-2">
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    icon={<ScrollText size={12} />}
+                    disabled={!logReady}
+                    onClick={() => setLogTask(runTask)}
+                  >
+                    查看日志
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="primary"
+                    icon={
+                      resumeBusy === runTask.id ? (
+                        <Loader2 size={12} className="animate-spin" />
+                      ) : (
+                        <ExternalLink size={12} />
+                      )
+                    }
+                    disabled={!runTask.sessionId || resumeBusy !== null}
+                    onClick={() => void resumeSession(runTask)}
+                  >
+                    终端恢复
+                  </Button>
+                </div>
               </div>
             </>
           )}
         </div>
       )}
+
+      <AgentLogViewer
+        task={logTask}
+        onClose={() => setLogTask(null)}
+        toast={toast}
+      />
     </div>
   );
 }

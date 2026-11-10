@@ -22,6 +22,7 @@ export type AppInfo = {
   mediaPort: number | null;
   mediaToken: string | null;
   sessionUrl: string | null;
+  hiddenWorkspaceIds: string[];
 };
 
 export type SessionStatus = {
@@ -290,6 +291,8 @@ export const api = {
     invoke<number>("ensure_window_width", { minWidth }),
   setLastWorkspace: (workspaceId: string) =>
     invoke<void>("set_last_workspace", { workspaceId }),
+  setHiddenWorkspaces: (ids: string[]) =>
+    invoke<void>("set_hidden_workspaces", { ids }),
   mcpConfig: () => invoke<McpConfigInfo>("mcp_config"),
 };
 

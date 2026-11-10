@@ -48,6 +48,7 @@ pub struct AppInfo {
     media_port: Option<u16>,
     media_token: Option<String>,
     session_url: Option<String>,
+    hidden_workspace_ids: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -74,6 +75,7 @@ pub fn app_info(state: State<'_, SharedState>) -> AppInfo {
         media_port: runtime.as_ref().map(|runtime| runtime.port),
         media_token: runtime.map(|runtime| runtime.media_token),
         session_url: config.last_session_url,
+        hidden_workspace_ids: config.hidden_workspace_ids,
     }
 }
 
@@ -537,6 +539,26 @@ pub fn set_current_user(
         if !trimmed.is_empty() {
             config.me = Some(trimmed.to_string());
         }
+        config.clone()
+    };
+    state.save_config(&snapshot).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn set_hidden_workspaces(
+    state: State<'_, SharedState>,
+    ids: Vec<String>,
+) -> Result<(), String> {
+    let mut normalized: Vec<String> = Vec::new();
+    for id in ids {
+        let id = id.trim().to_string();
+        if !id.is_empty() && !normalized.contains(&id) {
+            normalized.push(id);
+        }
+    }
+    let snapshot = {
+        let mut config = state.config.lock().expect("config lock");
+        config.hidden_workspace_ids = normalized;
         config.clone()
     };
     state.save_config(&snapshot).map_err(|error| error.to_string())

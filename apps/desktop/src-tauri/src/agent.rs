@@ -244,6 +244,10 @@ pub struct AgentTask {
     pub error: Option<String>,
     pub prompt: String,
     pub source: String,
+    /// opencode session id, learned from the server event stream. Persisted so
+    /// history rows can reopen the conversation in a real terminal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
     /// Pending opencode permission ask; present while `status` is
     /// `waiting_review`. Absent in older persisted files (hence `default`).
     #[serde(default)]
@@ -801,6 +805,8 @@ impl AgentCore {
         if let Err(error) = write_json_atomic(&self.tasks_path(), &file) {
             tracing::warn!(%error, "failed to persist agent tasks");
         }
+        // Relational mirror (task <-> bug/session/log) for history queries.
+        self.state.cache.replace_agent_tasks(&file.tasks);
     }
 
     fn tasks_state(&self) -> AgentTasksState {
@@ -972,6 +978,7 @@ impl AgentCore {
             error: None,
             prompt: String::new(),
             source: source.to_string(),
+            session_id: None,
             review: None,
         };
 
@@ -1121,6 +1128,18 @@ impl AgentCore {
         {
             state.session_id = Some(session_id.to_string());
         }
+
+        // Persist the relation on the task so history can reopen the session.
+        self.mutate_tasks(|tasks| {
+            let Some(task) = tasks.iter_mut().find(|task| task.id == task_id) else {
+                return false;
+            };
+            if task.session_id.as_deref() == Some(session_id) {
+                return false;
+            }
+            task.session_id = Some(session_id.to_string());
+            true
+        });
     }
 
     /// Marks a task succeeded from a turn-boundary event. Returns whether the
@@ -1354,6 +1373,7 @@ impl AgentCore {
         task.exit_code = None;
         task.error = None;
         task.review = None;
+        task.session_id = None;
         task.log_path = self.logs_dir().join(format!("{id}.log")).to_string_lossy().to_string();
 
         self.tasks
@@ -1377,6 +1397,24 @@ impl AgentCore {
             &bytes[..]
         };
         Ok(String::from_utf8_lossy(slice).to_string())
+    }
+
+    /// Opens the task's opencode session in Terminal.app, in its repository.
+    fn open_session(&self, task_id: &str) -> Result<(), String> {
+        let task = self
+            .task_snapshot(task_id)
+            .ok_or_else(|| "任务不存在".to_string())?;
+        let session_id = task
+            .session_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| "该任务还没有 opencode 会话 ID，无法恢复".to_string())?;
+        if !Path::new(&task.repo_path).is_dir() {
+            return Err(format!("仓库路径不存在：{}", task.repo_path));
+        }
+        let binary = self.config_snapshot().binary_path;
+        open_terminal_session(&binary, &task.repo_path, session_id)
     }
 
     fn write_input(&self, task_id: &str, data: &str) -> Result<(), String> {
@@ -2117,6 +2155,44 @@ fn is_opencode_binary(binary: &str) -> bool {
         .contains("opencode")
 }
 
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+/// Opens Terminal.app on `opencode -s <session>` inside the task repository.
+#[cfg(target_os = "macos")]
+fn open_terminal_session(binary: &str, repo_path: &str, session_id: &str) -> Result<(), String> {
+    let command = format!(
+        "cd {} && {} -s {}",
+        shell_quote(repo_path),
+        shell_quote(binary),
+        shell_quote(session_id)
+    );
+    let escaped = command.replace('\\', "\\\\").replace('"', "\\\"");
+    let script = format!(
+        "tell application \"Terminal\"\nactivate\ndo script \"{escaped}\"\nend tell"
+    );
+    let status = std::process::Command::new("osascript")
+        .arg("-e")
+        .arg(script)
+        .status()
+        .map_err(|error| format!("无法启动 Terminal：{error}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err("Terminal 拒绝了恢复会话的请求".to_string())
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn open_terminal_session(
+    _binary: &str,
+    _repo_path: &str,
+    _session_id: &str,
+) -> Result<(), String> {
+    Err("终端恢复目前仅支持 macOS".to_string())
+}
+
 fn detect_version(binary: &str) -> Result<String, String> {
     let binary = binary.trim();
     if binary.is_empty() {
@@ -2272,6 +2348,12 @@ pub async fn command(
             let data = core.read_log(request.task_id.trim())?;
             Ok(json!({ "data": data }))
         }
+        "agent_open_session" => {
+            let request: TaskIdRequest = serde_json::from_value(payload)
+                .map_err(|error| format!("无效的恢复参数：{error}"))?;
+            core.open_session(request.task_id.trim())?;
+            Ok(json!({ "opened": true }))
+        }
         "agent_input" => {
             let request: TaskInputRequest = serde_json::from_value(payload)
                 .map_err(|error| format!("无效的输入参数：{error}"))?;
@@ -2326,6 +2408,7 @@ mod tests {
             error: None,
             prompt: "prompt".to_string(),
             source: "manual".to_string(),
+            session_id: None,
             review: None,
         }
     }

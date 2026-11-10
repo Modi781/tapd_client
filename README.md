@@ -4,7 +4,7 @@
 
 Tauri 2 桌面客户端：复用 TAPD 网页登录态，重建缺陷视图，支持按处理人/状态筛选、缺陷详情、MD 导出、可配置的新缺陷通知与 opencode 修复队列，并通过 MCP 服务把缺陷交给 AI：查询、详情、导出，以及修复后的评论与状态回写（已在 opencode v2.0.29 验证）。
 
-当前进度：**M0–M8 已完成**：`tapd-mcp` sidecar 随 App 打包，`release` 分支（由 `main` 合并进入）由 GitHub Actions 生成 arm64 dmg；SQLite 离线缓存、Agent tab（内嵌终端 / 审核 / 历史）与 MCP tab 已接入。
+当前进度：**M0–M8 已完成**：`tapd-mcp` sidecar 随 App 打包，`release` 分支（由 `main` 合并进入）由 GitHub Actions 生成 arm64 dmg；SQLite 离线缓存、Agent tab（运行 / 审核 / 历史）与 MCP tab 已接入。
 
 - 完整计划：[docs/PLAN.md](docs/PLAN.md)
 - 接口验证：[docs/spike.md](docs/spike.md)
@@ -19,7 +19,7 @@ Tauri 2 桌面客户端：复用 TAPD 网页登录态，重建缺陷视图，支
 - 项目切换（默认上次项目）、我的/全部缺陷、状态/优先级/严重程度/关键词筛选、分页。
 - 离线优先：项目列表、缺陷列表与详情先渲染 SQLite 缓存（`cache.sqlite3`），再后台刷新；只有首次登录且无缓存时显示骨架屏。刷新期间标题栏居中显示「更新中」。
 - 缺陷表格：各列有最小宽度，窗口变窄时表格横向滚动；「操作」列固定在右侧（查看详情 / 在 TAPD 打开 / 复制链接 / Agent 修复）。
-- 主窗口外壳：无系统标题栏（macOS Overlay），左侧图标栏 + 可拖拽项目栏 + 浮起的白色内容面板；项目栏拖到最小宽度以下会自动收起，标题栏按钮可随时展开。
+- 主窗口外壳：无系统标题栏（macOS Overlay），左侧图标栏 + 可拖拽项目栏 + 浮起的白色内容面板；项目栏默认宽度更紧凑，拖到最小宽度以下或窗口过窄时自动收起。项目名超出时 hover 原地滚动；右键可本地隐藏项目，只剩一个项目时自动隐藏整个项目栏（可在设置 → 项目中恢复）。
 - 缺陷详情右侧面板：Codex 风格的第三列（非遮罩抽屉），从右侧滑入并与内容区并排，左缘可拖动调整宽度；窗口过窄时先自动收起项目列表，仍不够再向左扩张。打开详情只刷新这一条缺陷，不会触发列表刷新或标题栏「更新中」。顶部只有关闭按钮、底部固定操作、中间内容滚动，打开面板后标题栏仍可拖动窗口。内容含基本信息、描述、资源（附件 + 描述/评论内嵌图片视频，带缩略图）、变更记录、评论、自定义字段，可直接跳转 TAPD。
 - 资源查看：资源行有独立的「预览」按钮（缩放 / 左右切换 / 底部居中缩略图条 / Esc 关闭，图片与视频），「打开」按钮按已选的默认应用打开，下拉只负责切换默认应用。
 - 顶部状态胶囊：常驻胶囊展示通知状态；Agent 运行时切换为「Agent 运行中」，等待权限确认时变为「Agent 待审核」，空闲时不显示 Agent 状态。可拖动并记住位置，单击展开通知 / 打开 Agent 任务、双击打开主窗口。
@@ -27,8 +27,8 @@ Tauri 2 桌面客户端：复用 TAPD 网页登录态，重建缺陷视图，支
 - MD 导出：`bug.md` + `assets/` + `bug.json`，含 frontmatter、描述、资源（附件 + 内嵌）、变更记录、评论；视频/图片/日志按需下载。
 - 新缺陷通知：自绘弹窗（处理 / 查看 / 忽略），支持范围（我的/项目）、类型（新建/转移/重新打开）、轮询、免打扰、模拟通知。
 - 处理动作：自动改派给自己，并把起始状态流转到处理中（`in_progress` / `progressing`），成功后进入 Agent 队列。
-- Agent tab：内嵌 opencode TUI（不再是独立窗口），严格串行队列、自动注入 prompt、取消/重试；等待审核时可直接在 tab 或胶囊里「允许一次 / 总是允许 / 拒绝」。历史子页可筛选执行记录、查看 opencode 日志；「打开缺陷」只切换右侧详情面板，不跳转列表。
-- Agent 运行时：每个任务启动私有 `opencode serve`，TUI 通过 `--server` 连接；Rust 订阅 `/event` 判断轮次完成与权限请求，完成后自动回收进程并继续队列。
+- Agent tab：运行栏只显示排队/运行/待审核任务，结束或取消的任务自动进入历史；不再内嵌 TUI，opencode 的 IO 输出写入日志文件，可「查看日志」（保留换行）或「终端恢复」（`opencode -s <session>` 打开 Terminal）。等待审核时可直接在 tab 或胶囊里「允许一次 / 总是允许 / 拒绝」。
+- Agent 运行时：每个任务启动私有 `opencode serve`，TUI 通过 `--server` 连接；Rust 订阅 `/event` 判断轮次完成与权限请求，完成后自动回收进程并继续队列。任务与 bug/session/日志关系同步写入 SQLite `agent_tasks` 表。
 - 项目级配置：每个项目的本地文件夹与「项目规则」写在自己的项目卡片里（文件夹可拖入或点「选择」打开目录选择器，改动失焦即保存）；Agent 区只放 agent 参数，默认提示词模板自带 `{{project_rule}}` 段落；未配置目录时点 Agent 修复会先要求选择目录，选完自动继续入队。
 - MCP tab：9 个工具（whoami / 项目 / 查询 / 我的缺陷 / 详情 / 导出 / 状态查询 / 评论 / 状态更新）；「一键导入 opencode」会把 sidecar 合并进 opencode 全局配置（自动备份），之后启动 Agent 时也会幂等确保注入；另附 Claude Code / Cursor / Codex 接入教程。
 - 本地回环 API：随机端口 + 每次启动轮换 token，`runtime.json` 0600。
@@ -66,7 +66,7 @@ opencode mcp list     # ✓ tapd connected
 5. 设置 → Agent：填写 opencode 路径与当前项目仓库路径。
 6. 设置 → 新缺陷通知：选择范围（我的/项目）与是否包含转移、重新打开。
 7. 打开 MCP tab →「一键导入 opencode」，后续启动 Agent 会自动确保注入。
-8. Agent tab：运行中查看内嵌终端与队列；「待审核」时在 tab 或胶囊里批准/拒绝；历史子页查看执行记录与日志。
+8. Agent tab：运行栏查看当前任务；「待审核」时在 tab 或胶囊里批准/拒绝；历史子页查看执行记录、日志，或在 Terminal 恢复会话。
 
 ## 目录结构
 
@@ -97,7 +97,7 @@ scripts/                 图标、sidecar 等本地/CI 构建工具
 - 数据目录：`~/Library/Application Support/com.tapdclient.desktop`
 - 日志：`<数据目录>/logs/`
 - 通知状态：`<数据目录>/notifications.json`
-- 离线缓存：`<数据目录>/cache.sqlite3`（退出登录时清空）
+- 离线缓存：`<数据目录>/cache.sqlite3`（项目/缺陷快照 + `agent_tasks` 关系表；退出登录时清空 TAPD 数据）
 - Agent 配置/任务/日志：`agent.json`、`agent-tasks.json`、`agent-logs/`、`agent-events/`
 - 抓包导出：`<数据目录>/captures/`
 - 缺陷导出：`~/Documents/TAPDClient/exports/<项目>-<id>/<缺陷>-<slug>/`

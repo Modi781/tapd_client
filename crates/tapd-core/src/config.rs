@@ -30,6 +30,8 @@ pub struct AppConfig {
     /// Where the user dragged the status capsule: physical pixels of the
     /// island's (centre x, top y). `None` = top-centre default.
     pub island_anchor: Option<(i32, i32)>,
+    /// TAPD workspaces hidden from the left project list (local preference).
+    pub hidden_workspace_ids: Vec<String>,
 }
 
 impl Default for AppConfig {
@@ -45,6 +47,7 @@ impl Default for AppConfig {
             device_name: None,
             open_with: BTreeMap::new(),
             island_anchor: None,
+            hidden_workspace_ids: Vec::new(),
         }
     }
 }

@@ -60,38 +60,72 @@ impl Cache {
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .map_err(|error| error.to_string())?;
-        if version >= 1 {
-            return Ok(());
+
+        if version < 1 {
+            conn.execute_batch(
+                r#"
+                CREATE TABLE IF NOT EXISTS snapshots (
+                    kind TEXT NOT NULL,
+                    key TEXT NOT NULL,
+                    payload TEXT NOT NULL,
+                    fetched_at INTEGER NOT NULL,
+                    PRIMARY KEY (kind, key)
+                );
+
+                CREATE TABLE IF NOT EXISTS bugs (
+                    workspace_id TEXT NOT NULL,
+                    bug_id TEXT NOT NULL,
+                    title TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT '',
+                    modified TEXT NOT NULL DEFAULT '',
+                    raw TEXT NOT NULL,
+                    updated_at INTEGER NOT NULL,
+                    PRIMARY KEY (workspace_id, bug_id)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_bugs_workspace_modified
+                    ON bugs (workspace_id, modified DESC);
+                "#,
+            )
+            .map_err(|error| error.to_string())?;
         }
 
-        conn.execute_batch(
-            r#"
-            CREATE TABLE IF NOT EXISTS snapshots (
-                kind TEXT NOT NULL,
-                key TEXT NOT NULL,
-                payload TEXT NOT NULL,
-                fetched_at INTEGER NOT NULL,
-                PRIMARY KEY (kind, key)
-            );
+        if version < 2 {
+            // Relational mirror of agent tasks: bug <-> task <-> session/log.
+            conn.execute_batch(
+                r#"
+                CREATE TABLE IF NOT EXISTS agent_tasks (
+                    id TEXT PRIMARY KEY,
+                    workspace_id TEXT NOT NULL,
+                    workspace_name TEXT NOT NULL DEFAULT '',
+                    bug_id TEXT NOT NULL,
+                    title TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL,
+                    session_id TEXT,
+                    repo_path TEXT NOT NULL DEFAULT '',
+                    log_path TEXT NOT NULL DEFAULT '',
+                    md_path TEXT NOT NULL DEFAULT '',
+                    source TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL DEFAULT '',
+                    started_at TEXT,
+                    finished_at TEXT,
+                    exit_code INTEGER,
+                    error TEXT,
+                    updated_at INTEGER NOT NULL
+                );
 
-            CREATE TABLE IF NOT EXISTS bugs (
-                workspace_id TEXT NOT NULL,
-                bug_id TEXT NOT NULL,
-                title TEXT NOT NULL DEFAULT '',
-                status TEXT NOT NULL DEFAULT '',
-                modified TEXT NOT NULL DEFAULT '',
-                raw TEXT NOT NULL,
-                updated_at INTEGER NOT NULL,
-                PRIMARY KEY (workspace_id, bug_id)
-            );
+                CREATE INDEX IF NOT EXISTS idx_agent_tasks_bug
+                    ON agent_tasks (workspace_id, bug_id);
+                CREATE INDEX IF NOT EXISTS idx_agent_tasks_session
+                    ON agent_tasks (session_id);
+                "#,
+            )
+            .map_err(|error| error.to_string())?;
+            conn.pragma_update(None, "user_version", 2)
+                .map_err(|error| error.to_string())?;
+        }
 
-            CREATE INDEX IF NOT EXISTS idx_bugs_workspace_modified
-                ON bugs (workspace_id, modified DESC);
-
-            PRAGMA user_version = 1;
-            "#,
-        )
-        .map_err(|error| error.to_string())
+        Ok(())
     }
 
     pub fn get(&self, kind: &str, key: &str) -> Option<(String, i64)> {
@@ -200,6 +234,69 @@ impl Cache {
                 ],
             ) {
                 tracing::warn!(%error, bug_id = %bug.id, "failed to cache bug record");
+            }
+        }
+    }
+
+    /// Mirrors the agent task list into SQLite so bug/task/session/log
+    /// relationships survive independently of `agent-tasks.json`.
+    pub fn replace_agent_tasks(&self, tasks: &[crate::agent::AgentTask]) {
+        let guard = self.conn.lock().expect("cache lock");
+        let Some(conn) = guard.as_ref() else {
+            return;
+        };
+        let updated_at = unix_now();
+        for task in tasks {
+            let status = match serde_json::to_value(&task.status) {
+                Ok(Value::String(value)) => value,
+                _ => continue,
+            };
+            if let Err(error) = conn.execute(
+                "INSERT INTO agent_tasks (
+                    id, workspace_id, workspace_name, bug_id, title, status,
+                    session_id, repo_path, log_path, md_path, source, created_at,
+                    started_at, finished_at, exit_code, error, updated_at
+                 ) VALUES (
+                    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17
+                 )
+                 ON CONFLICT(id) DO UPDATE SET
+                    workspace_id = excluded.workspace_id,
+                    workspace_name = excluded.workspace_name,
+                    bug_id = excluded.bug_id,
+                    title = excluded.title,
+                    status = excluded.status,
+                    session_id = excluded.session_id,
+                    repo_path = excluded.repo_path,
+                    log_path = excluded.log_path,
+                    md_path = excluded.md_path,
+                    source = excluded.source,
+                    created_at = excluded.created_at,
+                    started_at = excluded.started_at,
+                    finished_at = excluded.finished_at,
+                    exit_code = excluded.exit_code,
+                    error = excluded.error,
+                    updated_at = excluded.updated_at",
+                params![
+                    task.id,
+                    task.workspace_id,
+                    task.workspace_name,
+                    task.bug_id,
+                    task.title,
+                    status,
+                    task.session_id,
+                    task.repo_path,
+                    task.log_path,
+                    task.md_path,
+                    task.source,
+                    task.created_at,
+                    task.started_at,
+                    task.finished_at,
+                    task.exit_code,
+                    task.error,
+                    updated_at
+                ],
+            ) {
+                tracing::warn!(%error, task_id = %task.id, "failed to mirror agent task");
             }
         }
     }
@@ -492,5 +589,45 @@ mod tests {
         assert_eq!(page.total, 2);
         assert_eq!(page.bugs.len(), 1);
         assert_eq!(page.bugs[0].id, "1");
+    }
+
+    #[test]
+    fn mirrors_agent_task_relations() {
+        let cache = temp_cache();
+        let task = crate::agent::AgentTask {
+            id: "task-1".to_string(),
+            workspace_id: "ws".to_string(),
+            workspace_name: "WS".to_string(),
+            bug_id: "bug-1".to_string(),
+            title: "bug title".to_string(),
+            severity: "严重".to_string(),
+            priority: "高".to_string(),
+            md_path: "/tmp/bug.md".to_string(),
+            repo_path: "/tmp/repo".to_string(),
+            status: crate::agent::TaskStatus::Succeeded,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            started_at: None,
+            finished_at: None,
+            exit_code: Some(0),
+            log_path: "/tmp/task.log".to_string(),
+            error: None,
+            prompt: "prompt".to_string(),
+            source: "manual".to_string(),
+            session_id: Some("ses_1".to_string()),
+            review: None,
+        };
+        cache.replace_agent_tasks(&[task]);
+
+        let guard = cache.conn.lock().expect("cache lock");
+        let conn = guard.as_ref().expect("cache connection");
+        let (status, session): (String, String) = conn
+            .query_row(
+                "SELECT status, session_id FROM agent_tasks WHERE id = 'task-1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("mirrored row");
+        assert_eq!(status, "succeeded");
+        assert_eq!(session, "ses_1");
     }
 }

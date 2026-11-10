@@ -60,6 +60,7 @@ pub fn run() {
             commands::mcp_config,
             feature_router::feature_command,
             commands::set_last_workspace,
+            commands::set_hidden_workspaces,
             commands::capture_snapshot,
             commands::capture_clear,
             commands::capture_export,

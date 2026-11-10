@@ -1,6 +1,6 @@
 # Agent 修复队列
 
-把「处理缺陷」接到 opencode：导出 Markdown → 串行队列 → PTY 中启动 opencode TUI → 自动注入修复任务 → 在 Agent tab 内嵌终端实时查看/接管；同时通过私有 `opencode serve` 事件流判断完成与权限审核。
+把「处理缺陷」接到 opencode：导出 Markdown → 串行队列 → PTY 中启动 opencode TUI → 自动注入修复任务 → 输出写入日志（可查看或在 Terminal 恢复会话）；同时通过私有 `opencode serve` 事件流判断完成与权限审核。
 
 ## 1. 配置
 
@@ -37,17 +37,18 @@
 
 ## 3. Agent tab
 
-- 「运行」子页：内嵌 xterm 终端（不再是独立窗口），键盘输入直通 PTY，容器尺寸变化会同步 cols/rows。
+- 「运行」子页只显示 `queued / preparing / running / waiting_review` 任务；结束或取消的任务立即移出，空闲时显示空状态。界面不再内嵌 TUI/xterm。
 - 头部显示任务标题、状态、项目/缺陷、仓库路径、队列/运行/待审核数量与退出码。
-- 操作：中断（进程组 kill）、重试（新建任务）、打开导出目录、打开关联缺陷。
-- 权限审核：opencode 发出权限请求时状态变为 `waiting_review`，终端上方出现「允许一次 / 总是允许 / 拒绝」，回复走 `POST /session/{id}/permissions/{pid}`；顶部胶囊同时变为「Agent 待审核」。
-- 输出实时写入 `agent-logs/<taskId>.log`；切换任务会回放日志尾部。
+- 操作：中断、查看日志、终端恢复、打开导出目录、打开关联缺陷。
+- 日志：PTY 的 IO 输出写入 `agent-logs/<taskId>.log`；「查看日志」用等宽 `<pre>` 展示，ANSI 清洗但保留换行。也可在 Terminal 中执行 `opencode -s <sessionId>` 恢复会话。
+- 权限审核：opencode 发出权限请求时状态变为 `waiting_review`，面板上方出现「允许一次 / 总是允许 / 拒绝」，回复走 `POST /session/{id}/permissions/{pid}`；顶部胶囊同时变为「Agent 待审核」。
 
 ## 4. 任务、历史与恢复
 
 - 文件：`agent-tasks.json`（任务）、`agent-logs/`（TUI 与服务日志）、`agent-events/`（server 事件 JSONL，用于版本适配排障）。
+- SQLite：`cache.sqlite3` 的 `agent_tasks` 表镜像任务关系（workspace / bug / session / log / 状态 / 时间），独立于 JSON 持久化。
 - 状态：`queued | preparing | running | waiting_review | succeeded | failed | canceled`
-- 「历史」子页：按项目 / 状态 / 关键词筛选执行记录，查看错误、prompt、退出码、日志尾部；「打开缺陷」只在右侧详情面板展开/切换该缺陷，不跳转项目缺陷列表。
+- 「历史」子页只展示终态任务，按项目 / 终态 / 关键词筛选；查看错误、prompt、退出码、会话 ID，可「查看日志」「终端恢复」「重试」。「打开缺陷」只在右侧详情面板展开/切换该缺陷，不跳转项目缺陷列表。
 - 客户端重启时，遗留的 `preparing/running/waiting_review` 会标记为 failed（“客户端重启”），`queued` 任务继续执行。
 - 取消会先尝试 `POST /session/{id}/abort`，再 kill TUI + server 进程组；开放的其他子进程仍可能残留。
 

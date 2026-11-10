@@ -24,11 +24,25 @@ type Props = {
   onRefresh: () => void;
   onOpenPath: (path: string) => void;
   onCopy: (text: string) => void;
+  hiddenWorkspaceIds: string[];
+  onSetWorkspaceVisible: (id: string, visible: boolean) => void;
   toast: SettingsSectionProps["toast"];
 };
 
 export function SettingsPage(props: Props) {
-  const { info, status, context, onShowLogin, onLogout, onRefresh, onOpenPath, onCopy, toast } = props;
+  const {
+    info,
+    status,
+    context,
+    onShowLogin,
+    onLogout,
+    onRefresh,
+    onOpenPath,
+    onCopy,
+    hiddenWorkspaceIds,
+    onSetWorkspaceVisible,
+    toast,
+  } = props;
 
   const paths: Array<[string, string]> = info
     ? [
@@ -79,7 +93,12 @@ export function SettingsPage(props: Props) {
         </div>
       </section>
 
-      <ProjectSettings context={context} toast={toast} />
+      <ProjectSettings
+        context={context}
+        hiddenWorkspaceIds={hiddenWorkspaceIds}
+        onSetWorkspaceVisible={onSetWorkspaceVisible}
+        toast={toast}
+      />
 
       <NotificationSettings toast={toast} />
 

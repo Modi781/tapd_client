@@ -54,6 +54,8 @@ export type AgentTask = {
   error?: string;
   prompt: string;
   source: string;
+  /** opencode session id, used to reopen the conversation in a terminal. */
+  sessionId?: string;
   /** Present while the agent waits for a permission decision. */
   review?: AgentReviewRequest | null;
 };
@@ -131,6 +133,9 @@ export const agentApi = {
     featureCommand<{ task: AgentTask }>("agent_task_retry", { taskId }),
   taskLog: (taskId: string) =>
     featureCommand<{ data: string }>("agent_task_log", { taskId }),
+  /** Reopen this task's opencode session in Terminal.app. */
+  openSession: (taskId: string) =>
+    featureCommand<{ opened: boolean }>("agent_open_session", { taskId }),
   /** Focus the main window and select this task in the Agent tab. */
   openTask: (taskId: string) =>
     featureCommand<{ opened: boolean }>("agent_open_task", { taskId }),

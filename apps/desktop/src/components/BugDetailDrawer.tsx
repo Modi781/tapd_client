@@ -211,8 +211,8 @@ function BugDetailDrawerImpl(props: Props) {
       <aside
         aria-hidden={!open}
         className={clsx(
-          "flex h-full min-w-0 flex-col overflow-hidden rounded-xl bg-white shadow-[0_1px_3px_rgba(15,23,42,0.06)] ring-1 ring-black/[0.06] transform-gpu will-change-transform transition-[transform,opacity] duration-200 ease-out",
-          open ? "translate-x-0 opacity-100" : "pointer-events-none translate-x-4 opacity-0",
+          "flex h-full min-w-0 flex-col overflow-hidden rounded-xl bg-white shadow-[0_1px_3px_rgba(15,23,42,0.06)] ring-1 ring-black/[0.06] transform-gpu will-change-transform transition-transform duration-300 ease-out",
+          open ? "translate-x-0" : "pointer-events-none translate-x-[110%]",
         )}
       >
         <div

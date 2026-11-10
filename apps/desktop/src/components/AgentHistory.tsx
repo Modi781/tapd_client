@@ -1,10 +1,12 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import clsx from "clsx";
 import {
   Bug,
+  ExternalLink,
   FolderOpen,
-  RefreshCw,
+  Loader2,
+  RotateCcw,
   ScrollText,
   Search,
 } from "lucide-react";
@@ -18,55 +20,33 @@ import {
   type AgentTaskStatus,
 } from "../lib/agent";
 import { relativeTime } from "../lib/api";
-import { Badge, Button, Spinner } from "./ui";
+import { AgentLogViewer } from "./AgentLogViewer";
+import { Badge, Button } from "./ui";
 
-const STATUS_OPTIONS: AgentTaskStatus[] = [
-  "queued",
-  "preparing",
-  "running",
-  "waiting_review",
-  "succeeded",
-  "failed",
-  "canceled",
-];
+// History only contains terminal tasks; active ones live in the run tab.
+const STATUS_OPTIONS: AgentTaskStatus[] = ["succeeded", "failed", "canceled"];
 
 const SELECT_CLASS =
   "rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-xs text-slate-700 outline-none transition focus:border-sky-300 focus:ring-2 focus:ring-sky-100";
 
-/**
- * Strip ANSI/VT escape sequences so the raw log tail can be shown in a plain
- * `<pre>` without leaking cursor or colour codes.
- */
-const ANSI_ESCAPE =
-  // eslint-disable-next-line no-control-regex
-  /[\u001B\u009B][[\]()#;?]*(?:(?:(?:[a-zA-Z\d]*(?:;[-a-zA-Z\d/#&.:=?%@~_]+)*)?\u0007)|(?:(?:\d{1,4}(?:[;:]\d{0,4})*)?[\dA-PR-TZcf-nq-uy=><~]))/g;
-
-export function stripAnsi(input: string): string {
-  return input
-    .replace(ANSI_ESCAPE, "")
-    .replace(/\r\n/g, "\n")
-    .replace(/\r/g, "\n")
-    // eslint-disable-next-line no-control-regex
-    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "");
-}
-
 type Props = {
   tasks: AgentTask[];
+  /** History row selected by the island capsule / enqueue flow. */
+  focusTaskId?: string | null;
   onOpenBug: (workspaceId: string, bugId: string) => void;
   toast: (kind: "ok" | "error", text: string) => void;
 };
 
 /** Execution records: filterable newest-first list plus a detail/log viewer. */
-export function AgentHistory({ tasks, onOpenBug, toast }: Props) {
+export function AgentHistory({ tasks, focusTaskId, onOpenBug, toast }: Props) {
   const [workspaceFilter, setWorkspaceFilter] = useState("all");
   const [statusFilter, setStatusFilter] = useState<"all" | AgentTaskStatus>("all");
   const [query, setQuery] = useState("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
-
-  const [log, setLog] = useState("");
-  const [logLoading, setLogLoading] = useState(false);
-  const [logError, setLogError] = useState<string | null>(null);
-  const logRequestRef = useRef(0);
+  const [logTask, setLogTask] = useState<AgentTask | null>(null);
+  const [resumeBusy, setResumeBusy] = useState<string | null>(null);
+  const [retryBusy, setRetryBusy] = useState<string | null>(null);
+  const appliedFocusRef = useRef<string | null>(null);
 
   const workspaces = useMemo(() => {
     const map = new Map<string, string>();
@@ -104,33 +84,17 @@ export function AgentHistory({ tasks, onOpenBug, toast }: Props) {
     [filtered, selectedId],
   );
 
-  const loadLog = useCallback(async (taskId: string) => {
-    const request = ++logRequestRef.current;
-    setLogLoading(true);
-    setLogError(null);
-    try {
-      const { data } = await agentApi.taskLog(taskId);
-      if (request !== logRequestRef.current) return;
-      setLog(stripAnsi(data));
-    } catch (error) {
-      if (request !== logRequestRef.current) return;
-      setLog("");
-      setLogError(String(error));
-    } finally {
-      if (request === logRequestRef.current) setLogLoading(false);
-    }
-  }, []);
-
+  // A focus request from the island/enqueue flow wins over active filters.
   useEffect(() => {
-    if (!selectedId) {
-      logRequestRef.current += 1;
-      setLog("");
-      setLogError(null);
-      setLogLoading(false);
-      return;
-    }
-    void loadLog(selectedId);
-  }, [selectedId, loadLog]);
+    if (!focusTaskId) return;
+    if (appliedFocusRef.current === focusTaskId) return;
+    if (!tasks.some((task) => task.id === focusTaskId)) return;
+    appliedFocusRef.current = focusTaskId;
+    setWorkspaceFilter("all");
+    setStatusFilter("all");
+    setQuery("");
+    setSelectedId(focusTaskId);
+  }, [focusTaskId, tasks]);
 
   const openExportDir = (task: AgentTask) => {
     const dir = exportDirFor(task.mdPath);
@@ -141,6 +105,34 @@ export function AgentHistory({ tasks, onOpenBug, toast }: Props) {
     void invoke("open_path", { path: dir }).catch((error) =>
       toast("error", String(error)),
     );
+  };
+
+  const resume = async (task: AgentTask) => {
+    if (!task.sessionId) {
+      toast("error", "该任务没有可恢复的会话 ID");
+      return;
+    }
+    setResumeBusy(task.id);
+    try {
+      await agentApi.openSession(task.id);
+      toast("ok", "已在 Terminal 中恢复该会话");
+    } catch (error) {
+      toast("error", String(error));
+    } finally {
+      setResumeBusy(null);
+    }
+  };
+
+  const retry = async (task: AgentTask) => {
+    setRetryBusy(task.id);
+    try {
+      await agentApi.retry(task.id);
+      toast("ok", "已重新加入队列，可在「运行」中查看");
+    } catch (error) {
+      toast("error", String(error));
+    } finally {
+      setRetryBusy(null);
+    }
   };
 
   return (
@@ -268,12 +260,52 @@ export function AgentHistory({ tasks, onOpenBug, toast }: Props) {
                 >
                   打开导出目录
                 </Button>
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  icon={<ScrollText size={12} />}
+                  disabled={!selected.logPath}
+                  onClick={() => setLogTask(selected)}
+                >
+                  查看日志
+                </Button>
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  icon={
+                    retryBusy === selected.id ? (
+                      <Loader2 size={12} className="animate-spin" />
+                    ) : (
+                      <RotateCcw size={12} />
+                    )
+                  }
+                  disabled={retryBusy !== null}
+                  onClick={() => void retry(selected)}
+                >
+                  重试
+                </Button>
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  icon={
+                    resumeBusy === selected.id ? (
+                      <Loader2 size={12} className="animate-spin" />
+                    ) : (
+                      <ExternalLink size={12} />
+                    )
+                  }
+                  disabled={!selected.sessionId || resumeBusy !== null}
+                  onClick={() => void resume(selected)}
+                >
+                  终端恢复
+                </Button>
               </div>
 
               <dl className="mt-3 grid grid-cols-2 gap-x-4 gap-y-2 text-[11px] sm:grid-cols-3">
                 <Meta label="工作区" value={selected.workspaceName || selected.workspaceId} />
                 <Meta label="缺陷 ID" value={selected.bugId} mono />
                 <Meta label="来源" value={selected.source || "—"} />
+                <Meta label="会话" value={selected.sessionId || "—"} mono wide />
                 <Meta label="创建时间" value={relativeTime(selected.createdAt)} title={selected.createdAt} />
                 <Meta
                   label="开始时间"
@@ -308,43 +340,16 @@ export function AgentHistory({ tasks, onOpenBug, toast }: Props) {
                   {selected.prompt || "（空）"}
                 </pre>
               </details>
-
-              <div className="mt-3 overflow-hidden rounded-lg border border-slate-200">
-                <div className="flex items-center gap-2 border-b border-slate-100 bg-slate-50 px-2.5 py-1.5">
-                  <ScrollText size={13} className="text-slate-400" />
-                  <span className="text-[11px] font-medium text-slate-600">日志</span>
-                  <span className="text-[10px] text-slate-400">
-                    仅显示日志末尾（最多约 400 KB）
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() => void loadLog(selected.id)}
-                    disabled={logLoading}
-                    className="ml-auto inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-slate-500 transition hover:bg-slate-200/60 hover:text-slate-700 disabled:opacity-40"
-                  >
-                    <RefreshCw size={11} className={logLoading ? "animate-spin" : undefined} />
-                    刷新
-                  </button>
-                </div>
-                {logError ? (
-                  <div className="break-all px-2.5 py-3 text-[11px] text-rose-600">
-                    {logError}
-                  </div>
-                ) : logLoading && !log ? (
-                  <div className="flex items-center gap-2 px-2.5 py-3 text-[11px] text-slate-400">
-                    <Spinner className="h-3 w-3" />
-                    读取日志…
-                  </div>
-                ) : (
-                  <pre className="max-h-[360px] overflow-auto whitespace-pre-wrap break-words bg-zinc-950 px-2.5 py-2 font-mono text-[11px] leading-5 text-zinc-200">
-                    {log || "（暂无日志）"}
-                  </pre>
-                )}
-              </div>
             </div>
           )}
         </div>
       </div>
+
+      <AgentLogViewer
+        task={logTask}
+        onClose={() => setLogTask(null)}
+        toast={toast}
+      />
     </div>
   );
 }

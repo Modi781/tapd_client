@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { ChevronDown, ChevronUp, FolderGit2, FolderOpen } from "lucide-react";
+import { ChevronDown, ChevronUp, Eye, EyeOff, FolderGit2, FolderOpen } from "lucide-react";
 import clsx from "clsx";
 
 import { agentApi, type ProjectAgentConfig } from "../lib/agent";
@@ -20,9 +20,14 @@ const emptyProject = (): ProjectAgentConfig => ({ repoPath: "", rule: "" });
  */
 export function ProjectSettings(props: {
   context: WorkspaceContext | null;
+  hiddenWorkspaceIds: string[];
+  onSetWorkspaceVisible: (id: string, visible: boolean) => void;
   toast: SettingsSectionProps["toast"];
 }) {
-  const { context, toast } = props;
+  const { context, hiddenWorkspaceIds, onSetWorkspaceVisible, toast } = props;
+  const visibleCount = (context?.workspaces ?? []).filter(
+    (workspace) => !hiddenWorkspaceIds.includes(workspace.id),
+  ).length;
   const [projects, setProjects] = useState<Record<string, ProjectAgentConfig>>({});
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [pickerFor, setPickerFor] = useState<string | null>(null);
@@ -151,6 +156,7 @@ export function ProjectSettings(props: {
       <p className="mt-1 text-xs text-slate-500">
         点击左侧项目切换。每个项目在这里设置本地文件夹和项目规则，Agent
         修复时直接使用；文件夹可以拖进卡片，或点「选择」。改动失焦即保存。
+        眼睛图标控制该项目是否出现在左侧列表（只影响本机显示）。
       </p>
 
       <div className="mt-3 grid gap-2 sm:grid-cols-2">
@@ -158,6 +164,7 @@ export function ProjectSettings(props: {
           const project = projects[workspace.id] ?? emptyProject();
           const open = expanded[workspace.id] ?? false;
           const hasRule = project.rule.trim().length > 0;
+          const hidden = hiddenWorkspaceIds.includes(workspace.id);
 
           return (
             <div
@@ -180,6 +187,28 @@ export function ProjectSettings(props: {
                 <span className="shrink-0 font-mono text-[10px] text-slate-400">
                   {workspace.id}
                 </span>
+                <button
+                  type="button"
+                  title={
+                    hidden
+                      ? "在左侧项目列表显示"
+                      : visibleCount <= 1
+                        ? "至少保留一个项目"
+                        : "从左侧项目列表隐藏"
+                  }
+                  aria-label={hidden ? "显示项目" : "隐藏项目"}
+                  disabled={!hidden && visibleCount <= 1}
+                  onClick={() => onSetWorkspaceVisible(workspace.id, hidden)}
+                  className={clsx(
+                    "grid h-6 w-6 shrink-0 place-items-center rounded-md transition",
+                    hidden
+                      ? "text-slate-400 hover:bg-slate-100 hover:text-slate-600"
+                      : "text-sky-600 hover:bg-sky-50",
+                    !hidden && visibleCount <= 1 && "cursor-not-allowed opacity-40",
+                  )}
+                >
+                  {hidden ? <EyeOff size={12} /> : <Eye size={12} />}
+                </button>
                 <button
                   type="button"
                   onClick={() =>

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { listen } from "@tauri-apps/api/event";
 import type { MouseEvent as ReactMouseEvent, ReactNode } from "react";
 import clsx from "clsx";
@@ -47,6 +47,7 @@ import { CapturesPage } from "./components/CapturesPage";
 import { LoginGate } from "./components/LoginGate";
 import { McpPage } from "./components/McpPage";
 import { SettingsPage } from "./components/SettingsPage";
+import { ScrollingName } from "./components/ScrollingName";
 import { SkeletonRows } from "./components/Skeleton";
 import { Button } from "./components/ui";
 
@@ -65,8 +66,8 @@ type AgentTarget = {
 };
 
 // Project sidebar sizing. Dragging below the minimum collapses it.
-const MIN_SIDEBAR_WIDTH = 208;
-const MAX_SIDEBAR_WIDTH = 420;
+const MIN_SIDEBAR_WIDTH = 168;
+const MAX_SIDEBAR_WIDTH = 300;
 /** Content area that must stay usable; the sidebar yields space below this. */
 const MIN_CONTENT_WIDTH = 460;
 /** Codex-style right detail pane. */
@@ -78,9 +79,9 @@ const DETAIL_CONTENT_MIN = 340;
 /** Rail + sidebar gap + panel margins (with a small resize buffer). */
 const LAYOUT_GUTTER = 32;
 
-/** Default sidebar width for the current window: ~20%, clamped. */
+/** Default sidebar width for the current window: compact, project names are short. */
 const defaultSidebarWidth = (viewport: number): number =>
-  Math.round(Math.min(Math.max(viewport * 0.2, MIN_SIDEBAR_WIDTH), 336));
+  Math.round(Math.min(Math.max(viewport * 0.15, 176), 208));
 
 const NAV: Array<{ id: View; label: string; icon: ReactNode }> = [
   { id: "bugs", label: "缺陷", icon: <Bug size={15} /> },
@@ -114,12 +115,55 @@ export default function App() {
   const [pendingAgent, setPendingAgent] = useState<AgentTarget | null>(null);
   /** Task the island capsule asked us to focus in the Agent tab. */
   const [agentFocusTaskId, setAgentFocusTaskId] = useState<string | null>(null);
+  /** Locally hidden TAPD projects (persisted in config.json). */
+  const [hiddenWorkspaceIds, setHiddenWorkspaceIds] = useState<string[]>([]);
+  const hiddenInitializedRef = useRef(false);
+  /** Right-click context menu for a project row. */
+  const [projectMenu, setProjectMenu] = useState<{
+    id: string;
+    name: string;
+    x: number;
+    y: number;
+  } | null>(null);
   /** Any live (network) refresh currently in flight; drives the title bar. */
   const refreshing = useSyncExternalStore(
     subscribeRefresh,
     getRefreshing,
     getRefreshing,
   );
+
+  // Load hidden projects once from config.json. The UI is the source of truth
+  // afterwards, so a background `app_info` refresh cannot revert a fresh toggle.
+  useEffect(() => {
+    if (hiddenInitializedRef.current || !info) return;
+    hiddenInitializedRef.current = true;
+    setHiddenWorkspaceIds(info.hiddenWorkspaceIds ?? []);
+  }, [info]);
+
+  // Dismiss the project context menu on any outside click / Escape.
+  useEffect(() => {
+    if (!projectMenu) return;
+    const close = () => setProjectMenu(null);
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") close();
+    };
+    window.addEventListener("pointerdown", close);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("pointerdown", close);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [projectMenu]);
+
+  const visibleWorkspaces = useMemo(
+    () =>
+      (context?.workspaces ?? []).filter(
+        (workspace) => !hiddenWorkspaceIds.includes(workspace.id),
+      ),
+    [context, hiddenWorkspaceIds],
+  );
+  /** With a single visible project the list column is pointless. */
+  const projectListHidden = visibleWorkspaces.length === 1;
 
   // The sidebar follows the window until the user drags it once. Coalesce
   // resize events into one update per frame; window expansion fires many.
@@ -171,9 +215,9 @@ export default function App() {
       expandedSidebarWidth +
       (detailRendered ? DETAIL_CONTENT_MIN + effectiveDetailWidth : MIN_CONTENT_WIDTH) +
       LAYOUT_GUTTER;
-  const sidebarHidden = sidebarPeek
-    ? false
-    : sidebarCollapsed || autoCollapseSidebar;
+  const sidebarHidden =
+    projectListHidden ||
+    (sidebarPeek ? false : sidebarCollapsed || autoCollapseSidebar);
 
   // Drop the temporary reveal once the window is wide enough again.
   useEffect(() => {
@@ -184,12 +228,15 @@ export default function App() {
   const effectiveSidebarWidth = sidebarHidden
     ? 0
     : Math.max(
-        180,
+        MIN_SIDEBAR_WIDTH,
         Math.min(sidebarWidth, viewportWidth - 52 - MIN_CONTENT_WIDTH),
       );
 
   const infoRef = useRef<AppInfo | null>(null);
   infoRef.current = info;
+  /** Hidden ids readable from the stable `loadContext` callback. */
+  const hiddenWorkspaceIdsRef = useRef<string[]>([]);
+  hiddenWorkspaceIdsRef.current = hiddenWorkspaceIds;
 
   /** Whether the pane currently occupies layout (true during close animation). */
   const detailRenderedRef = useRef(false);
@@ -200,11 +247,13 @@ export default function App() {
     viewportWidth,
     sidebarWidth: expandedSidebarWidth,
     detailWidth: effectiveDetailWidth,
+    projectListHidden,
   });
   layoutRef.current = {
     viewportWidth,
     sidebarWidth: expandedSidebarWidth,
     detailWidth: effectiveDetailWidth,
+    projectListHidden,
   };
 
   const showToast = useCallback((kind: Toast["kind"], text: string) => {
@@ -224,20 +273,22 @@ export default function App() {
     // windows, then grow the window leftwards if needed), then animate in.
     if (!detailRenderedRef.current) {
       const layout = layoutRef.current;
+      const sidebarWidth = layout.projectListHidden ? 0 : layout.sidebarWidth;
       const requiredWithSidebar =
         52 +
-        layout.sidebarWidth +
+        sidebarWidth +
         DETAIL_CONTENT_MIN +
         layout.detailWidth +
         LAYOUT_GUTTER;
-      const collapseSidebar = layout.viewportWidth < requiredWithSidebar;
+      const collapseSidebar =
+        !layout.projectListHidden && layout.viewportWidth < requiredWithSidebar;
       if (collapseSidebar) {
         setSidebarCollapsed(true);
         setSidebarPeek(false);
       }
       const required =
         52 +
-        (collapseSidebar ? 0 : layout.sidebarWidth) +
+        (collapseSidebar ? 0 : sidebarWidth) +
         DETAIL_CONTENT_MIN +
         layout.detailWidth +
         LAYOUT_GUTTER;
@@ -304,7 +355,7 @@ export default function App() {
     detailCloseTimer.current = window.setTimeout(() => {
       detailCloseTimer.current = null;
       setDetailRendered(false);
-    }, 220);
+    }, 320);
   }, []);
 
   useEffect(
@@ -353,10 +404,15 @@ export default function App() {
           void api.setCurrentUser(next.user.nick);
         }
         const lastId = infoRef.current?.lastWorkspaceId;
+        const hidden = new Set([
+          ...(infoRef.current?.hiddenWorkspaceIds ?? []),
+          ...hiddenWorkspaceIdsRef.current,
+        ]);
+        const visible = next.workspaces.filter((item) => !hidden.has(item.id));
         setWorkspaceId((current) => {
           if (current) return current;
-          if (lastId && next.workspaces.some((item) => item.id === lastId)) return lastId;
-          return next.workspaces[0]?.id ?? "";
+          if (lastId && visible.some((item) => item.id === lastId)) return lastId;
+          return visible[0]?.id ?? next.workspaces[0]?.id ?? "";
         });
       }
     } catch {
@@ -373,10 +429,15 @@ export default function App() {
             void api.setCurrentUser(next.user.nick);
           }
           const lastId = infoRef.current?.lastWorkspaceId;
+          const hidden = new Set([
+            ...(infoRef.current?.hiddenWorkspaceIds ?? []),
+            ...hiddenWorkspaceIdsRef.current,
+          ]);
+          const visible = next.workspaces.filter((item) => !hidden.has(item.id));
           setWorkspaceId((current) => {
             if (current) return current;
-            if (lastId && next.workspaces.some((item) => item.id === lastId)) return lastId;
-            return next.workspaces[0]?.id ?? "";
+            if (lastId && visible.some((item) => item.id === lastId)) return lastId;
+            return visible[0]?.id ?? next.workspaces[0]?.id ?? "";
           });
           return;
         } catch (error) {
@@ -466,6 +527,49 @@ export default function App() {
     setView("bugs");
     closeDetail();
     void api.setLastWorkspace(id);
+  };
+
+  const updateHiddenWorkspaces = async (next: string[], previous: string[]) => {
+    setHiddenWorkspaceIds(next);
+    try {
+      await api.setHiddenWorkspaces(next);
+    } catch (error) {
+      setHiddenWorkspaceIds(previous);
+      showToast("error", String(error));
+    }
+  };
+
+  const setWorkspaceVisible = (id: string, visible: boolean) => {
+    if (visible) {
+      if (!hiddenWorkspaceIds.includes(id)) return;
+      void updateHiddenWorkspaces(
+        hiddenWorkspaceIds.filter((candidate) => candidate !== id),
+        hiddenWorkspaceIds,
+      );
+      return;
+    }
+
+    if (visibleWorkspaces.length <= 1) {
+      showToast("error", "至少保留一个项目");
+      return;
+    }
+    if (hiddenWorkspaceIds.includes(id)) return;
+
+    const next = [...hiddenWorkspaceIds, id];
+    void updateHiddenWorkspaces(next, hiddenWorkspaceIds);
+    if (workspaceId === id) {
+      const replacement = visibleWorkspaces.find((item) => item.id !== id);
+      if (replacement) {
+        closeDetail();
+        setWorkspaceId(replacement.id);
+        void api.setLastWorkspace(replacement.id);
+      }
+    }
+  };
+
+  const hideWorkspace = (id: string) => {
+    setWorkspaceVisible(id, false);
+    setProjectMenu(null);
   };
 
   const openBug = useCallback(
@@ -845,9 +949,9 @@ export default function App() {
               <span className="min-w-0 flex-1 truncate px-2 text-[13px] font-semibold text-slate-800">
                 项目
               </span>
-              {context?.workspaces.length ? (
+              {visibleWorkspaces.length ? (
                 <span className="shrink-0 text-[11px] tabular-nums text-slate-400">
-                  {context.workspaces.length}
+                  {visibleWorkspaces.length}
                 </span>
               ) : null}
             </div>
@@ -877,13 +981,28 @@ export default function App() {
               />
             ) : null}
 
-            {context?.workspaces.map((item) => {
+            {context && visibleWorkspaces.length === 0 ? (
+              <div className="rounded-lg border border-dashed border-slate-200 px-2.5 py-3 text-[11px] leading-5 text-slate-400">
+                项目已全部隐藏，可在设置 → 项目中恢复显示。
+              </div>
+            ) : null}
+
+            {visibleWorkspaces.map((item) => {
               const active = item.id === workspaceId;
               return (
                 <button
                   key={item.id}
                   type="button"
                   onClick={() => selectWorkspace(item.id)}
+                  onContextMenu={(event) => {
+                    event.preventDefault();
+                    setProjectMenu({
+                      id: item.id,
+                      name: item.name,
+                      x: event.clientX,
+                      y: event.clientY,
+                    });
+                  }}
                   className={clsx(
                     "flex w-full items-center gap-2.5 rounded-lg px-2.5 py-[7px] text-left text-[13px] transition",
                     active
@@ -895,7 +1014,7 @@ export default function App() {
                     className="h-2 w-2 shrink-0 rounded-full"
                     style={{ backgroundColor: item.logoColor || "#0ea5e9" }}
                   />
-                  <span className="min-w-0 flex-1 truncate">{item.name}</span>
+                  <ScrollingName text={item.name} className="flex-1" />
                   {active ? (
                     <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-500" />
                   ) : null}
@@ -929,26 +1048,28 @@ export default function App() {
         {/* Content panel */}
         <main className="mb-2 mr-2 flex min-w-0 flex-1 flex-col overflow-hidden rounded-xl bg-white shadow-[0_1px_3px_rgba(15,23,42,0.06)] ring-1 ring-black/[0.06]">
           <header className="flex h-12 shrink-0 items-center gap-1.5 px-2" data-tauri-drag-region>
-            <button
-              type="button"
-              aria-label={sidebarHidden ? "展开项目列表" : "收起项目列表"}
-              title={
-                autoCollapseSidebar
-                  ? sidebarPeek
-                    ? "收起项目列表"
-                    : "展开项目列表（窗口过窄，会自动收起）"
-                  : sidebarHidden
-                    ? "展开项目列表"
-                    : "收起项目列表"
-              }
-              onClick={() => {
-                if (autoCollapseSidebar) setSidebarPeek((current) => !current);
-                else setSidebarCollapsed((current) => !current);
-              }}
-              className="grid h-8 w-8 shrink-0 place-items-center rounded-lg text-slate-400 transition hover:bg-black/[0.05] hover:text-slate-700"
-            >
-              {sidebarHidden ? <PanelLeftOpen size={15} /> : <PanelLeftClose size={15} />}
-            </button>
+            {!projectListHidden ? (
+              <button
+                type="button"
+                aria-label={sidebarHidden ? "展开项目列表" : "收起项目列表"}
+                title={
+                  autoCollapseSidebar
+                    ? sidebarPeek
+                      ? "收起项目列表"
+                      : "展开项目列表（窗口过窄，会自动收起）"
+                    : sidebarHidden
+                      ? "展开项目列表"
+                      : "收起项目列表"
+                }
+                onClick={() => {
+                  if (autoCollapseSidebar) setSidebarPeek((current) => !current);
+                  else setSidebarCollapsed((current) => !current);
+                }}
+                className="grid h-8 w-8 shrink-0 place-items-center rounded-lg text-slate-400 transition hover:bg-black/[0.05] hover:text-slate-700"
+              >
+                {sidebarHidden ? <PanelLeftOpen size={15} /> : <PanelLeftClose size={15} />}
+              </button>
+            ) : null}
 
             <div className="min-w-0 flex-1 px-1">
               <h1 className="truncate text-[13px] font-semibold leading-5 text-slate-900">
@@ -1029,6 +1150,8 @@ export default function App() {
                   }}
                   onOpenPath={openPath}
                   onCopy={(text) => void copy(text)}
+                  hiddenWorkspaceIds={hiddenWorkspaceIds}
+                  onSetWorkspaceVisible={setWorkspaceVisible}
                   toast={showToast}
                 />
               )}
@@ -1095,6 +1218,41 @@ export default function App() {
           onCancel={() => setPendingAgent(null)}
           onSelect={(path) => void applyAgentFolder(pendingAgent, path)}
         />
+      ) : null}
+
+      {projectMenu ? (
+        <div
+          role="menu"
+          className="fixed z-[70] min-w-[190px] rounded-lg border border-slate-200 bg-white p-1 text-[11px] text-slate-700 shadow-xl"
+          style={{
+            left: Math.min(projectMenu.x, window.innerWidth - 210),
+            top: Math.min(projectMenu.y, window.innerHeight - 92),
+          }}
+          onPointerDown={(event) => event.stopPropagation()}
+          onContextMenu={(event) => event.preventDefault()}
+        >
+          <button
+            type="button"
+            onClick={() => hideWorkspace(projectMenu.id)}
+            disabled={visibleWorkspaces.length <= 1}
+            title={
+              visibleWorkspaces.length <= 1 ? "至少保留一个项目" : "只影响本机显示"
+            }
+            className="flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left transition hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            在本地隐藏「{projectMenu.name}」
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setProjectMenu(null);
+              setView("settings");
+            }}
+            className="flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left transition hover:bg-slate-100"
+          >
+            在设置中管理项目
+          </button>
+        </div>
       ) : null}
 
       {toastNode}
