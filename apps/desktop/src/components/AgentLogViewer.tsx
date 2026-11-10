@@ -83,7 +83,6 @@ export function AgentLogViewer({ task, onClose, toast }: Props) {
   const resume = async () => {
     try {
       await agentApi.openSession(task.id);
-      toast("ok", "已在 Terminal 中恢复该会话");
     } catch (reason) {
       toast("error", String(reason));
     }

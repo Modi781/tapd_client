@@ -29,6 +29,7 @@ import {
   type ExportResult,
   type OpenMediaMode,
   type WorkspaceContext,
+  type WorkspaceMember,
 } from "./lib/api";
 import { agentApi } from "./lib/agent";
 import { cacheApi } from "./lib/cache";
@@ -85,6 +86,9 @@ const DETAIL_CONTENT_MIN = 340;
 /** Rail + sidebar gap + panel margins (with a small resize buffer). */
 const LAYOUT_GUTTER = 32;
 
+/** People directory refresh window; matches the two-hour update check. */
+const MEMBERS_TTL_MS = 2 * 60 * 60 * 1000;
+
 /** Default sidebar width for the current window: compact, project names are short. */
 const defaultSidebarWidth = (viewport: number): number =>
   Math.round(Math.min(Math.max(viewport * 0.15, 176), 208));
@@ -118,6 +122,16 @@ export default function App() {
   const railAnimTimer = useRef<number | null>(null);
   const [toast, setToast] = useState<Toast | null>(null);
   const [refreshToken, setRefreshToken] = useState(0);
+  /** Workspace people directory, keyed by workspace id. */
+  const [membersByWorkspace, setMembersByWorkspace] = useState<
+    Record<string, WorkspaceMember[]>
+  >({});
+  const [membersLoading, setMembersLoading] = useState<Record<string, boolean>>({});
+  const membersRef = useRef<Record<string, WorkspaceMember[]>>({});
+  const membersFetchedAtRef = useRef<Record<string, number>>({});
+  const membersInFlightRef = useRef<
+    Record<string, Promise<WorkspaceMember[]> | undefined>
+  >({});
   const [viewportWidth, setViewportWidth] = useState(() =>
     typeof window === "undefined" ? 1280 : window.innerWidth,
   );
@@ -147,7 +161,7 @@ export default function App() {
     getRefreshing,
     getRefreshing,
   );
-  /** Background update state (checked hourly by the Rust side). */
+  /** Background update state (checked every two hours by the Rust side). */
   const updateState = useSyncExternalStore(
     subscribeUpdate,
     getUpdateSnapshot,
@@ -221,6 +235,9 @@ export default function App() {
   const [resizingDetail, setResizingDetail] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [lastExport, setLastExport] = useState<ExportResult | null>(null);
+  /** Read inside stable callbacks without re-creating them on every detail load. */
+  const detailRef = useRef<BugDetail | null>(null);
+  detailRef.current = detail;
 
   const effectiveDetailWidth = Math.max(
     DETAIL_MIN_WIDTH,
@@ -286,6 +303,115 @@ export default function App() {
     setToast({ kind, text });
   }, []);
 
+  const storeMembers = useCallback(
+    (targetWorkspaceId: string, members: WorkspaceMember[], fetchedAtMs: number) => {
+      membersRef.current = { ...membersRef.current, [targetWorkspaceId]: members };
+      membersFetchedAtRef.current = {
+        ...membersFetchedAtRef.current,
+        [targetWorkspaceId]: fetchedAtMs,
+      };
+      setMembersByWorkspace((current) => ({
+        ...current,
+        [targetWorkspaceId]: members,
+      }));
+    },
+    [],
+  );
+
+  /**
+   * Returns a workspace's people directory, cache-first.
+   *
+   * Cached members are reused for two hours; `force` refreshes them in place
+   * (also used by the background two-hour timer). Concurrent callers share one
+   * request so opening several bugs does not fan out into duplicate calls.
+   */
+  const ensureMembers = useCallback(
+    async (
+      targetWorkspaceId: string,
+      force = false,
+    ): Promise<WorkspaceMember[]> => {
+      const workspaceId = targetWorkspaceId.trim();
+      if (!workspaceId) return [];
+
+      const inFlight = membersInFlightRef.current[workspaceId];
+      if (inFlight) return inFlight;
+
+      const known = membersRef.current[workspaceId] ?? [];
+      const knownAt = membersFetchedAtRef.current[workspaceId] ?? 0;
+      if (!force && known.length > 0 && Date.now() - knownAt < MEMBERS_TTL_MS) {
+        return known;
+      }
+
+      if (!force && known.length === 0) {
+        try {
+          const cached = await cacheApi.workspaceMembers(workspaceId);
+          if (cached.data?.length) {
+            const fetchedAtMs = (cached.fetchedAt ?? 0) * 1000;
+            storeMembers(workspaceId, cached.data, fetchedAtMs);
+            if (Date.now() - fetchedAtMs < MEMBERS_TTL_MS) return cached.data;
+          }
+        } catch {
+          // A cache miss is not an error; the live request decides.
+        }
+      }
+
+      setMembersLoading((current) => ({ ...current, [workspaceId]: true }));
+      const request = api
+        .workspaceMembers(workspaceId)
+        .then((members) => {
+          storeMembers(workspaceId, members, Date.now());
+          return members;
+        })
+        .finally(() => {
+          delete membersInFlightRef.current[workspaceId];
+          setMembersLoading((current) => {
+            const next = { ...current };
+            delete next[workspaceId];
+            return next;
+          });
+        });
+      membersInFlightRef.current[workspaceId] = request;
+
+      try {
+        return await request;
+      } catch (error) {
+        if (!membersRef.current[workspaceId]?.length) {
+          showToast("error", `处理人列表加载失败：${String(error)}`);
+        }
+        return membersRef.current[workspaceId] ?? [];
+      }
+    },
+    [showToast, storeMembers],
+  );
+
+  // Load the current project's people as soon as it becomes active.
+  useEffect(() => {
+    if (!info?.loggedIn || !workspaceId) return;
+    void ensureMembers(workspaceId);
+  }, [info?.loggedIn, workspaceId, ensureMembers]);
+
+  // Keep cached directories fresh on the same two-hour cadence as updates.
+  useEffect(() => {
+    if (!info?.loggedIn) return;
+    const timer = window.setInterval(() => {
+      const ids = new Set(
+        [...Object.keys(membersRef.current), workspaceId].filter(Boolean),
+      );
+      for (const id of ids) void ensureMembers(id, true);
+    }, MEMBERS_TTL_MS);
+    return () => window.clearInterval(timer);
+  }, [info?.loggedIn, workspaceId, ensureMembers]);
+
+  // Signing out drops the directory: it belongs to the ended session.
+  useEffect(() => {
+    if (info?.loggedIn) return;
+    membersRef.current = {};
+    membersFetchedAtRef.current = {};
+    membersInFlightRef.current = {};
+    setMembersByWorkspace({});
+    setMembersLoading({});
+  }, [info?.loggedIn]);
+
   /** Switch views and replay the destination's rail icon animation. */
   const activateView = useCallback((id: View) => {
     setView(id);
@@ -314,6 +440,8 @@ export default function App() {
    */
   const loadBugDetail = useCallback((targetWorkspaceId: string, bugId: string) => {
     const seq = ++detailSeq.current;
+    // The owner / developer pickers need this workspace's people directory.
+    void ensureMembers(targetWorkspaceId);
     // Codex-style pane: make room first (collapse the project list on narrow
     // windows, then grow the window leftwards if needed), then animate in.
     if (!detailRenderedRef.current) {
@@ -392,7 +520,118 @@ export default function App() {
         if (seq === detailSeq.current) setDetailLoading(false);
       }
     })();
+  }, [ensureMembers]);
+
+  /**
+   * Re-reads a bug after a write action. Unlike `loadBugDetail` it never paints
+   * the (now stale) cache first, so the pane switches straight to fresh data.
+   */
+  const reloadBugDetail = useCallback(
+    async (targetWorkspaceId: string, bugId: string) => {
+      const seq = ++detailSeq.current;
+      try {
+        const next = await api.bugDetail(targetWorkspaceId, bugId);
+        if (seq !== detailSeq.current) return;
+        setDetail(next);
+        setDetailError(null);
+      } catch (error) {
+        showToast("error", String(error));
+      }
+    },
+    [showToast],
+  );
+
+  const bumpList = useCallback(() => {
+    setRefreshToken((token) => token + 1);
   }, []);
+
+  /** Assigns an unowned / other-owned bug to the signed-in user. */
+  const claimBug = useCallback(
+    async (targetWorkspaceId: string, bugId: string) => {
+      const me = context?.user.nick ?? info?.me ?? null;
+      if (!me) {
+        showToast("error", "未能识别当前用户，无法认领");
+        throw new Error("current user is unknown");
+      }
+      try {
+        await api.bugUpdateField(targetWorkspaceId, bugId, "current_owner", me);
+        showToast("ok", "已认领");
+        bumpList();
+        const open = detailRef.current;
+        if (open?.id === bugId && open.workspaceId === targetWorkspaceId) {
+          await reloadBugDetail(targetWorkspaceId, bugId);
+        }
+      } catch (error) {
+        showToast("error", String(error));
+        throw error;
+      }
+    },
+    [context, info, bumpList, reloadBugDetail, showToast],
+  );
+
+  const claimBugFromList = useCallback(
+    (bug: BugSummary) => claimBug(bug.workspaceId, bug.id),
+    [claimBug],
+  );
+
+  const claimBugFromDetail = useCallback(
+    (target: BugDetail) => claimBug(target.workspaceId, target.id),
+    [claimBug],
+  );
+
+  const addBugComment = useCallback(
+    async (target: BugDetail, comment: string) => {
+      try {
+        await api.bugAddComment(target.workspaceId, target.id, comment);
+        showToast("ok", "评论已发表");
+        bumpList();
+        await reloadBugDetail(target.workspaceId, target.id);
+      } catch (error) {
+        showToast("error", String(error));
+        throw error;
+      }
+    },
+    [bumpList, reloadBugDetail, showToast],
+  );
+
+  const changeBugField = useCallback(
+    async (target: BugDetail, field: string, value: string) => {
+      try {
+        await api.bugUpdateField(target.workspaceId, target.id, field, value);
+        showToast("ok", field === "de" ? "开发人员已更新" : "处理人已更新");
+        bumpList();
+        await reloadBugDetail(target.workspaceId, target.id);
+      } catch (error) {
+        showToast("error", String(error));
+        throw error;
+      }
+    },
+    [bumpList, reloadBugDetail, showToast],
+  );
+
+  const transitionBug = useCallback(
+    async (target: BugDetail, status: string) => {
+      try {
+        const result = await api.bugTransition(
+          target.workspaceId,
+          target.id,
+          status,
+        );
+        showToast("ok", `状态已流转为「${result.label}」`);
+        bumpList();
+        await reloadBugDetail(target.workspaceId, target.id);
+      } catch (error) {
+        showToast("error", String(error));
+        throw error;
+      }
+    },
+    [bumpList, reloadBugDetail, showToast],
+  );
+
+  const refreshDetailMembers = useCallback(() => {
+    const id = detailRef.current?.workspaceId ?? workspaceId;
+    if (id) void ensureMembers(id, true);
+  }, [workspaceId, ensureMembers]);
 
   /** Shrinks the pane away, then removes it from layout to free the content area. */
   const closeDetail = useCallback(() => {
@@ -572,6 +811,19 @@ export default function App() {
   const workspace =
     context?.workspaces.find((item) => item.id === workspaceId) ?? null;
 
+  // The signed-in user must always be selectable, even if the member API omits
+  // them (some projects only return the assignable subset).
+  const detailMembers = useMemo(() => {
+    const list =
+      membersByWorkspace[detail?.workspaceId ?? workspaceId] ?? [];
+    const myNick = context?.user.nick ?? info?.me ?? "";
+    if (!myNick || list.some((member) => member.nick === myNick)) return list;
+    return [
+      ...list,
+      { nick: myNick, userId: "", name: myNick, avatar: "" },
+    ];
+  }, [membersByWorkspace, detail?.workspaceId, workspaceId, context, info]);
+
   const selectWorkspace = (id: string) => {
     setWorkspaceId(id);
     setView("bugs");
@@ -672,7 +924,8 @@ export default function App() {
           severity: target.severityLabel,
           priority: target.priorityLabel,
         });
-        showToast("ok", "已加入 Agent 队列");
+        // The view switches to the Agent tab and focuses this task; a toast
+        // on top of that is just noise.
         setAgentFocusTaskId(task.id);
         setView("agent");
       } catch (error) {
@@ -714,7 +967,6 @@ export default function App() {
           },
         };
         await agentApi.configSet({ projects });
-        showToast("ok", `已设置项目目录：${path}`);
       } catch (error) {
         showToast("error", String(error));
         return;
@@ -740,7 +992,6 @@ export default function App() {
         setWorkspaceId("");
         closeDetail();
         setView("bugs");
-        showToast("ok", "已退出登录");
         await refreshBase();
       } catch (error) {
         showToast("error", String(error));
@@ -1273,6 +1524,7 @@ export default function App() {
                 onOpenWeb={openPath}
                 onCopyLink={copy}
                 onAgentFix={enqueueAgent}
+                onClaim={claimBugFromList}
                 refreshToken={refreshToken}
               />
             ) : (
@@ -1317,7 +1569,6 @@ export default function App() {
                 onShowLogin={() => {
                   void api
                     .sessionShow()
-                    .then(() => showToast("ok", "已打开 TAPD"))
                     .catch((error) => showToast("error", String(error)));
                 }}
                 onLogout={handleLogout}
@@ -1380,6 +1631,16 @@ export default function App() {
                 onAgentFix={handleAgentFix}
                 onOpenPath={openPath}
                 onOpenMedia={openMedia}
+                me={context?.user.nick ?? info.me}
+                members={detailMembers}
+                membersLoading={Boolean(
+                  membersLoading[detail?.workspaceId ?? workspaceId],
+                )}
+                onRefreshMembers={refreshDetailMembers}
+                onClaim={claimBugFromDetail}
+                onAddComment={addBugComment}
+                onChangeField={changeBugField}
+                onTransition={transitionBug}
               />
             </div>
 

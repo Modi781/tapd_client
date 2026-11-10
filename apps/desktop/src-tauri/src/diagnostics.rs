@@ -46,7 +46,7 @@ fn export_bundle(state: &SharedState) -> Result<DiagnosticsResult, String> {
     write_json(&folder.join("config.sanitized.json"), &sanitized_config(state))?;
     write_json(
         &folder.join("notifications.settings.json"),
-        &notification_settings(&paths.data_dir),
+        &crate::notification::settings_for_diagnostics(state),
     )?;
     write_json(
         &folder.join("agent.summary.json"),
@@ -128,13 +128,6 @@ fn sanitized_config(state: &SharedState) -> Value {
         "hiddenWorkspaceIds": config.hidden_workspace_ids,
         "mcpPolicy": config.mcp_policy,
     })
-}
-
-fn notification_settings(data_dir: &Path) -> Value {
-    let raw = fs::read_to_string(data_dir.join("notifications.json")).ok();
-    raw.and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
-        .and_then(|value| value.get("settings").cloned())
-        .unwrap_or(Value::Null)
 }
 
 fn agent_summary(data_dir: &Path) -> Value {

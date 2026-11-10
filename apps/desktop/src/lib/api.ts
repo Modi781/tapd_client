@@ -194,6 +194,32 @@ export type ChangeHistory = {
   error: string | null;
 };
 
+/** A person who can be picked as owner / developer in a workspace. */
+export type WorkspaceMember = {
+  nick: string;
+  userId: string;
+  name: string;
+  avatar: string;
+};
+
+export type BugTransitionChoice = {
+  key: string;
+  label: string;
+};
+
+export type BugTransitionInfo = {
+  currentStatus: string;
+  currentLabel: string;
+  transitions: BugTransitionChoice[];
+};
+
+export type BugTransitionResult = {
+  from: string;
+  status: string;
+  label: string;
+  changed: boolean;
+};
+
 export type BugDetail = BugSummary & {
   descriptionHtml: string;
   descriptionText: string;
@@ -342,6 +368,20 @@ export const api = {
   bugList: (query: BugQuery) => invoke<BugListPage>("bug_list", { query }),
   bugDetail: (workspaceId: string, bugId: string) =>
     invoke<BugDetail>("bug_detail", { workspaceId, bugId }),
+  workspaceMembers: (workspaceId: string) =>
+    invoke<WorkspaceMember[]>("workspace_members", { workspaceId }),
+  bugAddComment: (workspaceId: string, bugId: string, comment: string) =>
+    invoke<void>("bug_add_comment", { workspaceId, bugId, comment }),
+  bugUpdateField: (
+    workspaceId: string,
+    bugId: string,
+    field: string,
+    value: string,
+  ) => invoke<void>("bug_update_field", { workspaceId, bugId, field, value }),
+  bugTransitions: (workspaceId: string, bugId: string) =>
+    invoke<BugTransitionInfo>("bug_transitions", { workspaceId, bugId }),
+  bugTransition: (workspaceId: string, bugId: string, status: string) =>
+    invoke<BugTransitionResult>("bug_transition", { workspaceId, bugId, status }),
   exportBugMd: (workspaceId: string, bugId: string, workspaceName: string | null) =>
     invoke<ExportResult>("export_bug_md", { workspaceId, bugId, workspaceName }),
   setCurrentUser: (nick: string) =>

@@ -3,7 +3,7 @@
 //! Tauri's updater plugin reads its endpoint and public key from
 //! `tauri.conf.json`. This module owns everything around it:
 //!
-//! - checks once shortly after launch and then every hour, persisting the
+//! - checks once shortly after launch and then every two hours, persisting the
 //!   request time in `config.json`;
 //! - keeps a single state machine (`UpdateService`) that the main window and
 //!   the island capsule both subscribe to (`update://state`);
@@ -32,7 +32,7 @@ use tauri_plugin_updater::UpdaterExt;
 use crate::{notification, state::SharedState};
 
 const RELEASES_URL: &str = "https://github.com/wwog/tapd_client/releases";
-const CHECK_INTERVAL: Duration = Duration::from_secs(60 * 60);
+const CHECK_INTERVAL: Duration = Duration::from_secs(2 * 60 * 60);
 /// Let the window manager settle before the first background check.
 const FIRST_CHECK_DELAY: Duration = Duration::from_secs(5);
 const STATE_EVENT: &str = "update://state";

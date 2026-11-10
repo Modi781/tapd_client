@@ -4,16 +4,17 @@
 //! `feature_command` names starting with `notification_`.
 //!
 //! Design notes:
-//! - Polling never touches the UI directly; it records items in
-//!   `<data_dir>/notifications.json` and emits `notification://show`.
+//! - Polling never touches the UI directly; it records items in SQLite
+//!   (`cache.sqlite3`, tables in `notification_db.rs`) and emits
+//!   `notification://show`.
 //! - The first poll for a workspace is a baseline: bugs are recorded in `seen`
 //!   but no notification is produced.
 //! - Classification is a set of pure functions (`classify_bug`, `quiet_hours_active`,
 //!   body builders) so the business rules are unit-testable without TAPD.
 
 use std::{
-    collections::BTreeMap,
-    path::PathBuf,
+    collections::{BTreeMap, BTreeSet},
+    path::Path,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex, OnceLock,
@@ -30,7 +31,7 @@ use tauri::{
 };
 use tapd_core::{
     config::AppConfig,
-    store::{read_json, write_json_atomic},
+    store::read_json,
     tapd::{
         api::{
             bug_detail_body, bug_detail_url, bug_list_url, parse_bug_detail, parse_bug_list,
@@ -40,17 +41,35 @@ use tapd_core::{
     },
 };
 
-use crate::{commands::session_request_json, session, state::SharedState};
+use crate::{
+    commands::session_request_json,
+    notification_db::{self, PollWrite},
+    session,
+    state::SharedState,
+};
 
 /// Tauri label of the self-drawn notification window (see `main.tsx`).
 pub const WINDOW_LABEL: &str = "island";
-const STORE_FILE: &str = "notifications.json";
+/// Legacy JSON store, imported once and then renamed.
+const LEGACY_STORE_FILE: &str = "notifications.json";
 const MAX_ITEMS: usize = 200;
 const MAX_HISTORY: usize = 100;
 const FRESH_WINDOW_MINUTES: i64 = 5;
 const OVERLAP_MINUTES: i64 = 2;
 const POLL_PAGE_SIZE: u32 = 200;
+/// Page cap per round. Baseline runs once and may need more; incremental
+/// rounds stay small. A truncated round keeps its cursor and retries.
+const MAX_BASELINE_PAGES: u32 = 25;
+const MAX_POLL_PAGES: u32 = 10;
 const MAX_DETAIL_LOOKUPS: usize = 5;
+/// Seen-bug retention: drop rows untouched for this long, and cap the table.
+const SEEN_RETENTION_DAYS: i64 = 90;
+const MAX_SEEN_ENTRIES: usize = 20_000;
+
+/// Default and bounds for the notification poll interval.
+const DEFAULT_POLL_INTERVAL_SECS: u64 = 30;
+const MIN_POLL_INTERVAL_SECS: u64 = 20;
+const MAX_POLL_INTERVAL_SECS: u64 = 600;
 
 const INLINE_UPDATE_URL: &str = "https://www.tapd.cn/api/entity/bugs/inline_update";
 const KANBAN_TRANSITION_URL: &str =
@@ -146,7 +165,7 @@ impl Default for NotificationSettings {
             include_new: true,
             include_transferred: true,
             include_reopened: true,
-            poll_interval_secs: 60,
+            poll_interval_secs: DEFAULT_POLL_INTERVAL_SECS,
             quiet_hours: QuietHours::default(),
             max_visible: 3,
         }
@@ -163,7 +182,9 @@ impl NotificationSettings {
     }
 
     fn normalized(mut self) -> Self {
-        self.poll_interval_secs = self.poll_interval_secs.clamp(20, 600);
+        self.poll_interval_secs = self
+            .poll_interval_secs
+            .clamp(MIN_POLL_INTERVAL_SECS, MAX_POLL_INTERVAL_SECS);
         self.max_visible = self.max_visible.clamp(1, 5);
         if !is_hhmm(&self.quiet_hours.start) {
             self.quiet_hours.start = QuietHours::default().start;
@@ -202,12 +223,16 @@ pub struct SeenBug {
     pub assigned_time: String,
     /// Notification kinds already emitted for this bug, used for de-duplication.
     pub kinds: Vec<String>,
+    /// Last poll that observed this bug (`YYYY-MM-DD HH:MM:SS`); drives pruning.
+    pub last_seen: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct NotificationStore {
     pub settings: NotificationSettings,
+    /// Schema version of `settings`; 0 = written before the 30s poll default.
+    pub settings_version: u32,
     pub items: Vec<NotificationItem>,
     pub seen: BTreeMap<String, SeenBug>,
     /// `workspaceId:bugId` keys the user ignored.
@@ -221,6 +246,9 @@ impl Default for NotificationStore {
     fn default() -> Self {
         Self {
             settings: NotificationSettings::default(),
+            // `#[serde(default)]` fills a missing field from `Default`, so old
+            // files must deserialize as v0 for `init` to migrate them.
+            settings_version: 0,
             items: Vec::new(),
             seen: BTreeMap::new(),
             ignored: Vec::new(),
@@ -229,6 +257,11 @@ impl Default for NotificationStore {
         }
     }
 }
+
+/// Bumped when persisted defaults change and existing stores need a migration.
+const CURRENT_SETTINGS_VERSION: u32 = 1;
+/// The interval every pre-1.0 store was created with.
+const LEGACY_POLL_INTERVAL_SECS: u64 = 60;
 
 // ---------------------------------------------------------------------------
 // Pure helpers
@@ -337,9 +370,18 @@ pub fn classify_bug(
         if status == "reopened" && previous.status.trim() != "reopened" {
             return Some(NotificationKind::Reopened);
         }
+        if owner == me && previous.owner.trim() != me {
+            return Some(NotificationKind::Transferred);
+        }
+        // scope=mine never observes the bug while it is assigned to someone
+        // else, so a transfer back looks like "owner unchanged". A new
+        // assigned_time is the only evidence TAPD gives us; comparing it with
+        // the last observed value yields one notification per assignment
+        // instead of one forever (the old lifetime de-dupe).
         if owner == me
-            && previous.owner.trim() != me
-            && !previous.kinds.iter().any(|kind| kind == "transferred")
+            && previous.owner.trim() == me
+            && previous.assigned_time.trim() != assigned_time.trim()
+            && assigned_recently(created, assigned_time, now)
         {
             return Some(NotificationKind::Transferred);
         }
@@ -605,6 +647,41 @@ fn ensure_api_ok(root: &Value, action: &str) -> Result<(), String> {
     Err(format!("{action}失败：{}", api_message(root)))
 }
 
+/// Whether a poll round actually talked to TAPD.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PollOutcome {
+    Polled,
+    Skipped,
+}
+
+/// Drops seen entries untouched for `SEEN_RETENTION_DAYS`, then keeps at most
+/// `MAX_SEEN_ENTRIES` newest rows. Returns the removed keys for the DB mirror.
+fn prune_seen(store: &mut NotificationStore, now: NaiveDateTime) -> Vec<String> {
+    let cutoff = now - ChronoDuration::days(SEEN_RETENTION_DAYS);
+    let mut remove: BTreeSet<String> = store
+        .seen
+        .iter()
+        .filter(|(_, seen)| parse_tapd_time(&seen.last_seen).is_some_and(|last| last < cutoff))
+        .map(|(key, _)| key.clone())
+        .collect();
+
+    if store.seen.len().saturating_sub(remove.len()) > MAX_SEEN_ENTRIES {
+        let mut keep: Vec<(String, NaiveDateTime)> = store
+            .seen
+            .iter()
+            .filter(|(key, _)| !remove.contains(key.as_str()))
+            .map(|(key, seen)| (key.clone(), parse_tapd_time(&seen.last_seen).unwrap_or(now)))
+            .collect();
+        keep.sort_by(|left, right| right.1.cmp(&left.1));
+        remove.extend(keep.into_iter().skip(MAX_SEEN_ENTRIES).map(|(key, _)| key));
+    }
+
+    for key in &remove {
+        store.seen.remove(key);
+    }
+    remove.into_iter().collect()
+}
+
 // ---------------------------------------------------------------------------
 // Service
 // ---------------------------------------------------------------------------
@@ -612,7 +689,6 @@ fn ensure_api_ok(root: &Value, action: &str) -> Result<(), String> {
 struct NotificationService {
     app: AppHandle,
     state: SharedState,
-    path: PathBuf,
     store: Mutex<NotificationStore>,
     workspace_names: Mutex<BTreeMap<String, String>>,
     /// First workspace returned by TAPD, used before the UI persists a choice.
@@ -633,15 +709,12 @@ impl NotificationService {
             .clone()
     }
 
-    fn persist(&self) {
-        let snapshot = self
-            .store
-            .lock()
-            .expect("notification store lock")
-            .clone();
-        if let Err(error) = write_json_atomic(&self.path, &snapshot) {
-            tracing::warn!(%error, "failed to persist notifications");
-        }
+    fn persist_settings(&self) {
+        let (settings, version) = {
+            let store = self.store.lock().expect("notification store lock");
+            (store.settings.clone(), store.settings_version)
+        };
+        notification_db::save_settings(&self.state.cache, &settings, version);
     }
 
     fn workspace_name(&self, workspace_id: &str) -> String {
@@ -681,20 +754,20 @@ impl NotificationService {
             item.state = state;
             item.clone()
         };
-        self.persist();
+        notification_db::update_item_state(&self.state.cache, id, state);
         Ok(item)
     }
 
     fn push_item(&self, item: NotificationItem) {
         {
             let mut store = self.store.lock().expect("notification store lock");
-            store.items.push(item);
+            store.items.push(item.clone());
             if store.items.len() > MAX_ITEMS {
                 let excess = store.items.len() - MAX_ITEMS;
                 store.items.drain(0..excess);
             }
         }
-        self.persist();
+        notification_db::insert_item(&self.state.cache, &item, MAX_ITEMS);
     }
 
     fn pending_payload(&self) -> (Vec<NotificationItem>, bool) {
@@ -747,7 +820,10 @@ impl NotificationService {
         )
         .await?;
 
-        let workspaces = parse_workspaces(&root).unwrap_or_default();
+        // Propagate a failed aggregation response instead of treating it as an
+        // empty project list: swallowing it made an API/auth error look like a
+        // successful poll (`lastPollAt` advanced, no `lastError`).
+        let workspaces = parse_workspaces(&root)?;
         if let Some(first) = workspaces.first() {
             *self
                 .default_workspace
@@ -802,10 +878,15 @@ impl NotificationService {
             .len();
 
         match result {
-            Ok(()) => {
+            Ok(outcome) => {
                 *self.last_error.lock().expect("last error lock") = None;
-                *self.last_poll_at.lock().expect("last poll lock") =
-                    Some(Local::now().to_rfc3339());
+                // A skipped round (logged out / no projects / notifications
+                // off) is not a poll: reporting it as one made the settings page
+                // claim "last polled now" without touching TAPD.
+                if outcome == PollOutcome::Polled {
+                    *self.last_poll_at.lock().expect("last poll lock") =
+                        Some(Local::now().to_rfc3339());
+                }
             }
             Err(error) => {
                 // Pollution of the error slot is intentional: the settings page
@@ -824,23 +905,23 @@ impl NotificationService {
         self.refresh_window();
     }
 
-    async fn poll_inner(&self) -> Result<(), String> {
+    async fn poll_inner(&self) -> Result<PollOutcome, String> {
         let settings = self.settings();
         if !settings.enabled {
-            return Ok(());
+            return Ok(PollOutcome::Skipped);
         }
 
         let config = self.state.config_snapshot();
         if !config.logged_in {
-            return Ok(());
+            return Ok(PollOutcome::Skipped);
         }
 
         let (me, workspaces) = self.ensure_identity("0").await?;
         let Some(me) = me else {
-            return Ok(());
+            return Ok(PollOutcome::Skipped);
         };
         if me.trim().is_empty() || workspaces.is_empty() {
-            return Ok(());
+            return Ok(PollOutcome::Skipped);
         }
 
         // "Mine" polls every accessible project. "Project" keeps the previous
@@ -856,7 +937,7 @@ impl NotificationService {
                 .collect()
         };
         if workspace_ids.is_empty() {
-            return Ok(());
+            return Ok(PollOutcome::Skipped);
         }
 
         let now = Local::now().naive_local();
@@ -873,9 +954,17 @@ impl NotificationService {
             }
         }
 
+        // Keep the seen table bounded (time + row cap). Runs once per round,
+        // outside the per-workspace loops.
+        let removed = {
+            let mut store = self.store.lock().expect("notification store lock");
+            prune_seen(&mut store, now)
+        };
+        notification_db::delete_seen(&self.state.cache, &removed);
+
         match first_error {
             Some(error) => Err(error),
-            None => Ok(()),
+            None => Ok(PollOutcome::Polled),
         }
     }
 
@@ -907,22 +996,25 @@ impl NotificationService {
         };
 
         let mut query = BugQuery::new(workspace_id);
-        query.page = 1;
         query.perpage = POLL_PAGE_SIZE;
         query.modified_after = modified_after;
         if settings.scope == NotificationScope::Mine {
             query.owner = Some(me.to_string());
         }
 
-        let root = session_request_json(
-            &self.app,
-            "POST",
-            &bug_list_url(),
-            Some(query.body()),
-            Duration::from_secs(60),
-        )
-        .await?;
-        let page = parse_bug_list(&root)?;
+        let max_pages = if baseline {
+            MAX_BASELINE_PAGES
+        } else {
+            MAX_POLL_PAGES
+        };
+        let (bugs, complete) = self.fetch_bug_pages(&mut query, max_pages).await?;
+        if !complete {
+            tracing::warn!(
+                %workspace_id,
+                pages = max_pages,
+                "notification poll hit the page cap; cursor stays put for a retry"
+            );
+        }
 
         // For project scope a first-seen bug owned by me may just be an old bug
         // touched by a comment. Ask the detail once for `assigned_time`.
@@ -935,7 +1027,7 @@ impl NotificationService {
                 .seen
                 .clone();
             let mut budget = MAX_DETAIL_LOOKUPS;
-            for bug in &page.bugs {
+            for bug in &bugs {
                 if budget == 0 {
                     break;
                 }
@@ -965,10 +1057,17 @@ impl NotificationService {
             .lock()
             .expect("workspace names lock")
             .clone();
+        let seen_at = format_tapd_time(now);
 
-        {
+        // Collect mutations under the store lock, then mirror only those rows to
+        // SQLite in one transaction. Nothing here rewrites the whole store.
+        let (seen_updates, new_items, ignore_lifted, cursor, baseline_at, trim_items) = {
             let mut store = self.store.lock().expect("notification store lock");
-            for bug in &page.bugs {
+            let mut seen_updates: Vec<(String, SeenBug)> = Vec::new();
+            let mut new_items: Vec<NotificationItem> = Vec::new();
+            let mut ignore_lifted: Vec<String> = Vec::new();
+
+            for bug in &bugs {
                 if bug.workspace_id.trim().is_empty() || bug.id.trim().is_empty() {
                     continue;
                 }
@@ -984,16 +1083,16 @@ impl NotificationService {
                     .unwrap_or_default();
 
                 if baseline {
-                    store.seen.insert(
-                        key,
-                        SeenBug {
-                            status: bug.status.clone(),
-                            owner: bug.owner.clone(),
-                            created: bug.created.clone(),
-                            assigned_time,
-                            kinds,
-                        },
-                    );
+                    let seen = SeenBug {
+                        status: bug.status.clone(),
+                        owner: bug.owner.clone(),
+                        created: bug.created.clone(),
+                        assigned_time,
+                        kinds,
+                        last_seen: seen_at.clone(),
+                    };
+                    store.seen.insert(key.clone(), seen.clone());
+                    seen_updates.push((key, seen));
                     continue;
                 }
 
@@ -1016,19 +1115,22 @@ impl NotificationService {
 
                 if matches!(kind, Some(NotificationKind::Reopened)) {
                     // Reopening lifts an ignore.
+                    let before = store.ignored.len();
                     store.ignored.retain(|ignored| ignored != &key);
+                    if store.ignored.len() != before {
+                        ignore_lifted.push(key.clone());
+                    }
                 }
 
                 let notify = match kind {
                     Some(kind) if settings.allows(kind) => {
-                        let is_ignored_and_blocked =
-                            ignored && kind != NotificationKind::Reopened;
-                        let already_sent = already_notified(
-                            &kinds,
-                            &bug.workspace_id,
-                            &bug.id,
-                            kind,
-                        );
+                        let is_ignored_and_blocked = ignored && kind != NotificationKind::Reopened;
+                        // Reopen and transfer are transition-based (their
+                        // previous state comparison already prevents repeats).
+                        // "New" keys off `created`, which survives a seen-row
+                        // prune, so it keeps a lifetime guard.
+                        let already_sent = kind == NotificationKind::New
+                            && already_notified(&kinds, &bug.workspace_id, &bug.id, kind);
                         if !is_ignored_and_blocked && !already_sent {
                             Some(kind)
                         } else {
@@ -1040,7 +1142,7 @@ impl NotificationService {
 
                 if let Some(kind) = notify {
                     kinds.push(kind.as_str().to_string());
-                    store.items.push(NotificationItem {
+                    let item = NotificationItem {
                         id: uuid::Uuid::new_v4().to_string(),
                         workspace_id: bug.workspace_id.to_string(),
                         workspace_name: names
@@ -1057,37 +1159,111 @@ impl NotificationService {
                         created: bug.created.clone(),
                         detected_at: Local::now().to_rfc3339(),
                         state: NotificationState::Pending,
-                    });
+                    };
+                    store.items.push(item.clone());
+                    new_items.push(item);
                 }
 
-                store.seen.insert(
-                    key,
-                    SeenBug {
-                        status: bug.status.clone(),
-                        owner: bug.owner.clone(),
-                        created: bug.created.clone(),
-                        assigned_time,
-                        kinds,
-                    },
-                );
+                let seen = SeenBug {
+                    status: bug.status.clone(),
+                    owner: bug.owner.clone(),
+                    created: bug.created.clone(),
+                    assigned_time,
+                    kinds,
+                    last_seen: seen_at.clone(),
+                };
+                store.seen.insert(key.clone(), seen.clone());
+                seen_updates.push((key, seen));
             }
 
             if baseline {
                 store
                     .baseline_done
-                    .insert(workspace_id.to_string(), format_tapd_time(now));
+                    .insert(workspace_id.to_string(), seen_at.clone());
             }
-            store
-                .cursors
-                .insert(workspace_id.to_string(), format_tapd_time(now));
-            if store.items.len() > MAX_ITEMS {
+            // A complete round advances the cursor. An incomplete incremental
+            // round keeps it so the unread tail is retried next poll; a
+            // baseline always advances to avoid re-baselining every 30s.
+            let cursor = if baseline || complete {
+                store
+                    .cursors
+                    .insert(workspace_id.to_string(), seen_at.clone());
+                Some(seen_at.clone())
+            } else {
+                None
+            };
+            let trim_items = if store.items.len() > MAX_ITEMS {
                 let excess = store.items.len() - MAX_ITEMS;
                 store.items.drain(0..excess);
-            }
-        }
+                true
+            } else {
+                false
+            };
+            let baseline_at = baseline.then(|| seen_at.clone());
 
-        self.persist();
+            (
+                seen_updates,
+                new_items,
+                ignore_lifted,
+                cursor,
+                baseline_at,
+                trim_items,
+            )
+        };
+
+        notification_db::write_poll(
+            &self.state.cache,
+            workspace_id,
+            PollWrite {
+                seen: &seen_updates,
+                items: &new_items,
+                ignore_lifted: &ignore_lifted,
+                cursor: cursor.as_deref(),
+                baseline: baseline_at.as_deref(),
+                trim_items,
+                max_items: MAX_ITEMS,
+            },
+        );
+
         Ok(())
+    }
+
+    /// Fetches every page of a poll query up to `max_pages`.
+    ///
+    /// Returns `(bugs, complete)`. `complete == false` means the page cap was
+    /// hit with a full page, so the tail is still unread.
+    async fn fetch_bug_pages(
+        &self,
+        query: &mut BugQuery,
+        max_pages: u32,
+    ) -> Result<(Vec<tapd_core::tapd::BugSummary>, bool), String> {
+        let mut all = Vec::new();
+        let mut page_no = 1;
+        loop {
+            query.page = page_no;
+            let root = session_request_json(
+                &self.app,
+                "POST",
+                &bug_list_url(),
+                Some(query.body()),
+                Duration::from_secs(60),
+            )
+            .await?;
+            let page = parse_bug_list(&root)?;
+            let fetched = page.bugs.len();
+            let total = page.total as usize;
+            all.extend(page.bugs);
+
+            let short_page = fetched < POLL_PAGE_SIZE as usize;
+            // `total` is unreliable (it falls back to the page length when the
+            // response omits it), so a full page alone keeps the loop going.
+            let reached_total = total > 0 && all.len() >= total;
+            let complete = short_page || reached_total;
+            if complete || page_no >= max_pages {
+                return Ok((all, complete));
+            }
+            page_no += 1;
+        }
     }
 }
 
@@ -1132,6 +1308,25 @@ fn service() -> Result<Arc<NotificationService>, String> {
         .get()
         .cloned()
         .ok_or_else(|| "通知服务尚未初始化".to_string())
+}
+
+/// Effective poll interval, for run-info / diagnostics. Falls back to `None`
+/// before the service is initialized (the caller uses the config value).
+pub fn poll_interval_secs() -> Option<u64> {
+    SERVICE
+        .get()
+        .map(|service| service.settings().poll_interval_secs)
+}
+
+/// Redacted settings snapshot for the diagnostics bundle. Falls back to the
+/// database row when the notification service is not initialized (tests).
+pub fn settings_for_diagnostics(state: &SharedState) -> Value {
+    if let Ok(service) = service() {
+        return serde_json::to_value(service.settings()).unwrap_or(Value::Null);
+    }
+    notification_db::load(&state.cache)
+        .and_then(|store| serde_json::to_value(store.settings).ok())
+        .unwrap_or(Value::Null)
 }
 
 // ---------------------------------------------------------------------------
@@ -1472,18 +1667,74 @@ fn focus_main_window(app: &AppHandle) {
 // Init / polling loop
 // ---------------------------------------------------------------------------
 
+/// One-time settings migrations; returns whether the store changed.
+fn migrate_settings(store: &mut NotificationStore) -> bool {
+    if store.settings_version >= CURRENT_SETTINGS_VERSION {
+        return false;
+    }
+    // Pre-1.0 stores were written with the 60s default. Move the untouched
+    // default to 30s; a deliberately chosen 60s cannot be told apart, so it is
+    // migrated too and can be raised again in settings.
+    if store.settings.poll_interval_secs == LEGACY_POLL_INTERVAL_SECS {
+        store.settings.poll_interval_secs = DEFAULT_POLL_INTERVAL_SECS;
+    }
+    store.settings_version = CURRENT_SETTINGS_VERSION;
+    true
+}
+
+/// Reads the pre-SQLite snapshot. Kept deliberately one-shot: the file is
+/// renamed right after a successful import.
+fn import_legacy_store(path: &Path) -> Option<NotificationStore> {
+    let store: NotificationStore = read_json(path)?;
+    tracing::info!(path = %path.display(), "imported legacy notifications.json into SQLite");
+    Some(store)
+}
+
+fn archive_legacy_store(path: &Path) {
+    if !path.exists() {
+        return;
+    }
+    let backup = path.with_extension("json.bak");
+    match std::fs::rename(path, &backup) {
+        Ok(()) => tracing::info!(path = %backup.display(), "archived legacy notifications.json"),
+        Err(error) => {
+            tracing::warn!(%error, path = %path.display(), "failed to archive legacy notifications.json")
+        }
+    }
+}
+
 pub fn init(app: &AppHandle, state: SharedState) {
-    let path = state.paths.data_dir.join(STORE_FILE);
-    let store: NotificationStore = read_json(&path).unwrap_or_default();
-    let store = NotificationStore {
-        settings: store.settings.normalized(),
-        ..store
+    let legacy_path = state.paths.data_dir.join(LEGACY_STORE_FILE);
+    let loaded = notification_db::load(&state.cache);
+    let loaded_from_db = loaded.is_some();
+    // Only a confirmed-missing settings row may be initialized; a failed load
+    // must keep the legacy file and the in-memory defaults instead of wiping.
+    let writable = loaded_from_db || notification_db::is_fresh(&state.cache);
+    let mut store = match loaded {
+        Some(store) => store,
+        // Fresh install or the first launch after the SQLite migration: adopt
+        // the old JSON snapshot once, then keep only the database.
+        None => import_legacy_store(&legacy_path).unwrap_or_default(),
     };
+
+    let migrated = migrate_settings(&mut store);
+    store.settings = store.settings.clone().normalized();
+    let persisted = if writable && (!loaded_from_db || migrated) {
+        notification_db::save_store(&state.cache, &store)
+    } else {
+        writable
+    };
+    if persisted {
+        archive_legacy_store(&legacy_path);
+    }
+
+    let now = Local::now().naive_local();
+    let removed = prune_seen(&mut store, now);
+    notification_db::delete_seen(&state.cache, &removed);
 
     let service = Arc::new(NotificationService {
         app: app.clone(),
         state,
-        path,
         store: Mutex::new(store),
         workspace_names: Mutex::new(BTreeMap::new()),
         default_workspace: Mutex::new(None),
@@ -1512,7 +1763,10 @@ pub fn init(app: &AppHandle, state: SharedState) {
                 service.poll_once().await;
             }
 
-            let interval = service.settings().poll_interval_secs.clamp(20, 600);
+            let interval = service
+                .settings()
+                .poll_interval_secs
+                .clamp(MIN_POLL_INTERVAL_SECS, MAX_POLL_INTERVAL_SECS);
             tokio::select! {
                 _ = tokio::time::sleep(Duration::from_secs(interval)) => {}
                 _ = service.wake.notified() => {}
@@ -1539,8 +1793,10 @@ pub async fn command(
         "notification_settings_set" => {
             let service = service()?;
             let settings = apply_settings_patch(&service, &payload)?;
-            service.persist();
-            service.wake.notify_waiters();
+            service.persist_settings();
+            // `notify_one` keeps a permit when the loop is not waiting; the
+            // old `notify_waiters` lost the wake-up if a poll was in flight.
+            service.wake.notify_one();
             service.refresh_window();
             Ok(json!({ "settings": settings }))
         }
@@ -1655,13 +1911,14 @@ fn view_notification(
 
 fn ignore_notification(service: &NotificationService, id: &str) -> Result<Value, String> {
     let item = service.find_item(id)?;
+    let key = bug_key(&item.workspace_id, &item.bug_id);
     {
         let mut store = service.store.lock().expect("notification store lock");
-        let key = bug_key(&item.workspace_id, &item.bug_id);
         if !store.ignored.iter().any(|ignored| ignored == &key) {
-            store.ignored.push(key);
+            store.ignored.push(key.clone());
         }
     }
+    notification_db::insert_ignored(&service.state.cache, &key);
     let item = service.set_state(id, NotificationState::Ignored)?;
     service.refresh_window();
     Ok(json!({ "ok": true, "item": item }))
@@ -2145,6 +2402,7 @@ mod tests {
             created: "2026-11-09 09:00:00".to_string(),
             assigned_time: String::new(),
             kinds: kinds.iter().map(|kind| kind.to_string()).collect(),
+            last_seen: String::new(),
         }
     }
 
@@ -2530,6 +2788,105 @@ mod tests {
         .normalized();
         assert_eq!(settings.poll_interval_secs, 600);
         assert_eq!(settings.max_visible, 1);
+    }
+
+    #[test]
+    fn default_poll_interval_is_30s() {
+        assert_eq!(
+            NotificationSettings::default().poll_interval_secs,
+            DEFAULT_POLL_INTERVAL_SECS
+        );
+        assert_eq!(DEFAULT_POLL_INTERVAL_SECS, 30);
+    }
+
+    #[test]
+    fn settings_migration_moves_the_old_default_to_30s() {
+        let mut store = NotificationStore {
+            settings_version: 0,
+            settings: NotificationSettings {
+                poll_interval_secs: LEGACY_POLL_INTERVAL_SECS,
+                ..NotificationSettings::default()
+            },
+            ..NotificationStore::default()
+        };
+        assert!(migrate_settings(&mut store));
+        assert_eq!(store.settings.poll_interval_secs, 30);
+        assert_eq!(store.settings_version, CURRENT_SETTINGS_VERSION);
+        // Once migrated, a value the user set later is left alone.
+        store.settings.poll_interval_secs = 120;
+        assert!(!migrate_settings(&mut store));
+        assert_eq!(store.settings.poll_interval_secs, 120);
+    }
+
+    #[test]
+    fn legacy_store_file_deserializes_as_v0() {
+        // Field-level default would give 0, but the container default is what
+        // serde applies; this guards the invariant the migration relies on.
+        let store: NotificationStore = serde_json::from_value(json!({
+            "settings": { "pollIntervalSecs": 60 }
+        }))
+        .unwrap();
+        assert_eq!(store.settings_version, 0);
+        assert_eq!(store.settings.poll_interval_secs, 60);
+    }
+
+    #[test]
+    fn transfer_back_is_detected_from_a_new_assigned_time() {
+        let mut previous = seen("in_progress", "何帅", &["new"]);
+        previous.assigned_time = "2026-11-01 09:00:00".to_string();
+
+        // "Mine" never saw the bug while it was assigned to someone else, so
+        // the new assigned_time is the only transfer evidence.
+        let kind = classify_bug(
+            "in_progress",
+            "何帅",
+            "2026-11-01 09:00:00",
+            "2026-11-10 11:58:00",
+            Some(&previous),
+            "何帅",
+            at(12, 0),
+            true,
+        );
+        assert_eq!(kind, Some(NotificationKind::Transferred));
+
+        // The same assignment observed again on the next round stays silent.
+        let mut observed = previous.clone();
+        observed.assigned_time = "2026-11-10 11:58:00".to_string();
+        let kind = classify_bug(
+            "in_progress",
+            "何帅",
+            "2026-11-01 09:00:00",
+            "2026-11-10 11:58:00",
+            Some(&observed),
+            "何帅",
+            at(12, 0),
+            true,
+        );
+        assert_eq!(kind, None);
+    }
+
+    #[test]
+    fn prune_seen_drops_stale_rows() {
+        let now = at(12, 0);
+        let mut store = NotificationStore::default();
+        store.seen.insert(
+            "1:1".to_string(),
+            SeenBug {
+                last_seen: "2026-11-10 11:00:00".to_string(),
+                ..SeenBug::default()
+            },
+        );
+        store.seen.insert(
+            "1:2".to_string(),
+            SeenBug {
+                last_seen: "2025-01-01 00:00:00".to_string(),
+                ..SeenBug::default()
+            },
+        );
+
+        let removed = prune_seen(&mut store, now);
+        assert_eq!(removed, vec!["1:2".to_string()]);
+        assert!(store.seen.contains_key("1:1"));
     }
 
     #[test]

@@ -4,7 +4,7 @@ use std::{
 };
 
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tapd_core::{
     bridge::{BridgeHttpResult, BridgePing, CapturedRequest},
@@ -12,13 +12,16 @@ use tapd_core::{
     tapd::{
         api::{
             bug_detail_body, bug_detail_url, bug_list_url, parse_bug_detail, parse_bug_list,
-            parse_workspaces, user_workspace_url, BugQuery,
+            parse_workspace_members, parse_workspaces, user_chooser_all_body,
+            user_chooser_url, user_workspace_url, workspace_members_url, BugQuery,
         },
-        changes_list_url, parse_changes_html, BugDetail, BugListPage, ChangeHistory, Workspace,
+        changes_list_url, parse_changes_html, BugDetail, BugListPage, ChangeHistory,
+        Workspace, WorkspaceMember,
     },
 };
 
 use crate::{
+    bug_write::{self, normalize_user_value, EDITABLE_USER_FIELDS},
     mcp_audit::McpAuditEntry,
     open_with, session,
     state::SharedState,
@@ -132,7 +135,10 @@ pub fn app_info(state: State<'_, SharedState>) -> AppInfo {
         me: config.me,
         me_avatar: config.me_avatar,
         last_workspace_id: config.last_workspace_id,
-        poll_interval_secs: config.poll_interval_secs,
+        // The live notification setting is the real cadence; the config value is
+        // only a fallback before the notification service is initialized.
+        poll_interval_secs: crate::notification::poll_interval_secs()
+            .unwrap_or(config.poll_interval_secs),
         runtime_port: runtime.as_ref().map(|runtime| runtime.port),
         media_port: runtime.as_ref().map(|runtime| runtime.port),
         media_token: runtime.map(|runtime| runtime.media_token),
@@ -567,6 +573,171 @@ pub async fn bug_detail(
     state.cache.put_bug_detail(&workspace_id, &bug_id, &detail);
 
     Ok(detail)
+}
+
+/// Lists the people who can be assigned as owner / developer in a workspace.
+///
+/// `get_workspace_members` is the primary source; older workspaces may answer
+/// with an empty list, in which case the user chooser's full directory is used.
+#[tauri::command]
+pub async fn workspace_members(
+    app: AppHandle,
+    state: State<'_, SharedState>,
+    workspace_id: String,
+) -> Result<Vec<WorkspaceMember>, String> {
+    let workspace_id = workspace_id.trim();
+    if workspace_id.is_empty() {
+        return Err("缺少项目 id".to_string());
+    }
+
+    // Primary source; a 404/older project simply falls through to the chooser.
+    let primary = fetch_workspace_members(&app, workspace_members_url(workspace_id)).await;
+    let mut members = primary.as_ref().map(|items| items.clone()).unwrap_or_default();
+    if members.is_empty() {
+        let root = session_request_json(
+            &app,
+            "POST",
+            &user_chooser_url(),
+            Some(user_chooser_all_body(workspace_id)),
+            Duration::from_secs(30),
+        )
+        .await?;
+        members = parse_workspace_members(&root);
+    }
+    if !members.is_empty() {
+        state.cache.put_workspace_members(workspace_id, &members);
+    }
+
+    Ok(members)
+}
+
+async fn fetch_workspace_members(
+    app: &AppHandle,
+    url: String,
+) -> Result<Vec<WorkspaceMember>, String> {
+    let root =
+        session_request_json(app, "GET", &url, None, Duration::from_secs(30)).await?;
+    Ok(parse_workspace_members(&root))
+}
+
+/// Appends a plain-text comment to a bug.
+#[tauri::command]
+pub async fn bug_add_comment(
+    app: AppHandle,
+    workspace_id: String,
+    bug_id: String,
+    comment: String,
+) -> Result<(), String> {
+    let text = comment.trim();
+    if text.is_empty() {
+        return Err("评论不能为空".to_string());
+    }
+    bug_write::add_comment(&app, workspace_id.trim(), bug_id.trim(), text).await?;
+    Ok(())
+}
+
+/// Changes the owner (`current_owner`) or developer (`de`) of a bug.
+#[tauri::command]
+pub async fn bug_update_field(
+    app: AppHandle,
+    workspace_id: String,
+    bug_id: String,
+    field: String,
+    value: String,
+) -> Result<(), String> {
+    let field = field.trim();
+    if !EDITABLE_USER_FIELDS.contains(&field) {
+        return Err("只支持修改处理人与开发人员".to_string());
+    }
+    let value = normalize_user_value(&value);
+    if value.is_empty() {
+        return Err("请选择人员".to_string());
+    }
+
+    bug_write::update_field(
+        &app,
+        workspace_id.trim(),
+        bug_id.trim(),
+        field,
+        &value,
+    )
+    .await
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BugTransitionChoice {
+    key: String,
+    label: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BugTransitionInfo {
+    current_status: String,
+    current_label: String,
+    transitions: Vec<BugTransitionChoice>,
+}
+
+/// Lists the workflow transitions available from a bug's current status.
+#[tauri::command]
+pub async fn bug_transitions(
+    app: AppHandle,
+    workspace_id: String,
+    bug_id: String,
+) -> Result<BugTransitionInfo, String> {
+    let info =
+        bug_write::load_transition_info(&app, workspace_id.trim(), bug_id.trim()).await?;
+    let current_label = info
+        .status_alias
+        .get(&info.current_status)
+        .cloned()
+        .unwrap_or_else(|| info.current_status.clone());
+    let transitions = info
+        .transitions
+        .into_iter()
+        .map(|(key, label)| BugTransitionChoice { key, label })
+        .collect();
+
+    Ok(BugTransitionInfo {
+        current_status: info.current_status,
+        current_label,
+        transitions,
+    })
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BugTransitionResult {
+    from: String,
+    status: String,
+    label: String,
+    changed: bool,
+}
+
+/// Moves a bug to another workflow status.
+#[tauri::command]
+pub async fn bug_transition(
+    app: AppHandle,
+    workspace_id: String,
+    bug_id: String,
+    status: String,
+) -> Result<BugTransitionResult, String> {
+    let outcome = bug_write::perform_transition(
+        &app,
+        workspace_id.trim(),
+        bug_id.trim(),
+        status.trim(),
+        &json!([]),
+    )
+    .await?;
+
+    Ok(BugTransitionResult {
+        from: outcome.original_status,
+        status: outcome.status,
+        label: outcome.label,
+        changed: !outcome.steps.is_empty(),
+    })
 }
 
 /// Loads a bug together with its change history.

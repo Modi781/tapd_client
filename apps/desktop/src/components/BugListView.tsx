@@ -8,9 +8,11 @@ import {
   ExternalLink,
   Eye,
   ListFilter,
+  Loader2,
   RefreshCw,
   Search,
   Sparkles,
+  UserPlus,
   UserRound,
   Users,
   WifiOff,
@@ -24,6 +26,7 @@ import {
   type BugSummary,
   type Workspace,
 } from "../lib/api";
+import { isMyBug } from "../lib/bug";
 import { cacheApi, type Cached } from "../lib/cache";
 import { beginRefresh } from "../lib/refresh";
 import { SkeletonRows } from "./Skeleton";
@@ -63,6 +66,16 @@ const SEVERITIES = [
   ["advice", "建议"],
 ];
 
+/**
+ * Bug list auto-refresh cadence.
+ *
+ * Deliberately independent of the notification poll: that loop only emits
+ * `data://refresh` when it produces a notification item, so edits, comments and
+ * status changes (or a disabled notification toggle) left the table stale until
+ * the user pressed 刷新.
+ */
+const AUTO_REFRESH_MS = 30_000;
+
 type Scope = "mine" | "all";
 
 type Props = {
@@ -75,6 +88,8 @@ type Props = {
   onOpenWeb?: (url: string) => void;
   onCopyLink?: (url: string) => void;
   onAgentFix?: (bug: BugSummary) => void;
+  /** Claim a bug owned by someone else, which unlocks its actions. */
+  onClaim?: (bug: BugSummary) => Promise<void>;
   refreshToken: number;
 };
 
@@ -88,6 +103,7 @@ function BugListViewImpl(props: Props) {
     onOpenWeb,
     onCopyLink,
     onAgentFix,
+    onClaim,
     refreshToken,
   } = props;
 
@@ -105,6 +121,12 @@ function BugListViewImpl(props: Props) {
   const [snapshotAt, setSnapshotAt] = useState<number | null>(null);
   /** Newest request wins; older responses (filters/page changed) are dropped. */
   const requestIdRef = useRef(0);
+  /** Skips an auto-refresh tick while a request is already in flight. */
+  const loadingRef = useRef(false);
+  /** When the last request for the current query finished. */
+  const lastLoadedAtRef = useRef(0);
+  /** Bug id whose claim request is in flight. */
+  const [claimingId, setClaimingId] = useState<string | null>(null);
 
   useEffect(() => {
     const timer = window.setTimeout(() => setDebouncedKeyword(keyword.trim()), 300);
@@ -115,7 +137,7 @@ function BugListViewImpl(props: Props) {
     setPageNo(1);
   }, [scope]);
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (silent = false) => {
     if (!workspace) return;
 
     const query: BugQuery = {
@@ -135,37 +157,48 @@ function BugListViewImpl(props: Props) {
     };
 
     const requestId = ++requestIdRef.current;
+    loadingRef.current = true;
 
     // Cache-first: paint the last snapshot for exactly this query before the
     // network round-trip, so a slow/offline TAPD never shows an empty table.
+    // A background refresh already has a table on screen, so it skips this and
+    // cannot flash an older snapshot over the current rows.
     let cached: Cached<BugListPage> | null = null;
-    try {
-      cached = await cacheApi.bugList(query);
-    } catch {
-      // A cache read failure is not a page failure; the live request decides.
-    }
-    if (requestId !== requestIdRef.current) return;
+    if (!silent) {
+      try {
+        cached = await cacheApi.bugList(query);
+      } catch {
+        // A cache read failure is not a page failure; the live request decides.
+      }
+      if (requestId !== requestIdRef.current) return;
 
-    const snapshot = cached?.data ?? null;
-    const snapshotFetchedAt = cached?.fetchedAt ?? null;
-    if (snapshot) {
-      setPage(snapshot);
-      setSnapshotAt(snapshotFetchedAt);
+      const snapshot = cached?.data ?? null;
+      if (snapshot) {
+        setPage(snapshot);
+        setSnapshotAt(cached?.fetchedAt ?? null);
+      }
     }
 
-    setError(null);
-    setLoading(true);
-    const done = beginRefresh();
+    if (!silent) {
+      setError(null);
+      setLoading(true);
+    }
+    // Background refreshes stay invisible: no table dimming and no global
+    // "更新中" indicator every 30 seconds.
+    const done = silent ? () => {} : beginRefresh();
     try {
       const result = await api.bugList(query);
       if (requestId !== requestIdRef.current) return;
       setPage(result);
       setSnapshotAt(null);
+      setError(null);
     } catch (cause) {
       if (requestId !== requestIdRef.current) return;
-      if (snapshot) {
+      if (silent) {
+        // Keep the last good table; the next visible refresh surfaces failures.
+      } else if (cached?.data) {
         // Offline: keep the cached table and let the inline notice explain it.
-        setSnapshotAt(snapshotFetchedAt);
+        setSnapshotAt(cached.fetchedAt ?? null);
       } else {
         setError(String(cause));
         setPage(null);
@@ -173,13 +206,37 @@ function BugListViewImpl(props: Props) {
       }
     } finally {
       done();
-      if (requestId === requestIdRef.current) setLoading(false);
+      if (requestId === requestIdRef.current) {
+        loadingRef.current = false;
+        lastLoadedAtRef.current = Date.now();
+        if (!silent) setLoading(false);
+      }
     }
   }, [workspace, scope, me, statusFilter, priority, severity, debouncedKeyword, pageNo]);
+
+  const loadRef = useRef(load);
+  loadRef.current = load;
 
   useEffect(() => {
     void load();
   }, [load, reloadTick, refreshToken]);
+
+  // Auto-refresh the visible list. Hidden windows pause; becoming visible
+  // again catches up immediately when the snapshot is older than one interval.
+  useEffect(() => {
+    const tick = () => {
+      if (document.visibilityState !== "visible") return;
+      if (loadingRef.current) return;
+      if (Date.now() - lastLoadedAtRef.current < AUTO_REFRESH_MS) return;
+      void loadRef.current(true);
+    };
+    const timer = window.setInterval(tick, AUTO_REFRESH_MS);
+    document.addEventListener("visibilitychange", tick);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", tick);
+    };
+  }, []);
 
   const statusEntries = getStatusEntries(page);
   const activeFilterCount =
@@ -201,6 +258,18 @@ function BugListViewImpl(props: Props) {
     setPriority("");
     setSeverity("");
     setKeyword("");
+  };
+
+  const claim = async (bug: BugSummary) => {
+    if (!onClaim || claimingId) return;
+    setClaimingId(bug.id);
+    try {
+      await onClaim(bug);
+    } catch {
+      // App reports the failure; the row just returns to its claim button.
+    } finally {
+      setClaimingId(null);
+    }
   };
 
   return (
@@ -452,34 +521,58 @@ function BugListViewImpl(props: Props) {
                     className="sticky right-0 z-10 border-l border-slate-100 bg-white px-2 py-2.5 group-hover:bg-sky-50"
                     onClick={(event) => event.stopPropagation()}
                   >
-                    <div className="flex items-center justify-end gap-0.5">
-                      <RowAction
-                        label="查看详情"
-                        onClick={() => onOpenBug(bug)}
-                        icon={<Eye size={13} />}
-                      />
-                      {onOpenWeb ? (
+                    {!isMyBug(bug.owner, me) ? (
+                      <div className="flex items-center justify-center">
+                        <button
+                          type="button"
+                          title="认领后可以评论、修改处理人/开发人员与流转状态"
+                          disabled={claimingId !== null}
+                          onClick={() => void claim(bug)}
+                          className={clsx(
+                            "inline-flex items-center justify-center gap-1 rounded-md border border-sky-200 bg-sky-50 px-3 py-1 text-[11px] font-medium text-sky-700 transition",
+                            claimingId === null
+                              ? "hover:border-sky-300 hover:bg-sky-100"
+                              : "cursor-not-allowed opacity-60",
+                          )}
+                        >
+                          {claimingId === bug.id ? (
+                            <Loader2 size={12} className="animate-spin" />
+                          ) : (
+                            <UserPlus size={12} />
+                          )}
+                          {claimingId === bug.id ? "认领中" : "认领"}
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="flex items-center justify-end gap-0.5">
                         <RowAction
-                          label="在 TAPD 中打开"
-                          onClick={() => onOpenWeb(bug.bugUrl)}
-                          icon={<ExternalLink size={13} />}
+                          label="查看详情"
+                          onClick={() => onOpenBug(bug)}
+                          icon={<Eye size={13} />}
                         />
-                      ) : null}
-                      {onCopyLink ? (
-                        <RowAction
-                          label="复制链接"
-                          onClick={() => onCopyLink(bug.bugUrl)}
-                          icon={<Copy size={13} />}
-                        />
-                      ) : null}
-                      {onAgentFix ? (
-                        <RowAction
-                          label="用 Agent 修复"
-                          onClick={() => onAgentFix(bug)}
-                          icon={<Sparkles size={13} />}
-                        />
-                      ) : null}
-                    </div>
+                        {onOpenWeb ? (
+                          <RowAction
+                            label="在 TAPD 中打开"
+                            onClick={() => onOpenWeb(bug.bugUrl)}
+                            icon={<ExternalLink size={13} />}
+                          />
+                        ) : null}
+                        {onCopyLink ? (
+                          <RowAction
+                            label="复制链接"
+                            onClick={() => onCopyLink(bug.bugUrl)}
+                            icon={<Copy size={13} />}
+                          />
+                        ) : null}
+                        {onAgentFix ? (
+                          <RowAction
+                            label="用 Agent 修复"
+                            onClick={() => onAgentFix(bug)}
+                            icon={<Sparkles size={13} />}
+                          />
+                        ) : null}
+                      </div>
+                    )}
                   </td>
                 </tr>
               ))}

@@ -78,7 +78,6 @@ export function CapturesPage({ toast, onOpenPath }: Props) {
     try {
       const path = await api.exportCaptures();
       setLastExport(path);
-      toast("ok", `抓包已导出：${path}`);
     } catch (error) {
       toast("error", String(error));
     } finally {
@@ -92,7 +91,6 @@ export function CapturesPage({ toast, onOpenPath }: Props) {
       await api.clearCaptures();
       setCaptures([]);
       setExpanded(null);
-      toast("ok", "已清空抓包记录");
     } catch (error) {
       toast("error", String(error));
     } finally {

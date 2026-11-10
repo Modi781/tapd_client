@@ -1,5 +1,11 @@
 import { featureCommand } from "./feature";
-import type { BugDetail, BugListPage, BugQuery, WorkspaceContext } from "./api";
+import type {
+  BugDetail,
+  BugListPage,
+  BugQuery,
+  WorkspaceContext,
+  WorkspaceMember,
+} from "./api";
 
 /**
  * A cached payload returned by the Rust offline cache. `fetchedAt` is a Unix
@@ -18,5 +24,9 @@ export const cacheApi = {
     featureCommand<Cached<BugListPage>>("cache_bug_list", { query }),
   bugDetail: (workspaceId: string, bugId: string) =>
     featureCommand<Cached<BugDetail>>("cache_bug_detail", { workspaceId, bugId }),
+  workspaceMembers: (workspaceId: string) =>
+    featureCommand<Cached<WorkspaceMember[]>>("cache_workspace_members", {
+      workspaceId,
+    }),
   clear: () => featureCommand<{ ok: boolean }>("cache_clear"),
 };

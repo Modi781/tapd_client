@@ -235,7 +235,7 @@ sync_state(workspace_id PK, last_poll_at, last_full_at, baseline_done);
 
 ### 7.2 同步与通知判定
 
-- 轮询间隔默认 60s（20–600s 可配）；「我的」范围跨项目增量轮询，「项目」范围只同步当前项目。
+- 轮询间隔默认 30s（20–600s 可配）；「我的」范围跨项目增量轮询，「项目」范围只同步当前项目。
 - 首次同步某项目：全量拉取我的缺陷，标记 `baseline_done`，**不弹通知**（避免首启爆炸）。
 - 后续每轮：
   1. 拉取 `owner == me` 且 `modified >= last_poll - 5min` 的缺陷（若无此筛选能力则分页全量 diff）。
@@ -566,7 +566,7 @@ exporter: "tapd-client/1.0"
 2. **SQLite 已接入**：`cache.sqlite3` 保存项目、缺陷列表快照与详情；UI 先读缓存再后台刷新，只有首次登录无缓存时显示骨架屏。通知轮询在「我的」范围下已跨项目增量执行，每个项目独立 cursor / baseline；「项目」范围保持单项目轮询，避免过量请求。
 3. **MCP 写回已开放**：在查询/导出之外新增评论与状态更新（含自动先接受再流转）；删除/改处理人/批量操作仍未开放。客户端已提供策略档案（写开关、项目白名单、状态白名单）与调用审计（允许 / 拒绝 / 失败、耗时、客户端、项目/缺陷），审计不保存评论正文。
 4. **opencode v2 配置结构**：使用 `mcp.servers.<name>`，而不是旧文档里的 `mcp.<name>`；已实测 `opencode mcp list` 显示 connected；MCP tab 可一键合并到全局配置并自动备份。
-5. **通知采用自绘窗口 + JSON 游标**：`notifications.json` 保存设置、seen、ignored、cursor 与 baseline；首轮只建 baseline，避免历史缺陷轰炸。
+5. **通知采用自绘窗口 + SQLite 状态**：`cache.sqlite3` 的 `notification_*` 表保存设置、seen、ignored、cursor 与 baseline（旧的 `notifications.json` 首次启动导入后归档）；首轮只建 baseline，避免历史缺陷轰炸。轮询分页拉取，未读完时保留 cursor；seen 按时间与条数裁剪。
 6. **处理动作会写 TAPD**：点击「处理」自动改派给自己，并把 `new`/`open`/`reopened` 流转到 `in_progress`/`progressing`；成功后通过 `agent://enqueue` 交给 Agent。
 7. **Agent 严格串行 + server 旁路**：单 worker；每个任务启动私有 `opencode serve`，TUI 通过 `--server` 连接，Rust 订阅 `/event` 判断 idle/权限请求；终端内嵌在 Agent tab，不再创建独立窗口。
 

@@ -20,6 +20,7 @@ use crate::state::SharedState;
 const KIND_WORKSPACES: &str = "workspace_context";
 const KIND_BUG_LIST: &str = "bug_list";
 const KIND_BUG_DETAIL: &str = "bug_detail";
+const KIND_WORKSPACE_MEMBERS: &str = "workspace_members";
 
 /// SQLite-backed cache. A failed open leaves the cache disabled instead of
 /// aborting application startup; every method then behaves like a miss.
@@ -125,7 +126,87 @@ impl Cache {
                 .map_err(|error| error.to_string())?;
         }
 
+        if version < 3 {
+            // Notification state replaces the old notifications.json file.
+            // Settings live in a single row; everything else is written
+            // incrementally so a 30s poll never rewrites the whole state.
+            conn.execute_batch(
+                r#"
+                CREATE TABLE IF NOT EXISTS notification_settings (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    enabled INTEGER NOT NULL,
+                    scope TEXT NOT NULL,
+                    include_new INTEGER NOT NULL,
+                    include_transferred INTEGER NOT NULL,
+                    include_reopened INTEGER NOT NULL,
+                    poll_interval_secs INTEGER NOT NULL,
+                    quiet_enabled INTEGER NOT NULL,
+                    quiet_start TEXT NOT NULL,
+                    quiet_end TEXT NOT NULL,
+                    max_visible INTEGER NOT NULL,
+                    settings_version INTEGER NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS notification_items (
+                    id TEXT PRIMARY KEY,
+                    workspace_id TEXT NOT NULL,
+                    workspace_name TEXT NOT NULL DEFAULT '',
+                    bug_id TEXT NOT NULL,
+                    title TEXT NOT NULL DEFAULT '',
+                    kind TEXT NOT NULL,
+                    owner TEXT NOT NULL DEFAULT '',
+                    creator TEXT NOT NULL DEFAULT '',
+                    severity TEXT NOT NULL DEFAULT '',
+                    priority TEXT NOT NULL DEFAULT '',
+                    created TEXT NOT NULL DEFAULT '',
+                    detected_at TEXT NOT NULL DEFAULT '',
+                    state TEXT NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_notification_items_detected
+                    ON notification_items (detected_at);
+
+                CREATE TABLE IF NOT EXISTS notification_seen (
+                    bug_key TEXT PRIMARY KEY,
+                    status TEXT NOT NULL DEFAULT '',
+                    owner TEXT NOT NULL DEFAULT '',
+                    created TEXT NOT NULL DEFAULT '',
+                    assigned_time TEXT NOT NULL DEFAULT '',
+                    kinds TEXT NOT NULL DEFAULT '',
+                    last_seen TEXT NOT NULL DEFAULT ''
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_notification_seen_last_seen
+                    ON notification_seen (last_seen);
+
+                CREATE TABLE IF NOT EXISTS notification_ignored (
+                    bug_key TEXT PRIMARY KEY
+                );
+
+                CREATE TABLE IF NOT EXISTS notification_cursors (
+                    workspace_id TEXT PRIMARY KEY,
+                    cursor TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS notification_baseline (
+                    workspace_id TEXT PRIMARY KEY,
+                    done_at TEXT NOT NULL
+                );
+                "#,
+            )
+            .map_err(|error| error.to_string())?;
+            conn.pragma_update(None, "user_version", 3)
+                .map_err(|error| error.to_string())?;
+        }
+
         Ok(())
+    }
+
+    /// Runs `f` against the shared connection. `None` means SQLite is disabled
+    /// (the cache failed to open), so callers degrade to in-memory behaviour.
+    pub fn with_conn<T>(&self, f: impl FnOnce(&Connection) -> T) -> Option<T> {
+        let guard = self.conn.lock().expect("cache lock");
+        guard.as_ref().map(f)
     }
 
     pub fn get(&self, kind: &str, key: &str) -> Option<(String, i64)> {
@@ -201,6 +282,17 @@ impl Cache {
         bug_id: &str,
     ) -> Option<(T, i64)> {
         self.get_snapshot(KIND_BUG_DETAIL, &bug_detail_key(workspace_id, bug_id))
+    }
+
+    pub fn put_workspace_members<T: Serialize>(&self, workspace_id: &str, value: &T) {
+        self.put_snapshot(KIND_WORKSPACE_MEMBERS, workspace_id, value);
+    }
+
+    pub fn get_workspace_members<T: DeserializeOwned>(
+        &self,
+        workspace_id: &str,
+    ) -> Option<(T, i64)> {
+        self.get_snapshot(KIND_WORKSPACE_MEMBERS, workspace_id)
     }
 
     pub fn put_bug_records(&self, workspace_id: &str, bugs: &[BugSummary]) {
@@ -495,6 +587,19 @@ pub async fn command(
             let value = cache.get_bug_detail::<Value>(&workspace_id, &bug_id);
             Ok(serde_json::to_value(cached(value)).unwrap_or_else(|_| Value::Null))
         }
+        "cache_workspace_members" => {
+            let workspace_id = payload
+                .get("workspaceId")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .trim()
+                .to_string();
+            if workspace_id.is_empty() {
+                return Err("缺少 workspaceId".to_string());
+            }
+            let value = cache.get_workspace_members::<Value>(&workspace_id);
+            Ok(serde_json::to_value(cached(value)).unwrap_or_else(|_| Value::Null))
+        }
         "cache_clear" => {
             cache.clear()?;
             Ok(serde_json::json!({ "ok": true }))
@@ -660,7 +765,16 @@ mod tests {
                 |row| row.get(0),
             )
             .expect("agent_tasks table");
-        assert_eq!(version, 2);
+        let notification_table: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                  WHERE type = 'table' AND name = 'notification_settings'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("notification_settings table");
+        assert_eq!(version, 3);
         assert_eq!(table, 1);
+        assert_eq!(notification_table, 1);
     }
 }

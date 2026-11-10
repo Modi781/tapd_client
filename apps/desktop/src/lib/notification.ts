@@ -84,7 +84,7 @@ export const DEFAULT_NOTIFICATION_SETTINGS: NotificationSettings = {
   includeNew: true,
   includeTransferred: true,
   includeReopened: true,
-  pollIntervalSecs: 60,
+  pollIntervalSecs: 30,
   quietHours: { enabled: false, start: "22:00", end: "09:00" },
   maxVisible: 3,
 };

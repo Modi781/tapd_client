@@ -175,12 +175,13 @@ export function AgentPage({ focusTaskId, onOpenBug, toast }: Props) {
   const queuedTasks = runTasks.filter((task) => task.status === "queued");
 
   const runAction = useCallback(
-    async (key: string, action: () => Promise<unknown>, okMessage: string) => {
+    async (key: string, action: () => Promise<unknown>) => {
       if (actionBusy) return;
       setActionBusy(key);
       try {
         await action();
-        toast("ok", okMessage);
+        // The queue re-renders from the pushed `agent://state` snapshot, so a
+        // success toast would only duplicate the visible status change.
         await refresh();
       } catch (error) {
         toast("error", String(error));
@@ -196,14 +197,6 @@ export function AgentPage({ focusTaskId, onOpenBug, toast }: Props) {
     setPermissionBusy(response);
     try {
       await agentApi.permissionReply(runTask.id, response, response === "always");
-      toast(
-        "ok",
-        response === "reject"
-          ? "已拒绝权限请求"
-          : response === "always"
-            ? "已允许并记住该权限"
-            : "已允许一次",
-      );
       await refresh();
     } catch (error) {
       toast("error", String(error));
@@ -231,7 +224,6 @@ export function AgentPage({ focusTaskId, onOpenBug, toast }: Props) {
     setResumeBusy(task.id);
     try {
       await agentApi.openSession(task.id);
-      toast("ok", "已在 Terminal 中恢复该会话");
     } catch (error) {
       toast("error", String(error));
     } finally {
@@ -284,6 +276,10 @@ export function AgentPage({ focusTaskId, onOpenBug, toast }: Props) {
           tasks={historyTasks}
           focusTaskId={focusTaskId}
           onOpenBug={onOpenBug}
+          onQueued={(taskId) => {
+            setExplicitTaskId(taskId);
+            setTab("run");
+          }}
           toast={toast}
         />
       ) : (
@@ -364,7 +360,6 @@ export function AgentPage({ focusTaskId, onOpenBug, toast }: Props) {
                         void runAction(
                           `cancel:${runTask.id}`,
                           () => agentApi.cancel(runTask.id),
-                          "已中断任务",
                         )
                       }
                     >
@@ -513,7 +508,6 @@ export function AgentPage({ focusTaskId, onOpenBug, toast }: Props) {
                               void runAction(
                                 key,
                                 () => agentApi.cancel(task.id),
-                                "已取消排队任务",
                               )
                             }
                             className="grid h-4 w-4 place-items-center rounded text-slate-400 transition hover:bg-rose-50 hover:text-rose-600 disabled:opacity-40"

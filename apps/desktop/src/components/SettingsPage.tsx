@@ -39,7 +39,6 @@ export function SettingsPage(props: Props) {
     setClearing(true);
     try {
       await api.clearAppData();
-      toast("ok", "本地数据已清理，应用正在重启…");
     } catch (error) {
       setClearing(false);
       toast("error", String(error));
@@ -135,7 +134,7 @@ export function SettingsPage(props: Props) {
             />
             <PlainRow
               label="轮询间隔"
-              value={`${info?.pollIntervalSecs ?? 60}s`}
+              value={`${info?.pollIntervalSecs ?? 30}s`}
               onCopy={onCopy}
             />
           </dl>
