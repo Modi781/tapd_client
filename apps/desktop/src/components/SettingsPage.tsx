@@ -39,7 +39,6 @@ export function SettingsPage(props: Props) {
     setClearing(true);
     try {
       await api.clearAppData();
-      toast("ok", "本地数据已清理，应用正在重启…");
     } catch (error) {
       setClearing(false);
       toast("error", String(error));
@@ -91,7 +90,7 @@ export function SettingsPage(props: Props) {
               {info
                 ? `v${info.version} · MCP ${
                     info.runtimePort ? `127.0.0.1:${info.runtimePort}` : "未启动"
-                  } · 轮询 ${info.pollIntervalSecs}s`
+                  }`
                 : "正在读取运行信息…"}
             </p>
           </div>
@@ -131,11 +130,6 @@ export function SettingsPage(props: Props) {
             <PlainRow
               label="MCP 本地端口"
               value={info?.runtimePort ? `127.0.0.1:${info.runtimePort}` : "未启动"}
-              onCopy={onCopy}
-            />
-            <PlainRow
-              label="轮询间隔"
-              value={`${info?.pollIntervalSecs ?? 60}s`}
               onCopy={onCopy}
             />
           </dl>

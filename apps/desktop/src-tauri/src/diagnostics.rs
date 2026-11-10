@@ -46,7 +46,7 @@ fn export_bundle(state: &SharedState) -> Result<DiagnosticsResult, String> {
     write_json(&folder.join("config.sanitized.json"), &sanitized_config(state))?;
     write_json(
         &folder.join("notifications.settings.json"),
-        &notification_settings(&paths.data_dir),
+        &crate::notification::settings_for_diagnostics(state),
     )?;
     write_json(
         &folder.join("agent.summary.json"),
@@ -121,20 +121,12 @@ fn sanitized_config(state: &SharedState) -> Value {
         "me": config.me,
         "onboarded": config.onboarded,
         "lastWorkspaceId": config.last_workspace_id,
-        "pollIntervalSecs": config.poll_interval_secs,
         "deviceName": config.device_name,
         "openWith": config.open_with,
         "islandAnchor": config.island_anchor,
         "hiddenWorkspaceIds": config.hidden_workspace_ids,
         "mcpPolicy": config.mcp_policy,
     })
-}
-
-fn notification_settings(data_dir: &Path) -> Value {
-    let raw = fs::read_to_string(data_dir.join("notifications.json")).ok();
-    raw.and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
-        .and_then(|value| value.get("settings").cloned())
-        .unwrap_or(Value::Null)
 }
 
 fn agent_summary(data_dir: &Path) -> Value {
@@ -297,11 +289,6 @@ mod tests {
         fs::create_dir_all(&exports).unwrap();
 
         fs::write(logs.join("tapd-client.log.2026-01-01"), "hello log\n").unwrap();
-        fs::write(
-            data.join("notifications.json"),
-            r#"{"settings":{"enabled":true,"maxVisible":3}}"#,
-        )
-        .unwrap();
         fs::write(
             data.join("agent.json"),
             r#"{"binaryPath":"opencode","projects":{"1":{"repoPath":"/tmp","rule":""}}}"#,

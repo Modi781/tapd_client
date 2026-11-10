@@ -34,11 +34,13 @@ type Props = {
   /** History row selected by the island capsule / enqueue flow. */
   focusTaskId?: string | null;
   onOpenBug: (workspaceId: string, bugId: string) => void;
+  /** Called after a retry so the parent can focus the task in the run tab. */
+  onQueued?: (taskId: string) => void;
   toast: (kind: "ok" | "error", text: string) => void;
 };
 
 /** Execution records: filterable newest-first list plus a detail/log viewer. */
-export function AgentHistory({ tasks, focusTaskId, onOpenBug, toast }: Props) {
+export function AgentHistory({ tasks, focusTaskId, onOpenBug, onQueued, toast }: Props) {
   const [workspaceFilter, setWorkspaceFilter] = useState("all");
   const [statusFilter, setStatusFilter] = useState<"all" | AgentTaskStatus>("all");
   const [query, setQuery] = useState("");
@@ -115,7 +117,6 @@ export function AgentHistory({ tasks, focusTaskId, onOpenBug, toast }: Props) {
     setResumeBusy(task.id);
     try {
       await agentApi.openSession(task.id);
-      toast("ok", "已在 Terminal 中恢复该会话");
     } catch (error) {
       toast("error", String(error));
     } finally {
@@ -126,8 +127,10 @@ export function AgentHistory({ tasks, focusTaskId, onOpenBug, toast }: Props) {
   const retry = async (task: AgentTask) => {
     setRetryBusy(task.id);
     try {
-      await agentApi.retry(task.id);
-      toast("ok", "已重新加入队列，可在「运行」中查看");
+      const { task: queued } = await agentApi.retry(task.id);
+      // Jump to the run tab with the new task selected: that is the result,
+      // and it is more useful than a toast saying where the task went.
+      onQueued?.(queued.id);
     } catch (error) {
       toast("error", String(error));
     } finally {

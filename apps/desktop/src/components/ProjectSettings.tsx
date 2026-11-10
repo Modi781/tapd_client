@@ -115,7 +115,6 @@ export function ProjectSettings(props: {
                 repoPath: listing.path,
               },
             });
-            toast("ok", `已设置文件夹：${listing.path}`);
           })
           .catch((error) => toast("error", String(error)));
       })

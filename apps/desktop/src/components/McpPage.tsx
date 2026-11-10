@@ -154,7 +154,6 @@ export function McpPage({ workspaces, onCopy, toast }: Props) {
     try {
       await api.mcpAuditClear();
       setAudit([]);
-      toast("ok", "已清空 MCP 审计日志");
     } catch (error) {
       toast("error", String(error));
     } finally {
@@ -162,12 +161,13 @@ export function McpPage({ workspaces, onCopy, toast }: Props) {
     }
   };
 
-  const importClient = async (client: McpClientId, label: string) => {
+  const importClient = async (client: McpClientId) => {
     setImportingClient(client);
     try {
       const result = await mcpApi.importClient(client);
+      // The inline result block below and the refreshed "已导入" badge already
+      // report the outcome; a toast here would be duplicate noise.
       setImportResults((previous) => ({ ...previous, [client]: result }));
-      toast("ok", result.changed ? `已写入 ${label} 配置` : `已导入 ${label}，无需重复写入`);
       await loadConfig();
     } catch (error) {
       toast("error", String(error));
@@ -597,7 +597,7 @@ export function McpPage({ workspaces, onCopy, toast }: Props) {
                       size="sm"
                       variant={status?.imported ? "secondary" : "primary"}
                       loading={importingClient === guide.id}
-                      onClick={() => void importClient(guide.id, guide.title)}
+                      onClick={() => void importClient(guide.id)}
                       icon={<Download size={13} />}
                     >
                       {status?.imported ? "重新导入" : "一键导入"}

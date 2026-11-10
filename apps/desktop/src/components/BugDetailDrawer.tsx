@@ -13,9 +13,14 @@ import {
   FileArchive,
   FileText,
   Eye,
+  GitBranch,
   Image as ImageIcon,
+  Loader2,
   MessageSquare,
+  MessageSquarePlus,
   Paperclip,
+  Send,
+  UserPlus,
   UserRound,
   Video,
   X,
@@ -29,6 +34,7 @@ import {
   mediaSrc,
   type Attachment,
   type BugDetail,
+  type BugTransitionInfo,
   type ChangeEntry,
   type ChangeField,
   type Comment,
@@ -37,7 +43,9 @@ import {
   type OpenMediaMode,
   type OpenTarget,
   type OpenTargetSet,
+  type WorkspaceMember,
 } from "../lib/api";
+import { isMyBug, ownerNames } from "../lib/bug";
 import { MediaPreview, type PreviewItem } from "./MediaPreview";
 import { SkeletonBlock } from "./Skeleton";
 import {
@@ -67,6 +75,16 @@ type Props = {
     kind?: string,
     target?: string,
   ) => void;
+  /** TAPD nickname of the signed-in user; decides whether actions are open. */
+  me: string | null;
+  /** Workspace people directory for the owner / developer pickers. */
+  members: WorkspaceMember[];
+  membersLoading: boolean;
+  onRefreshMembers: () => void;
+  onClaim: (detail: BugDetail) => Promise<void>;
+  onAddComment: (detail: BugDetail, comment: string) => Promise<void>;
+  onChangeField: (detail: BugDetail, field: string, value: string) => Promise<void>;
+  onTransition: (detail: BugDetail, status: string) => Promise<void>;
 };
 
 function BugDetailDrawerImpl(props: Props) {
@@ -84,12 +102,29 @@ function BugDetailDrawerImpl(props: Props) {
     onAgentFix,
     onOpenPath,
     onOpenMedia,
+    me,
+    members,
+    membersLoading,
+    onRefreshMembers,
+    onClaim,
+    onAddComment,
+    onChangeField,
+    onTransition,
   } = props;
   const [showCustomFields, setShowCustomFields] = useState(false);
   const [showChanges, setShowChanges] = useState(true);
   const [previewIndex, setPreviewIndex] = useState<number | null>(null);
   const [targetSets, setTargetSets] = useState<Record<string, OpenTargetSet>>({});
   const [, bumpMedia] = useState(0);
+
+  /** The single write action currently in flight (claim/comment/field/status). */
+  const [busy, setBusy] = useState<string | null>(null);
+  const [commentText, setCommentText] = useState("");
+  const [transitions, setTransitions] = useState<BugTransitionInfo | null>(null);
+  const [transitionsLoading, setTransitionsLoading] = useState(false);
+  const [transitionsError, setTransitionsError] = useState<string | null>(null);
+
+  const mine = detail ? isMyBug(detail.owner, me) : true;
 
   // Media URLs need the loopback proxy; recover if `app_info` raced startup.
   useEffect(() => {
@@ -115,6 +150,93 @@ function BugDetailDrawerImpl(props: Props) {
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [open, onClose, previewIndex]);
+
+  // A different bug starts with an empty comment box.
+  useEffect(() => {
+    setCommentText("");
+  }, [detail?.id]);
+
+  // Only bugs the user owns expose workflow transitions.
+  useEffect(() => {
+    if (!open || !detail || !mine) {
+      setTransitions(null);
+      setTransitionsError(null);
+      setTransitionsLoading(false);
+      return;
+    }
+
+    let cancelled = false;
+    setTransitionsLoading(true);
+    setTransitionsError(null);
+    void api
+      .bugTransitions(detail.workspaceId, detail.id)
+      .then((info) => {
+        if (!cancelled) setTransitions(info);
+      })
+      .catch((cause) => {
+        if (!cancelled) setTransitionsError(String(cause));
+      })
+      .finally(() => {
+        if (!cancelled) setTransitionsLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [open, detail?.id, detail?.status, detail?.workspaceId, mine]);
+
+  const runClaim = async () => {
+    if (!detail || busy) return;
+    setBusy("claim");
+    try {
+      await onClaim(detail);
+    } catch {
+      // The App reports the failure; the control just unlocks again.
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const runFieldChange = async (field: string, value: string) => {
+    if (!detail || busy || !value.trim() || value.trim() === currentFieldValue(detail, field)) {
+      return;
+    }
+    setBusy(`field:${field}`);
+    try {
+      await onChangeField(detail, field, value);
+    } catch {
+      // Reported upstream.
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const runTransition = async (status: string) => {
+    if (!detail || busy) return;
+    setBusy(`transition:${status}`);
+    try {
+      await onTransition(detail, status);
+    } catch {
+      // Reported upstream.
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const submitComment = async () => {
+    if (!detail || busy) return;
+    const text = commentText.trim();
+    if (!text) return;
+    setBusy("comment");
+    try {
+      await onAddComment(detail, text);
+      setCommentText("");
+    } catch {
+      // Reported upstream; keep the draft so it can be retried.
+    } finally {
+      setBusy(null);
+    }
+  };
 
   const customFields = useMemo(
     () =>
@@ -273,7 +395,63 @@ function BugDetailDrawerImpl(props: Props) {
 
           {detail ? (
             <div className="space-y-5">
-              <MetaGrid detail={detail} />
+              <MetaGrid
+                detail={detail}
+                mine={mine}
+                members={members}
+                membersLoading={membersLoading}
+                savingField={
+                  busy?.startsWith("field:") ? busy.slice("field:".length) : null
+                }
+                onChangeField={(field, value) => void runFieldChange(field, value)}
+                onRefreshMembers={onRefreshMembers}
+              />
+
+              {!mine ? (
+                <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-[11px] leading-5 text-amber-800">
+                  <p className="font-semibold">
+                    当前处理人：{detail.owner || "未分配"}
+                  </p>
+                  <p className="mt-0.5">
+                    认领后才能评论、修改处理人与开发人员、流转状态。
+                  </p>
+                </div>
+              ) : (
+                <section>
+                  <SectionTitle icon={<GitBranch size={14} />} title="状态流转" />
+                  <div className="mt-2">
+                    {transitionsLoading ? (
+                      <p className="inline-flex items-center gap-1.5 text-[11px] text-slate-400">
+                        <Loader2 size={12} className="animate-spin" />
+                        正在读取可流转状态…
+                      </p>
+                    ) : transitionsError ? (
+                      <div className="break-all rounded-xl border border-amber-200 bg-amber-50 p-3 text-[11px] leading-5 text-amber-700">
+                        流转状态读取失败：{transitionsError}
+                      </div>
+                    ) : (transitions?.transitions.length ?? 0) === 0 ? (
+                      <p className="rounded-xl border border-dashed border-slate-200 p-3 text-xs text-slate-400">
+                        当前状态没有可执行的流转
+                      </p>
+                    ) : (
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        {transitions!.transitions.map((choice) => (
+                          <Button
+                            key={choice.key}
+                            size="sm"
+                            variant="secondary"
+                            loading={busy === `transition:${choice.key}`}
+                            disabled={busy !== null}
+                            onClick={() => void runTransition(choice.key)}
+                          >
+                            {choice.label}
+                          </Button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </section>
+              )}
 
               <section>
                 <SectionTitle icon={<FileText size={14} />} title="缺陷描述" />
@@ -428,6 +606,43 @@ function BugDetailDrawerImpl(props: Props) {
                   ) : null}
                 </section>
               ) : null}
+
+              {mine ? (
+                <section>
+                  <SectionTitle
+                    icon={<MessageSquarePlus size={14} />}
+                    title="添加评论"
+                  />
+                  <textarea
+                    value={commentText}
+                    onChange={(event) => setCommentText(event.target.value)}
+                    onKeyDown={(event) => {
+                      if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+                        event.preventDefault();
+                        void submitComment();
+                      }
+                    }}
+                    rows={4}
+                    placeholder="写评论（纯文本，⌘/Ctrl + Enter 发送）"
+                    className="mt-2 w-full resize-y rounded-xl border border-slate-200 bg-white p-3 text-xs leading-6 text-slate-700 outline-none transition focus:border-sky-400 focus:ring-2 focus:ring-sky-100"
+                  />
+                  <div className="mt-2 flex items-center justify-end gap-2">
+                    <span className="mr-auto text-[10px] text-slate-400">
+                      {commentText.length > 0 ? `${commentText.length} 字` : ""}
+                    </span>
+                    <Button
+                      size="sm"
+                      variant="primary"
+                      icon={<Send size={13} />}
+                      loading={busy === "comment"}
+                      disabled={busy !== null || commentText.trim().length === 0}
+                      onClick={() => void submitComment()}
+                    >
+                      发表评论
+                    </Button>
+                  </div>
+                </section>
+              ) : null}
             </div>
           ) : null}
         </div>
@@ -471,23 +686,37 @@ function BugDetailDrawerImpl(props: Props) {
             ) : null}
 
             <div className="flex flex-wrap gap-2">
+              {!mine ? (
+                <Button
+                  size="sm"
+                  variant="primary"
+                  icon={<UserPlus size={13} />}
+                  loading={busy === "claim"}
+                  disabled={busy !== null && busy !== "claim"}
+                  onClick={() => void runClaim()}
+                >
+                  认领
+                </Button>
+              ) : null}
               <Button
                 size="sm"
-                variant="primary"
+                variant={mine ? "primary" : "secondary"}
                 icon={<ArrowUpRight size={13} />}
                 onClick={() => onOpenWeb(detail.bugUrl)}
               >
                 在 TAPD 中打开
               </Button>
-              <Button
-                size="sm"
-                variant="secondary"
-                icon={<Bot size={13} />}
-                disabled={exporting || loading}
-                onClick={() => onAgentFix(detail)}
-              >
-                用 Agent 修复
-              </Button>
+              {mine ? (
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  icon={<Bot size={13} />}
+                  disabled={exporting || loading}
+                  onClick={() => onAgentFix(detail)}
+                >
+                  用 Agent 修复
+                </Button>
+              ) : null}
               <Button
                 size="sm"
                 variant="secondary"
@@ -583,9 +812,26 @@ function DetailSkeleton() {
   );
 }
 
-function MetaGrid({ detail }: { detail: BugDetail }) {
+function MetaGrid(props: {
+  detail: BugDetail;
+  mine: boolean;
+  members: WorkspaceMember[];
+  membersLoading: boolean;
+  savingField: string | null;
+  onChangeField: (field: string, value: string) => void;
+  onRefreshMembers: () => void;
+}) {
+  const {
+    detail,
+    mine,
+    members,
+    membersLoading,
+    savingField,
+    onChangeField,
+    onRefreshMembers,
+  } = props;
+
   const items: Array<[string, string]> = [
-    ["处理人", detail.owner || "—"],
     ["创建人", detail.creator || "—"],
     ["创建时间", detail.created || "—"],
     ["最后修改", detail.modified || "—"],
@@ -597,6 +843,28 @@ function MetaGrid({ detail }: { detail: BugDetail }) {
 
   return (
     <dl className="grid grid-cols-2 gap-x-4 gap-y-2 rounded-xl border border-slate-100 bg-white p-3 text-xs sm:grid-cols-4">
+      <UserField
+        label="处理人"
+        field="current_owner"
+        value={detail.owner}
+        mine={mine}
+        members={members}
+        membersLoading={membersLoading}
+        saving={savingField === "current_owner"}
+        onChange={onChangeField}
+        onRefreshMembers={onRefreshMembers}
+      />
+      <UserField
+        label="开发人员"
+        field="de"
+        value={detail.de}
+        mine={mine}
+        members={members}
+        membersLoading={membersLoading}
+        saving={savingField === "de"}
+        onChange={onChangeField}
+        onRefreshMembers={onRefreshMembers}
+      />
       {items.map(([label, value]) => (
         <div key={label} className="min-w-0">
           <dt className="text-[10px] uppercase tracking-wide text-slate-400">{label}</dt>
@@ -607,6 +875,87 @@ function MetaGrid({ detail }: { detail: BugDetail }) {
       ))}
     </dl>
   );
+}
+
+/** Owner / developer cell: a picker for the owner, plain text otherwise. */
+function UserField(props: {
+  label: string;
+  field: "current_owner" | "de";
+  value: string;
+  mine: boolean;
+  members: WorkspaceMember[];
+  membersLoading: boolean;
+  saving: boolean;
+  onChange: (field: string, value: string) => void;
+  onRefreshMembers: () => void;
+}) {
+  const {
+    label,
+    field,
+    value,
+    mine,
+    members,
+    membersLoading,
+    saving,
+    onChange,
+    onRefreshMembers,
+  } = props;
+  const current = value.trim();
+
+  if (!mine) {
+    return (
+      <div className="min-w-0">
+        <dt className="text-[10px] uppercase tracking-wide text-slate-400">{label}</dt>
+        <dd className="mt-0.5 truncate text-slate-700" title={current || "—"}>
+          {current || "—"}
+        </dd>
+      </div>
+    );
+  }
+
+  const optionNicks = Array.from(
+    new Set([
+      ...members.map((member) => member.nick).filter(Boolean),
+      ...ownerNames(current),
+      ...(current ? [current] : []),
+    ]),
+  );
+
+  return (
+    <div className="min-w-0">
+      <dt className="flex items-center gap-1 text-[10px] uppercase tracking-wide text-slate-400">
+        {label}
+        {saving ? <Loader2 size={9} className="animate-spin" /> : null}
+      </dt>
+      <dd className="mt-0.5">
+        <select
+          value={current}
+          disabled={saving}
+          onChange={(event) => onChange(field, event.target.value)}
+          onFocus={() => {
+            if (members.length === 0 && !membersLoading) onRefreshMembers();
+          }}
+          title="从项目成员中选择"
+          className="w-full min-w-0 truncate rounded-md border border-slate-200 bg-white px-1 py-0.5 text-xs text-slate-700 outline-none transition focus:border-sky-400 focus:ring-2 focus:ring-sky-100 disabled:opacity-60"
+        >
+          {!current ? (
+            <option value="">
+              {membersLoading ? "加载中…" : "未指定"}
+            </option>
+          ) : null}
+          {optionNicks.map((nick) => (
+            <option key={nick} value={nick}>
+              {nick}
+            </option>
+          ))}
+        </select>
+      </dd>
+    </div>
+  );
+}
+
+function currentFieldValue(detail: BugDetail, field: string): string {
+  return (field === "de" ? detail.de : detail.owner).trim();
 }
 
 /** TAPD resources are loaded through the loopback media proxy. */

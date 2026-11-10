@@ -1,4 +1,5 @@
 mod agent;
+mod bug_write;
 mod cache;
 mod commands;
 mod diagnostics;
@@ -8,6 +9,7 @@ mod mcp;
 mod mcp_audit;
 mod mcp_import;
 mod notification;
+mod notification_db;
 mod open_with;
 mod opencode;
 mod reset;
@@ -76,6 +78,11 @@ pub fn run() {
             commands::workspace_context,
             commands::bug_list,
             commands::bug_detail,
+            commands::workspace_members,
+            commands::bug_add_comment,
+            commands::bug_update_field,
+            commands::bug_transitions,
+            commands::bug_transition,
             export::export_bug_md,
             commands::set_current_user,
             commands::ensure_window_width,
@@ -140,7 +147,7 @@ pub fn run() {
 
             notification::init(&handle, state.clone());
             agent::init(&handle, state.clone());
-            // Check GitHub Releases shortly after launch, then hourly.
+            // Check GitHub Releases shortly after launch, then every two hours.
             update::init(&handle, state.clone());
             session::spawn_session_watcher(handle, state);
 

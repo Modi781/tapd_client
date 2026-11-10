@@ -3,7 +3,9 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use crate::tapd::model::{Attachment, BugDetail, BugListPage, BugSummary, Comment, Workspace};
+use crate::tapd::model::{
+    Attachment, BugDetail, BugListPage, BugSummary, Comment, Workspace, WorkspaceMember,
+};
 
 pub const TAPD_BASE: &str = "https://www.tapd.cn";
 
@@ -13,6 +15,8 @@ pub const PATH_BUG_DETAIL: &str =
 pub const PATH_USER_WORKSPACE: &str =
     "/api/aggregation/user_and_workspace_aggregation/get_user_and_workspace_basic_info";
 pub const PATH_FILTER_OPTIONS: &str = "/api/new_filter/new_filter/get_options_batch";
+pub const PATH_WORKSPACE_MEMBERS: &str = "/api/basic/user/get_workspace_members";
+pub const PATH_USER_CHOOSER: &str = "/api/basic/user/user_chooser";
 
 /// Fields that the aggregation list only returns when explicitly requested.
 pub const LIST_SHOW_FIELDS: &[&str] = &[
@@ -248,6 +252,34 @@ pub fn bug_web_url(workspace_id: &str, bug_id: &str) -> String {
     format!("{TAPD_BASE}/tapd_fe/{workspace_id}/bug/detail/{bug_id}")
 }
 
+/// Members of a workspace, used by the owner / developer pickers.
+pub fn workspace_members_url(workspace_id: &str) -> String {
+    format!("{TAPD_BASE}{PATH_WORKSPACE_MEMBERS}?workspace_id={workspace_id}")
+}
+
+/// Fallback member search endpoint.
+pub fn user_chooser_url() -> String {
+    format!("{TAPD_BASE}{PATH_USER_CHOOSER}")
+}
+
+/// `load_all=1` returns the whole chooser directory for a workspace.
+pub fn user_chooser_all_body(workspace_id: &str) -> Value {
+    json!({
+        "key_word": "",
+        "workspace_id": workspace_id,
+        "multi_workspace_ids": "",
+        "disabled": 0,
+        "show_child_user": 1,
+        "extelnal": 1,
+        "per_page": 200,
+        "load_all": 1,
+        "is_batch": "",
+        "select_type": "fuzzy_match",
+        "size": 0,
+        "chooser_type": "userspinyin",
+    })
+}
+
 pub fn attachment_download_url(workspace_id: &str, attachment: &Attachment) -> String {
     format!(
         "https://file.tapd.cn/{workspace_id}/attachments/download/{}/{}",
@@ -298,6 +330,68 @@ pub fn parse_workspaces(root: &Value) -> Result<Vec<Workspace>, String> {
             })
         })
         .collect())
+}
+
+/// Extracts workspace members from either `get_workspace_members` or
+/// `user_chooser`.
+///
+/// Both endpoints wrap their users differently (and the chooser nests them by
+/// department), so the response is scanned recursively for user-shaped objects
+/// instead of depending on one brittle payload path.
+pub fn parse_workspace_members(root: &Value) -> Vec<WorkspaceMember> {
+    let mut members = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    collect_members(root, &mut members, &mut seen);
+    members
+}
+
+fn collect_members(
+    value: &Value,
+    members: &mut Vec<WorkspaceMember>,
+    seen: &mut std::collections::BTreeSet<String>,
+) {
+    match value {
+        Value::Object(object) => {
+            let nick = ["nick", "user_nick"]
+                .iter()
+                .find_map(|key| object.get(*key).and_then(Value::as_str))
+                .map(str::trim)
+                .filter(|nick| !nick.is_empty());
+
+            if let Some(nick) = nick {
+                if seen.insert(nick.to_string()) {
+                    members.push(WorkspaceMember {
+                        nick: nick.to_string(),
+                        user_id: ["user_id", "id", "userId"]
+                            .iter()
+                            .find_map(|key| object.get(*key).and_then(Value::as_str))
+                            .unwrap_or_default()
+                            .to_string(),
+                        name: ["name", "user_name"]
+                            .iter()
+                            .find_map(|key| object.get(*key).and_then(Value::as_str))
+                            .unwrap_or_default()
+                            .to_string(),
+                        avatar: ["avatar", "avatar_url", "head"]
+                            .iter()
+                            .find_map(|key| object.get(*key).and_then(Value::as_str))
+                            .unwrap_or_default()
+                            .to_string(),
+                    });
+                }
+            }
+
+            for child in object.values() {
+                collect_members(child, members, seen);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                collect_members(item, members, seen);
+            }
+        }
+        _ => {}
+    }
 }
 
 pub fn parse_bug_list(root: &Value) -> Result<BugListPage, String> {
@@ -776,6 +870,33 @@ mod tests {
         let workspaces = parse_workspaces(&root).expect("workspaces");
         assert_eq!(workspaces.len(), 1);
         assert_eq!(workspaces[0].name, "UU");
+    }
+
+    #[test]
+    fn parses_workspace_members_from_nested_shapes() {
+        let root = json!({
+            "data": {
+                "users": [
+                    {"id": "u1", "nick": "郭俊宏", "name": "郭俊宏", "avatar": "https://a/1.png"},
+                    {"id": "u2", "nick": "何帅"}
+                ],
+                "departments": [{
+                    "name": "测试组",
+                    "members": [{"user_id": "u3", "nick": "张芳兰", "user_name": "张芳兰"}]
+                }]
+            },
+            "meta": {"code": 0, "message": "success"}
+        });
+        let members = parse_workspace_members(&root);
+        let mut nicks: Vec<&str> = members.iter().map(|member| member.nick.as_str()).collect();
+        nicks.sort_unstable();
+        assert_eq!(nicks, vec!["何帅", "张芳兰", "郭俊宏"]);
+        let guo = members.iter().find(|member| member.nick == "郭俊宏").expect("郭俊宏");
+        let zhang = members.iter().find(|member| member.nick == "张芳兰").expect("张芳兰");
+        assert_eq!(guo.user_id, "u1");
+        assert_eq!(guo.avatar, "https://a/1.png");
+        assert_eq!(zhang.user_id, "u3");
+        assert_eq!(zhang.name, "张芳兰");
     }
 
     #[test]

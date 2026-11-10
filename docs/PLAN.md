@@ -193,7 +193,9 @@ M0 产出 `docs/spike.md`：请求样例、响应结构、分页/total 字段、
 
 ---
 
-## 6. 数据模型（SQLite）
+## 6. 数据模型（初版设计草案）
+
+> 以下是开工时的设计草案，用于说明数据关系；当前实现以 `apps/desktop/src-tauri/src/cache.rs` 的迁移为准：`snapshots`、`bugs`、`agent_tasks`、`notification_*`。
 
 ```sql
 workspaces(id TEXT PK, name, company_id, enabled INT, sort INT, last_synced_at);
@@ -235,12 +237,13 @@ sync_state(workspace_id PK, last_poll_at, last_full_at, baseline_done);
 
 ### 7.2 同步与通知判定
 
-- 轮询间隔默认 60s（20–600s 可配）；「我的」范围跨项目增量轮询，「项目」范围只同步当前项目。
-- 首次同步某项目：全量拉取我的缺陷，标记 `baseline_done`，**不弹通知**（避免首启爆炸）。
+- 轮询间隔默认 30s（20–600s 可配）；「我的」范围跨项目增量轮询，「项目」范围只同步当前项目。
+- 首次同步某项目：分页全量拉取（最多 25 页），标记 `baseline_done`，**不弹通知**（避免首启爆炸）。
 - 后续每轮：
-  1. 拉取 `owner == me` 且 `modified >= last_poll - 5min` 的缺陷（若无此筛选能力则分页全量 diff）。
-  2. 与本地比较：新出现且状态 ∈ {新, 重新打开}；或状态变为 {新, 重新打开}。
-  3. 生成 `notifications`（同一 bug 同一次状态变化只生成一次；已忽略的 bug 不再提示，除非重新打开）。
+  1. 分页拉取 `owner == me` 且 `modified >= last_poll - 2min` 的缺陷（单页 200，最多 10 页，页间短暂节流）；未读完时保留 cursor，避免越过未读窗口。
+  2. 与本地 `notification_seen` 比较：新出现且状态 ∈ {新, 重新打开}；或状态变为 {新, 重新打开}；或处理人变化 / `assigned_time` 变为我（转派）。
+  3. 生成 `notification_items`（新建按缺陷终身去重；转派与重新打开按状态 / 指派变化去重；已忽略的 bug 不再提示，除非重新打开）。
+- `notification_seen` 按最后观察时间保留 90 天且最多 20000 条，ignored 随 seen 一起裁剪。
 - 详情 / 评论按需拉取，不在轮询中批量加载，控制请求量。
 
 ### 7.3 通知窗口
@@ -558,7 +561,7 @@ exporter: "tapd-client/1.0"
 | M6 通知 | ✅ | 可配置范围（我的/项目、新建/转移/重新打开）、顶部胶囊卡片、忽略/查看、处理=改派+接受；「我的」跨项目增量轮询 |
 | M7 Agent | ✅ | Agent tab（运行/审核/历史）、串行队列、server 事件完成/审核、胶囊状态、日志与 Terminal 恢复 |
 | M8 打包 | ✅ | `tapd-mcp` 作为 externalBin 打进 App；`pnpm build:arm64` 本地出 arm64 dmg；`main` 合并进 `release` 后由 GitHub Actions 出 arm64 dmg 与 artifact，tag 额外发 Release。MCP 策略/审计 UI、首启引导、诊断包已补齐 |
-| M9 自动更新 | ✅ | Tauri updater + GitHub Releases（`latest.json`）；启动后检查、每小时轮询并持久化检查时间；标题栏更新图标 hover 展示日志；主窗口/账户页查看更新说明；更新时隐藏主窗口、胶囊 4 倍显示下载/解包进度；失败可手动下载或取消返回；`scripts/release.sh` 统一版本、日志、合并 `release` 与打 tag |
+| M9 自动更新 | ✅ | Tauri updater + GitHub Releases（`latest.json`）；启动后检查、之后每两小时轮询并持久化检查时间；标题栏更新图标 hover 展示日志；主窗口/账户页查看更新说明；更新时隐藏主窗口、胶囊 4 倍显示下载/解包进度；失败可手动下载或取消返回；`scripts/release.sh` 统一版本、日志、合并 `release` 与打 tag |
 
 ### 与计划的偏差
 
@@ -566,7 +569,7 @@ exporter: "tapd-client/1.0"
 2. **SQLite 已接入**：`cache.sqlite3` 保存项目、缺陷列表快照与详情；UI 先读缓存再后台刷新，只有首次登录无缓存时显示骨架屏。通知轮询在「我的」范围下已跨项目增量执行，每个项目独立 cursor / baseline；「项目」范围保持单项目轮询，避免过量请求。
 3. **MCP 写回已开放**：在查询/导出之外新增评论与状态更新（含自动先接受再流转）；删除/改处理人/批量操作仍未开放。客户端已提供策略档案（写开关、项目白名单、状态白名单）与调用审计（允许 / 拒绝 / 失败、耗时、客户端、项目/缺陷），审计不保存评论正文。
 4. **opencode v2 配置结构**：使用 `mcp.servers.<name>`，而不是旧文档里的 `mcp.<name>`；已实测 `opencode mcp list` 显示 connected；MCP tab 可一键合并到全局配置并自动备份。
-5. **通知采用自绘窗口 + JSON 游标**：`notifications.json` 保存设置、seen、ignored、cursor 与 baseline；首轮只建 baseline，避免历史缺陷轰炸。
+5. **通知采用自绘窗口 + SQLite 状态**：`cache.sqlite3` 的 `notification_*` 表保存设置、seen、ignored、cursor 与 baseline；首轮只建 baseline，避免历史缺陷轰炸。轮询分页拉取，未读完时保留 cursor；seen/ignored 按时间与条数裁剪。
 6. **处理动作会写 TAPD**：点击「处理」自动改派给自己，并把 `new`/`open`/`reopened` 流转到 `in_progress`/`progressing`；成功后通过 `agent://enqueue` 交给 Agent。
 7. **Agent 严格串行 + server 旁路**：单 worker；每个任务启动私有 `opencode serve`，TUI 通过 `--server` 连接，Rust 订阅 `/event` 判断 idle/权限请求；终端内嵌在 Agent tab，不再创建独立窗口。
 

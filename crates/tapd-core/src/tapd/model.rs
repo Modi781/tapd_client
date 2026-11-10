@@ -15,6 +15,20 @@ pub struct Workspace {
     pub jump_url: Option<String>,
 }
 
+/// A workspace member offered by the owner / developer pickers.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceMember {
+    /// TAPD nickname; this is the value stored in user fields.
+    pub nick: String,
+    /// TAPD user id, when the API exposes it.
+    pub user_id: String,
+    /// Display name when it differs from the nickname.
+    pub name: String,
+    /// Avatar URL, when available.
+    pub avatar: String,
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BugSummary {

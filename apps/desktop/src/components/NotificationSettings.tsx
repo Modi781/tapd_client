@@ -77,7 +77,6 @@ export function NotificationSettings({ toast }: SettingsSectionProps) {
     setSimulating(true);
     try {
       await notificationApi.simulate({});
-      toast("ok", "已发送模拟通知，检查屏幕右下角");
     } catch (error) {
       toast("error", String(error));
     } finally {
@@ -180,7 +179,7 @@ export function NotificationSettings({ toast }: SettingsSectionProps) {
               onChange={(event) =>
                 setSettings((current) => ({
                   ...current,
-                  pollIntervalSecs: Number(event.target.value) || 60,
+                  pollIntervalSecs: Number(event.target.value) || 30,
                 }))
               }
               onBlur={saveOnBlur}
@@ -189,7 +188,7 @@ export function NotificationSettings({ toast }: SettingsSectionProps) {
               }}
               className="mt-1.5 w-full rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-700 focus:outline-none focus:ring-2 focus:ring-sky-200"
             />
-            <span className="mt-1 block text-[10px] text-slate-400">允许 20–600 秒，默认 60。</span>
+            <span className="mt-1 block text-[10px] text-slate-400">允许 20–600 秒，默认 30。</span>
           </label>
 
           <label className="rounded-xl border border-slate-100 bg-slate-50/70 px-3 py-2.5">

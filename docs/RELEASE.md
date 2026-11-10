@@ -2,7 +2,7 @@
 
 发布物是 macOS **arm64**（Apple Silicon）dmg，其中 `tapd-mcp` sidecar 会被打进 `TAPD Client.app/Contents/MacOS/tapd-mcp`，用户无需单独安装 MCP 二进制。不再产出 universal / x86_64 包。
 
-客户端通过 Tauri updater 从 GitHub Releases 自动更新：发布 release 时额外产出签名过的 `*.app.tar.gz` 与 `latest.json`，App 启动后检查一次、之后每小时检查一次。
+客户端通过 Tauri updater 从 GitHub Releases 自动更新：发布 release 时额外产出签名过的 `*.app.tar.gz` 与 `latest.json`，App 启动后检查一次、之后每两小时检查一次。
 
 ## 1. 一键发版（推荐）
 

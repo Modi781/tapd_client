@@ -22,8 +22,6 @@ pub struct AppConfig {
     pub capture_enabled: bool,
     /// Whether the user has completed first-run onboarding.
     pub onboarded: bool,
-    /// Polling interval for bug sync, in seconds.
-    pub poll_interval_secs: u64,
     /// Name shown in the UI; purely cosmetic.
     pub device_name: Option<String>,
     /// Chosen "open with" target per resource kind (`image` / `video` / `file`);
@@ -116,7 +114,6 @@ impl Default for AppConfig {
             last_session_url: None,
             capture_enabled: true,
             onboarded: false,
-            poll_interval_secs: 60,
             device_name: None,
             open_with: BTreeMap::new(),
             island_anchor: None,

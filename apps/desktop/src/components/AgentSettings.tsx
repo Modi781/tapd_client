@@ -59,7 +59,6 @@ export function AgentSettings({ toast }: SettingsSectionProps) {
     try {
       const result = await agentApi.detect(config?.binaryPath);
       setVersion(result.version);
-      toast("ok", `检测到 ${result.path}：${result.version}`);
     } catch (error) {
       setVersion(null);
       toast("error", String(error));

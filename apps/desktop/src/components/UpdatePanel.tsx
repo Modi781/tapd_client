@@ -52,9 +52,9 @@ export function UpdatePanel({ toast, bare = false }: Props) {
   const check = async () => {
     setChecking(true);
     try {
-      const next = await updateApi.check();
-      if (next.available) toast?.("ok", `发现新版本 v${next.available.version}`);
-      else toast?.("ok", "已是最新版本");
+      // The panel itself renders the new state ("可更新到 vX" / phase label),
+      // so no success toast is needed.
+      await updateApi.check();
     } catch (error) {
       toast?.("error", `检查更新失败：${String(error)}`);
     } finally {
