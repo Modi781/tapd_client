@@ -189,6 +189,16 @@ function BugListViewImpl(props: Props) {
     try {
       const result = await api.bugList(query);
       if (requestId !== requestIdRef.current) return;
+      const lastPageNo = Math.max(
+        1,
+        Math.ceil(result.total / Math.max(1, result.perpage)),
+      );
+      if (pageNo > lastPageNo) {
+        // The result set shrank while this tab was on a trailing page. Jump to
+        // the new last page instead of rendering an empty table.
+        setPageNo(lastPageNo);
+        return;
+      }
       setPage(result);
       setSnapshotAt(null);
       setError(null);

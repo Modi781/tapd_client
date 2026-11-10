@@ -51,7 +51,6 @@ pub struct AppInfo {
     me: Option<String>,
     me_avatar: Option<String>,
     last_workspace_id: Option<String>,
-    poll_interval_secs: u64,
     runtime_port: Option<u16>,
     /// Port and capability of the media proxy used by `<img>`/`<video>`.
     media_port: Option<u16>,
@@ -135,10 +134,6 @@ pub fn app_info(state: State<'_, SharedState>) -> AppInfo {
         me: config.me,
         me_avatar: config.me_avatar,
         last_workspace_id: config.last_workspace_id,
-        // The live notification setting is the real cadence; the config value is
-        // only a fallback before the notification service is initialized.
-        poll_interval_secs: crate::notification::poll_interval_secs()
-            .unwrap_or(config.poll_interval_secs),
         runtime_port: runtime.as_ref().map(|runtime| runtime.port),
         media_port: runtime.as_ref().map(|runtime| runtime.port),
         media_token: runtime.map(|runtime| runtime.media_token),

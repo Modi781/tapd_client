@@ -14,7 +14,6 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
-    path::Path,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex, OnceLock,
@@ -31,7 +30,6 @@ use tauri::{
 };
 use tapd_core::{
     config::AppConfig,
-    store::read_json,
     tapd::{
         api::{
             bug_detail_body, bug_detail_url, bug_list_url, parse_bug_detail, parse_bug_list,
@@ -50,8 +48,6 @@ use crate::{
 
 /// Tauri label of the self-drawn notification window (see `main.tsx`).
 pub const WINDOW_LABEL: &str = "island";
-/// Legacy JSON store, imported once and then renamed.
-const LEGACY_STORE_FILE: &str = "notifications.json";
 const MAX_ITEMS: usize = 200;
 const MAX_HISTORY: usize = 100;
 const FRESH_WINDOW_MINUTES: i64 = 5;
@@ -61,6 +57,8 @@ const POLL_PAGE_SIZE: u32 = 200;
 /// rounds stay small. A truncated round keeps its cursor and retries.
 const MAX_BASELINE_PAGES: u32 = 25;
 const MAX_POLL_PAGES: u32 = 10;
+/// Small pause between pages so a baseline sweep does not burst TAPD.
+const POLL_PAGE_DELAY: Duration = Duration::from_millis(120);
 const MAX_DETAIL_LOOKUPS: usize = 5;
 /// Seen-bug retention: drop rows untouched for this long, and cap the table.
 const SEEN_RETENTION_DAYS: i64 = 90;
@@ -647,11 +645,14 @@ fn ensure_api_ok(root: &Value, action: &str) -> Result<(), String> {
     Err(format!("{action}失败：{}", api_message(root)))
 }
 
-/// Whether a poll round actually talked to TAPD.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum PollOutcome {
-    Polled,
-    Skipped,
+/// Result of one poll round. A round can partially succeed (some projects
+/// polled, others failed), so "did poll" and the error are tracked separately.
+#[derive(Debug, Default)]
+struct PollReport {
+    polled: bool,
+    /// At least one notification item was created this round.
+    notified: bool,
+    error: Option<String>,
 }
 
 /// Drops seen entries untouched for `SEEN_RETENTION_DAYS`, then keeps at most
@@ -679,6 +680,9 @@ fn prune_seen(store: &mut NotificationStore, now: NaiveDateTime) -> Vec<String> 
     for key in &remove {
         store.seen.remove(key);
     }
+    // An ignored key only matters while its bug is still tracked; drop it with
+    // the seen row so `notification_ignored` cannot grow forever.
+    store.ignored.retain(|key| !remove.contains(key));
     remove.into_iter().collect()
 }
 
@@ -862,28 +866,19 @@ impl NotificationService {
             return;
         }
 
-        let before = self
-            .store
-            .lock()
-            .expect("notification store lock")
-            .items
-            .len();
         let result = self.poll_inner().await;
         self.polling.store(false, Ordering::SeqCst);
-        let after = self
-            .store
-            .lock()
-            .expect("notification store lock")
-            .items
-            .len();
+        let mut notify_list = false;
 
         match result {
-            Ok(outcome) => {
-                *self.last_error.lock().expect("last error lock") = None;
-                // A skipped round (logged out / no projects / notifications
-                // off) is not a poll: reporting it as one made the settings page
-                // claim "last polled now" without touching TAPD.
-                if outcome == PollOutcome::Polled {
+            Ok(report) => {
+                notify_list = report.notified;
+                *self.last_error.lock().expect("last error lock") = report.error;
+                // Update the stamp if any project was polled: a single broken
+                // project must not make an otherwise successful round look
+                // like it never ran. A skipped round (logged out / no projects
+                // / notifications off) still leaves the stamp untouched.
+                if report.polled {
                     *self.last_poll_at.lock().expect("last poll lock") =
                         Some(Local::now().to_rfc3339());
                 }
@@ -897,31 +892,33 @@ impl NotificationService {
         }
 
         // New bugs found by the background poll: let the main window refresh its
-        // (offline-first) lists so cached data does not silently go stale.
-        if after > before {
+        // (offline-first) lists so cached data does not silently go stale. This
+        // is based on emitted items, not the net item count: trimming at the
+        // cap could otherwise hide a round that did produce notifications.
+        if notify_list {
             let _ = self.app.emit("data://refresh", ());
         }
 
         self.refresh_window();
     }
 
-    async fn poll_inner(&self) -> Result<PollOutcome, String> {
+    async fn poll_inner(&self) -> Result<PollReport, String> {
         let settings = self.settings();
         if !settings.enabled {
-            return Ok(PollOutcome::Skipped);
+            return Ok(PollReport::default());
         }
 
         let config = self.state.config_snapshot();
         if !config.logged_in {
-            return Ok(PollOutcome::Skipped);
+            return Ok(PollReport::default());
         }
 
         let (me, workspaces) = self.ensure_identity("0").await?;
         let Some(me) = me else {
-            return Ok(PollOutcome::Skipped);
+            return Ok(PollReport::default());
         };
         if me.trim().is_empty() || workspaces.is_empty() {
-            return Ok(PollOutcome::Skipped);
+            return Ok(PollReport::default());
         }
 
         // "Mine" polls every accessible project. "Project" keeps the previous
@@ -937,19 +934,25 @@ impl NotificationService {
                 .collect()
         };
         if workspace_ids.is_empty() {
-            return Ok(PollOutcome::Skipped);
+            return Ok(PollReport::default());
         }
 
         let now = Local::now().naive_local();
-        let mut first_error: Option<String> = None;
+        let mut report = PollReport::default();
         for workspace_id in workspace_ids {
-            if let Err(error) = self
+            match self
                 .poll_workspace(&workspace_id, &me, &settings, now)
                 .await
             {
-                tracing::warn!(%workspace_id, %error, "notification poll failed");
-                if first_error.is_none() {
-                    first_error = Some(error);
+                Ok(notified) => {
+                    report.polled = true;
+                    report.notified |= notified;
+                }
+                Err(error) => {
+                    tracing::warn!(%workspace_id, %error, "notification poll failed");
+                    if report.error.is_none() {
+                        report.error = Some(error);
+                    }
                 }
             }
         }
@@ -960,21 +963,19 @@ impl NotificationService {
             let mut store = self.store.lock().expect("notification store lock");
             prune_seen(&mut store, now)
         };
-        notification_db::delete_seen(&self.state.cache, &removed);
+        notification_db::delete_seen_and_ignored(&self.state.cache, &removed);
 
-        match first_error {
-            Some(error) => Err(error),
-            None => Ok(PollOutcome::Polled),
-        }
+        Ok(report)
     }
 
+    /// Polls one workspace. Returns whether the round created notifications.
     async fn poll_workspace(
         &self,
         workspace_id: &str,
         me: &str,
         settings: &NotificationSettings,
         now: NaiveDateTime,
-    ) -> Result<(), String> {
+    ) -> Result<bool, String> {
         let (baseline, cursor) = {
             let store = self.store.lock().expect("notification store lock");
             (
@@ -1225,7 +1226,7 @@ impl NotificationService {
             },
         );
 
-        Ok(())
+        Ok(!new_items.is_empty())
     }
 
     /// Fetches every page of a poll query up to `max_pages`.
@@ -1262,6 +1263,9 @@ impl NotificationService {
             if complete || page_no >= max_pages {
                 return Ok((all, complete));
             }
+            // A baseline can sweep many pages; pace them instead of firing a
+            // burst that TAPD may throttle.
+            tokio::time::sleep(POLL_PAGE_DELAY).await;
             page_no += 1;
         }
     }
@@ -1308,14 +1312,6 @@ fn service() -> Result<Arc<NotificationService>, String> {
         .get()
         .cloned()
         .ok_or_else(|| "通知服务尚未初始化".to_string())
-}
-
-/// Effective poll interval, for run-info / diagnostics. Falls back to `None`
-/// before the service is initialized (the caller uses the config value).
-pub fn poll_interval_secs() -> Option<u64> {
-    SERVICE
-        .get()
-        .map(|service| service.settings().poll_interval_secs)
 }
 
 /// Redacted settings snapshot for the diagnostics bundle. Falls back to the
@@ -1682,55 +1678,29 @@ fn migrate_settings(store: &mut NotificationStore) -> bool {
     true
 }
 
-/// Reads the pre-SQLite snapshot. Kept deliberately one-shot: the file is
-/// renamed right after a successful import.
-fn import_legacy_store(path: &Path) -> Option<NotificationStore> {
-    let store: NotificationStore = read_json(path)?;
-    tracing::info!(path = %path.display(), "imported legacy notifications.json into SQLite");
-    Some(store)
-}
-
-fn archive_legacy_store(path: &Path) {
-    if !path.exists() {
-        return;
-    }
-    let backup = path.with_extension("json.bak");
-    match std::fs::rename(path, &backup) {
-        Ok(()) => tracing::info!(path = %backup.display(), "archived legacy notifications.json"),
-        Err(error) => {
-            tracing::warn!(%error, path = %path.display(), "failed to archive legacy notifications.json")
-        }
-    }
-}
-
 pub fn init(app: &AppHandle, state: SharedState) {
-    let legacy_path = state.paths.data_dir.join(LEGACY_STORE_FILE);
     let loaded = notification_db::load(&state.cache);
     let loaded_from_db = loaded.is_some();
     // Only a confirmed-missing settings row may be initialized; a failed load
-    // must keep the legacy file and the in-memory defaults instead of wiping.
+    // must keep the in-memory defaults instead of wiping the stored state.
     let writable = loaded_from_db || notification_db::is_fresh(&state.cache);
-    let mut store = match loaded {
-        Some(store) => store,
-        // Fresh install or the first launch after the SQLite migration: adopt
-        // the old JSON snapshot once, then keep only the database.
-        None => import_legacy_store(&legacy_path).unwrap_or_default(),
-    };
+    let mut store = loaded.unwrap_or_default();
 
     let migrated = migrate_settings(&mut store);
     store.settings = store.settings.clone().normalized();
-    let persisted = if writable && (!loaded_from_db || migrated) {
-        notification_db::save_store(&state.cache, &store)
-    } else {
-        writable
-    };
-    if persisted {
-        archive_legacy_store(&legacy_path);
+    if writable && (!loaded_from_db || migrated) {
+        notification_db::save_store(&state.cache, &store);
     }
+
+    // Simulated cards are test data and must not survive a restart.
+    store
+        .items
+        .retain(|item| item.workspace_id != "simulated" && !item.bug_id.starts_with("simulated-"));
+    notification_db::delete_simulated_items(&state.cache);
 
     let now = Local::now().naive_local();
     let removed = prune_seen(&mut store, now);
-    notification_db::delete_seen(&state.cache, &removed);
+    notification_db::delete_seen_and_ignored(&state.cache, &removed);
 
     let service = Arc::new(NotificationService {
         app: app.clone(),
@@ -2816,18 +2786,6 @@ mod tests {
         store.settings.poll_interval_secs = 120;
         assert!(!migrate_settings(&mut store));
         assert_eq!(store.settings.poll_interval_secs, 120);
-    }
-
-    #[test]
-    fn legacy_store_file_deserializes_as_v0() {
-        // Field-level default would give 0, but the container default is what
-        // serde applies; this guards the invariant the migration relies on.
-        let store: NotificationStore = serde_json::from_value(json!({
-            "settings": { "pollIntervalSecs": 60 }
-        }))
-        .unwrap();
-        assert_eq!(store.settings_version, 0);
-        assert_eq!(store.settings.poll_interval_secs, 60);
     }
 
     #[test]

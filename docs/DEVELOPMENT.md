@@ -54,10 +54,10 @@ opencode mcp list     # ✓ tapd connected
 
 - 数据目录：`~/Library/Application Support/com.tapdclient.desktop`
 - 日志：`<数据目录>/logs/`
-- 通知状态：`<数据目录>/cache.sqlite3` 的 `notification_*` 表（旧 `notifications.json` 首次启动自动导入并改名为 `.json.bak`）
+- 通知状态：`<数据目录>/cache.sqlite3` 的 `notification_*` 表
 - MCP 审计：`<数据目录>/mcp-audit.json`（最近 500 条，可导出到 `exports/`）
 - 诊断包：`<数据目录>/diagnostics/` 下的 zip（导出后自动在 Finder 中定位目录）
-- 离线缓存：`<数据目录>/cache.sqlite3`（项目 / 缺陷快照 + `agent_tasks` 关系表；退出登录时清空 TAPD 数据）
+- 离线缓存：`<数据目录>/cache.sqlite3`（项目 / 缺陷快照 + `agent_tasks` + `notification_*`；退出登录只清 TAPD 数据，通知设置与去重状态保留）
 - Agent 配置 / 任务 / 日志：`agent.json`、`agent-tasks.json`、`agent-logs/`、`agent-events/`
 - 抓包导出：`<数据目录>/captures/`
 - 缺陷导出：`~/Documents/TAPDClient/exports/<项目>-<id>/<缺陷>-<slug>/`

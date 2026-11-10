@@ -17,7 +17,6 @@ export type AppInfo = {
   me: string | null;
   meAvatar: string | null;
   lastWorkspaceId: string | null;
-  pollIntervalSecs: number;
   runtimePort: number | null;
   /** Port and capability of the local media proxy (images/videos). */
   mediaPort: number | null;

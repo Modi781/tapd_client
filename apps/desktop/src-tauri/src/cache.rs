@@ -127,9 +127,9 @@ impl Cache {
         }
 
         if version < 3 {
-            // Notification state replaces the old notifications.json file.
-            // Settings live in a single row; everything else is written
-            // incrementally so a 30s poll never rewrites the whole state.
+            // Notification settings and poll state. Settings live in a single
+            // row; everything else is written incrementally so a 30s poll never
+            // rewrites the whole state.
             conn.execute_batch(
                 r#"
                 CREATE TABLE IF NOT EXISTS notification_settings (

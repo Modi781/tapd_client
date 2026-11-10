@@ -90,7 +90,7 @@ export function SettingsPage(props: Props) {
               {info
                 ? `v${info.version} · MCP ${
                     info.runtimePort ? `127.0.0.1:${info.runtimePort}` : "未启动"
-                  } · 轮询 ${info.pollIntervalSecs}s`
+                  }`
                 : "正在读取运行信息…"}
             </p>
           </div>
@@ -130,11 +130,6 @@ export function SettingsPage(props: Props) {
             <PlainRow
               label="MCP 本地端口"
               value={info?.runtimePort ? `127.0.0.1:${info.runtimePort}` : "未启动"}
-              onCopy={onCopy}
-            />
-            <PlainRow
-              label="轮询间隔"
-              value={`${info?.pollIntervalSecs ?? 30}s`}
               onCopy={onCopy}
             />
           </dl>

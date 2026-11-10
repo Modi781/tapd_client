@@ -121,7 +121,6 @@ fn sanitized_config(state: &SharedState) -> Value {
         "me": config.me,
         "onboarded": config.onboarded,
         "lastWorkspaceId": config.last_workspace_id,
-        "pollIntervalSecs": config.poll_interval_secs,
         "deviceName": config.device_name,
         "openWith": config.open_with,
         "islandAnchor": config.island_anchor,
@@ -290,11 +289,6 @@ mod tests {
         fs::create_dir_all(&exports).unwrap();
 
         fs::write(logs.join("tapd-client.log.2026-01-01"), "hello log\n").unwrap();
-        fs::write(
-            data.join("notifications.json"),
-            r#"{"settings":{"enabled":true,"maxVisible":3}}"#,
-        )
-        .unwrap();
         fs::write(
             data.join("agent.json"),
             r#"{"binaryPath":"opencode","projects":{"1":{"repoPath":"/tmp","rule":""}}}"#,

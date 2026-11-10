@@ -67,13 +67,13 @@ React → Tauri command → feature_router → session bridge（隐藏 WebView �
 - 缺陷列表每 30 秒静默自动刷新一次（不显示骨架屏 / 不闪「更新中」）；窗口不可见时暂停，恢复可见且快照过期时立即补一次。通知轮询是独立循环，不再承担列表刷新。
 - 只有首次登录且无缓存时才显示骨架屏。
 - 缓存是**按查询的按需快照**，不是完整的后台同步引擎。
-- `snapshots` 存列表类快照，`bugs` 存缺陷行，`agent_tasks` 记录任务与 bug / session / 日志的关系。
+- `snapshots` 存列表类快照，`bugs` 存缺陷行，`agent_tasks` 记录任务与 bug / session / 日志的关系，`notification_*` 存通知设置、条目、去重与轮询游标。
 
 ### 3.3 新缺陷通知
 
 1. `notification.rs` 按配置轮询（范围：我的 / 当前项目）。
-2. 「我的」范围跨项目轮询，每个项目独立的 cursor / baseline，并与 seen 去重游标统一。每轮分页拉取（单页 200，增量最多 10 页，baseline 最多 25 页）；达到上限仍未读完时保留旧 cursor，下一轮继续。
-3. 通知状态持久化到 `cache.sqlite3` 的 `notification_*` 表，轮询只增量 upsert 变化的行；seen 按最后观察时间保留 90 天且最多 20000 条。旧 `notifications.json` 首次启动导入后归档为 `.json.bak`。
+2. 「我的」范围跨项目轮询，每个项目独立的 cursor / baseline，并与 seen 去重游标统一。每轮分页拉取（单页 200，增量最多 10 页，baseline 最多 25 页，页间短暂节流）；达到上限仍未读完时保留旧 cursor，避免越过未读窗口（极端超量时会重复拉取同一窗口的前 N 页）。
+3. 通知状态持久化到 `cache.sqlite3` 的 `notification_*` 表，轮询只增量 upsert 变化的行；seen 按最后观察时间保留 90 天且最多 20000 条，ignored 随 seen 一起裁剪；模拟通知不会跨重启保留。
 4. 检测到新建、转移、重新打开后写入通知状态，胶囊展开自绘卡片。转移按 `assigned_time` 与上次观察值比较，因此「我的」范围转出再转回也能识别，且每次改派只提示一次。
 5. 「处理」自动改派给自己并把起始状态流转到处理中，成功后进入 Agent 队列。
 
@@ -151,6 +151,7 @@ apps/desktop/
     feature_router.rs        通知 / Agent / 缓存 / MCP 的统一命令路由
     cache.rs                 SQLite 离线快照缓存
     notification.rs          轮询、分类、通知窗口、接受动作
+    notification_db.rs       通知状态 SQLite 持久化（设置 / 条目 / 去重 / 游标）
     agent.rs                 Agent 队列、PTY、opencode server 事件、任务持久化
     opencode.rs              opencode serve / SSE / 权限回复适配
     mcp.rs                   MCP 工具调度、策略强制与审计记录

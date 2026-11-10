@@ -1,10 +1,9 @@
 //! SQLite persistence for the notification service.
 //!
-//! Replaces the old `notifications.json` snapshot. The in-memory
-//! [`NotificationStore`] stays the working set (fast pending-list rendering);
-//! this module only loads it once and mirrors mutations row-by-row so a 30s
-//! poll never rewrites the whole state. Tables are created by the cache
-//! migration (v3) in `cache.rs`.
+//! The in-memory [`NotificationStore`] is the working set (fast pending-list
+//! rendering); this module loads it once at startup and mirrors mutations
+//! row-by-row so a 30s poll never rewrites the whole state. Tables are created
+//! by the cache migration (v3) in `cache.rs`.
 
 use std::collections::BTreeMap;
 
@@ -303,7 +302,7 @@ pub fn write_poll(cache: &Cache, workspace_id: &str, write: PollWrite<'_>) {
     warn_on_error(result, "failed to persist notification poll");
 }
 
-pub fn delete_seen(cache: &Cache, keys: &[String]) {
+pub fn delete_seen_and_ignored(cache: &Cache, keys: &[String]) {
     if keys.is_empty() {
         return;
     }
@@ -314,10 +313,27 @@ pub fn delete_seen(cache: &Cache, keys: &[String]) {
                 "DELETE FROM notification_seen WHERE bug_key = ?1",
                 params![key],
             )?;
+            tx.execute(
+                "DELETE FROM notification_ignored WHERE bug_key = ?1",
+                params![key],
+            )?;
         }
         tx.commit()
     });
     warn_on_error(result, "failed to prune notification seen rows");
+}
+
+/// Removes cards created by「模拟通知」; they are UI test data, not state.
+pub fn delete_simulated_items(cache: &Cache) {
+    let result = cache.with_conn(|conn| -> rusqlite::Result<()> {
+        conn.execute(
+            "DELETE FROM notification_items
+              WHERE workspace_id = 'simulated' OR bug_id LIKE 'simulated-%'",
+            [],
+        )?;
+        Ok(())
+    });
+    warn_on_error(result, "failed to remove simulated notification items");
 }
 
 fn upsert_settings(
@@ -573,6 +589,38 @@ mod tests {
         assert!(loaded.ignored.is_empty());
         assert_eq!(loaded.cursors["1"], "2026-11-10 11:31:00");
         assert_eq!(loaded.items.len(), 1);
+
+        // Pruning drops the seen row and its ignored key together.
+        insert_ignored(&cache, "1:2");
+        delete_seen_and_ignored(&cache, &["1:2".to_string()]);
+        let loaded = load(&cache).expect("store after prune");
+        assert!(!loaded.seen.contains_key("1:2"));
+        assert!(loaded.ignored.is_empty());
+
+        // Simulated cards never survive a restart.
+        insert_item(
+            &cache,
+            &NotificationItem {
+                id: "simulated-1".to_string(),
+                workspace_id: "simulated".to_string(),
+                workspace_name: "模拟项目".to_string(),
+                bug_id: "simulated-1".to_string(),
+                title: "模拟".to_string(),
+                kind: NotificationKind::New,
+                owner: String::new(),
+                creator: String::new(),
+                severity: String::new(),
+                priority: String::new(),
+                created: String::new(),
+                detected_at: String::new(),
+                state: NotificationState::Pending,
+            },
+            200,
+        );
+        delete_simulated_items(&cache);
+        let loaded = load(&cache).expect("store after simulated cleanup");
+        assert_eq!(loaded.items.len(), 1);
+        assert_eq!(loaded.items[0].id, "n1");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
