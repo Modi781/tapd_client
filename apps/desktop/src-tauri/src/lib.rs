@@ -4,6 +4,7 @@ mod export;
 mod feature_router;
 mod mcp;
 mod notification;
+mod open_with;
 mod server;
 mod session;
 mod state;
@@ -59,7 +60,9 @@ pub fn run() {
             commands::capture_clear,
             commands::capture_export,
             commands::open_path,
-            commands::media_preview,
+            commands::open_media,
+            commands::open_targets,
+            commands::set_open_target,
         ])
         .setup(move |app| {
             let handle = app.handle().clone();

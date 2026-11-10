@@ -18,6 +18,9 @@ export type AppInfo = {
   lastWorkspaceId: string | null;
   pollIntervalSecs: number;
   runtimePort: number | null;
+  /** Port and capability of the local media proxy (images/videos). */
+  mediaPort: number | null;
+  mediaToken: string | null;
   sessionUrl: string | null;
 };
 
@@ -214,6 +217,21 @@ export type McpConfigInfo = {
   port: number | null;
 };
 
+export type OpenMediaMode = "file" | "browser" | "reveal" | "path";
+
+/** One selectable "open with" app. `icon` is a data URL when available. */
+export type OpenTarget = {
+  id: string;
+  label: string;
+  icon: string | null;
+};
+
+export type OpenTargetSet = {
+  kind: string;
+  selected: string;
+  targets: OpenTarget[];
+};
+
 export type ExportResult = {
   dir: string;
   markdownPath: string;
@@ -235,7 +253,16 @@ export const api = {
   clearCaptures: () => invoke<void>("capture_clear"),
   exportCaptures: () => invoke<string>("capture_export"),
   openPath: (path: string) => invoke<void>("open_path", { path }),
-  mediaPreview: (url: string) => invoke<string>("media_preview", { url }),
+  openMedia: (url: string, mode: OpenMediaMode, kind?: string, target?: string) =>
+    invoke<string>("open_media", {
+      url,
+      mode,
+      kind: kind ?? null,
+      target: target ?? null,
+    }),
+  openTargets: (kind: string) => invoke<OpenTargetSet>("open_targets", { kind }),
+  setOpenTarget: (kind: string, id: string) =>
+    invoke<void>("set_open_target", { kind, id }),
   workspaceContext: () => invoke<WorkspaceContext>("workspace_context"),
   bugList: (query: BugQuery) => invoke<BugListPage>("bug_list", { query }),
   bugDetail: (workspaceId: string, bugId: string) =>
@@ -256,6 +283,25 @@ export const onSessionUrl = (
   callback: (url: string) => void,
 ): Promise<UnlistenFn> =>
   listen<string>("session://url", (event) => callback(event.payload));
+
+let mediaBase: string | null = null;
+
+/** Remembers the media proxy base URL once `app_info` has been loaded. */
+export const setMediaEndpoint = (
+  info: Pick<AppInfo, "mediaPort" | "mediaToken">,
+): void => {
+  mediaBase =
+    info.mediaPort && info.mediaToken
+      ? `http://127.0.0.1:${info.mediaPort}/media?token=${encodeURIComponent(info.mediaToken)}&url=`
+      : null;
+};
+
+/**
+ * Local proxy URL for a TAPD resource. The main window has no tapd.cn cookies,
+ * so images/videos are served by the app's loopback media proxy.
+ */
+export const mediaSrc = (url: string): string | undefined =>
+  mediaBase ? `${mediaBase}${encodeURIComponent(url)}` : undefined;
 
 export const formatBytes = (bytes: number | null | undefined): string => {
   if (!bytes || bytes <= 0) return "—";

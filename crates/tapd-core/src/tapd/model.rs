@@ -31,6 +31,10 @@ pub struct BugSummary {
     pub owner: String,
     pub creator: String,
     pub created: String,
+    /// When the current owner was assigned, when TAPD exposes it. Used by the
+    /// notification classifier to tell a re-assignment apart from a comment.
+    #[serde(default)]
+    pub assigned_time: String,
     pub modified: String,
     pub due: String,
     pub iteration_id: String,

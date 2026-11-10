@@ -1,6 +1,6 @@
 # TAPD 增强客户端 — 实施计划
 
-> 目标：做一个 macOS 桌面客户端，内嵌 TAPD 登录态，重建缺陷视图，提供 MCP 服务（默认只读）、新缺陷弹窗通知，以及唤起 opencode 修复缺陷的串行任务队列。
+> 目标：做一个 macOS 桌面客户端，内嵌 TAPD 登录态，重建缺陷视图，提供 MCP 服务（查询/导出 + 修复后评论与状态回写）、新缺陷弹窗通知，以及唤起 opencode 修复缺陷的串行任务队列。
 >
 > 版本：v1.0 计划（2026-11-09）
 
@@ -15,7 +15,7 @@
 3. 后台轮询同步 + 新缺陷检测（只认分配给自己的新 bug / 重新打开）。
 4. 自绘通知窗口（**不用系统通知**）：处理 / 查看 / 忽略 三个按钮。
 5. MD 导出：标题、详情、资源（图片 / 视频落盘）、评论，形成可交给 AI 的 bug 包。
-6. MCP stdio 服务：bug 查询、详情、导出，支持处理人 / 状态 / 严重程度 / 时间等筛选；默认只读；能力边界可配置；调用审计。
+6. MCP stdio 服务：bug 查询、详情、导出，以及评论 / 状态回写；支持处理人 / 状态 / 严重程度 / 时间等筛选；能力边界可配置；调用审计。
 7. opencode 集成：PTY 内启动完整 TUI，自动注入修复任务；串行队列（并发 1）；客户端内查看终端并可直接接管输入。
 8. 设置中心：MCP 边界、通知、导出、Agent、项目仓库映射。
 
@@ -552,19 +552,24 @@ exporter: "tapd-client/1.0"
 | M2 数据层 | ✅（不含 SQLite） | 模型、过滤器、响应解析、Tauri 命令；目前实时请求，未落库 |
 | M3 主界面 | ✅ | 项目切换、我的/全部、状态/优先级/严重度/关键词、分页、详情抽屉 |
 | M4 MD 导出 | ✅ | `bug.md` + `assets/` + `bug.json`；带 Cookie 下载图片/视频/日志 |
-| M5 MCP | ✅ | stdio sidecar、6 个只读工具、应用侧调度、opencode v2 联调通过 |
+| M5 MCP | ✅ | stdio sidecar、查询/导出 + 评论/状态写回共 9 个工具、opencode v2 联调通过 |
+| M6 通知 | ✅ | 可配置范围（我的/项目、新建/转移/重新打开）、自绘弹窗、忽略/查看、处理=改派+接受 |
+| M7 Agent | ✅ | opencode PTY TUI、串行队列、prompt 注入、xterm 控制台、取消/重试、任务恢复 |
 
 ### 与计划的偏差
 
 1. **异步桥改为结果桶轮询**：远程页面不允许调用应用 IPC 命令（`bridge_result not allowed`），`eval_with_callback` 又不 await Promise。最终用 `window.__TAPDCB_RESULTS__` + 120ms 原生 eval 轮询，稳定且不需要远程权限。
-2. **SQLite 延后**：列表/详情/导出全部实时请求，先保证数据正确；缓存、增量同步与离线能力放到 M6 一起做。
-3. **MCP 策略为硬编码只读**：工具白名单固定为 6 个查询/导出工具；按客户端的策略档案、写操作与审计界面待 M8。
+2. **SQLite 延后**：列表/详情/导出全部实时请求，先保证数据正确；缓存、增量同步与离线能力留到后续 SQLite 里程碑。
+3. **MCP 写回已开放**：在查询/导出之外新增评论与状态更新（含自动先接受再流转）；删除/改处理人/批量操作仍未开放，按客户端策略档案与审计界面待 M8。
 4. **opencode v2 配置结构**：使用 `mcp.servers.<name>`，而不是旧文档里的 `mcp.<name>`；已实测 `opencode mcp list` 显示 connected。
-5. **通知与 Agent 队列未开始**：仍按 M6/M7 计划推进。
+5. **通知采用自绘窗口 + JSON 游标**：未落 SQLite，`notifications.json` 保存设置、seen、ignored、cursor 与 baseline；首轮只建 baseline，避免历史缺陷轰炸。
+6. **处理动作会写 TAPD**：点击「处理」自动改派给自己，并把 `new`/`open`/`reopened` 流转到 `in_progress`/`progressing`；成功后通过 `agent://enqueue` 交给 M7。
+7. **Agent 严格串行**：单 worker，PTY 跑 opencode 完整 TUI，静默检测后就绪注入 prompt；控制台为独立 `agent-console` 窗口。
 
 ### 已知待办
 
-- M6：SQLite + 增量轮询 + 自绘通知窗口（处理/查看/忽略）+ 托盘角标。
-- M7：opencode PTY 控制台、串行队列、仓库映射、任务日志。
 - M8：sidecar 打包进 App、策略设置与审计 UI、universal dmg。
-- 细节：MCP 调用限流、按 `clientInfo.name` 的权限档案、导出进度提示、图片在详情页内预览。
+- SQLite 缓存与跨项目增量轮询（当前实时请求 + 单项目通知游标）。
+- 通知历史视图、托盘角标、未读计数。
+- Agent 任务常驻面板、并发数配置（当前固定 1）、进程树取消。
+- 细节：MCP 调用限流、按 `clientInfo.name` 的权限档案、导出进度提示。

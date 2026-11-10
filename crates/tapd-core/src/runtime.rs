@@ -16,6 +16,10 @@ pub struct RuntimeInfo {
     pub pid: u32,
     pub port: u16,
     pub token: String,
+    /// Separate capability for the media proxy, so `<img>`/`<video>` can load
+    /// TAPD files without the API bearer token appearing in page markup.
+    #[serde(default)]
+    pub media_token: String,
     pub started_at: String,
 }
 

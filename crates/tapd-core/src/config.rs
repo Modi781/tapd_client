@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
@@ -23,6 +24,9 @@ pub struct AppConfig {
     pub poll_interval_secs: u64,
     /// Name shown in the UI; purely cosmetic.
     pub device_name: Option<String>,
+    /// Chosen "open with" target per resource kind (`image` / `video` / `file`);
+    /// missing means the system default app.
+    pub open_with: BTreeMap<String, String>,
 }
 
 impl Default for AppConfig {
@@ -36,6 +40,7 @@ impl Default for AppConfig {
             onboarded: false,
             poll_interval_secs: 60,
             device_name: None,
+            open_with: BTreeMap::new(),
         }
     }
 }

@@ -112,6 +112,16 @@ pub fn cookie_header(window: &WebviewWindow) -> Result<String, String> {
     }
 }
 
+/// Returns a single cookie value (for example the `dsc-token` used by writes).
+pub fn cookie_value(window: &WebviewWindow, name: &str) -> Option<String> {
+    window
+        .cookies()
+        .ok()?
+        .into_iter()
+        .find(|cookie| cookie.name() == name)
+        .map(|cookie| cookie.value().to_string())
+}
+
 /// Watches the session webview URL and keeps `loggedIn` in sync.
 pub fn spawn_session_watcher(app: AppHandle, state: SharedState) {
     tauri::async_runtime::spawn(async move {

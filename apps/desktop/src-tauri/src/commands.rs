@@ -15,8 +15,8 @@ use tapd_core::{
 };
 
 use crate::{
-    session,
-    state::{SharedState},
+    open_with, session,
+    state::SharedState,
 };
 
 #[derive(Serialize)]
@@ -44,6 +44,9 @@ pub struct AppInfo {
     last_workspace_id: Option<String>,
     poll_interval_secs: u64,
     runtime_port: Option<u16>,
+    /// Port and capability of the media proxy used by `<img>`/`<video>`.
+    media_port: Option<u16>,
+    media_token: Option<String>,
     session_url: Option<String>,
 }
 
@@ -59,6 +62,7 @@ pub struct SessionStatus {
 #[tauri::command]
 pub fn app_info(state: State<'_, SharedState>) -> AppInfo {
     let config = state.config_snapshot();
+    let runtime = state.runtime_info();
     AppInfo {
         version: env!("CARGO_PKG_VERSION").to_string(),
         paths: state.paths.clone(),
@@ -66,7 +70,9 @@ pub fn app_info(state: State<'_, SharedState>) -> AppInfo {
         me: config.me,
         last_workspace_id: config.last_workspace_id,
         poll_interval_secs: config.poll_interval_secs,
-        runtime_port: state.runtime_info().map(|runtime| runtime.port),
+        runtime_port: runtime.as_ref().map(|runtime| runtime.port),
+        media_port: runtime.as_ref().map(|runtime| runtime.port),
+        media_token: runtime.map(|runtime| runtime.media_token),
         session_url: config.last_session_url,
     }
 }
@@ -384,7 +390,7 @@ pub fn mcp_config(state: State<'_, SharedState>) -> McpConfigInfo {
         command_path,
         snippet,
         transport: "stdio".to_string(),
-        read_only: true,
+        read_only: false,
         tools: vec![
             "tapd_whoami",
             "tapd_list_projects",
@@ -392,6 +398,9 @@ pub fn mcp_config(state: State<'_, SharedState>) -> McpConfigInfo {
             "tapd_list_my_bugs",
             "tapd_get_bug",
             "tapd_export_bug_md",
+            "tapd_get_bug_transitions",
+            "tapd_add_bug_comment",
+            "tapd_update_bug_status",
         ],
         port: state.runtime_info().map(|runtime| runtime.port),
     }
@@ -547,17 +556,151 @@ pub fn open_path(path: String) -> Result<(), String> {
         .map_err(|error| error.to_string())
 }
 
-const MEDIA_PREVIEW_LIMIT: u64 = 12 * 1024 * 1024;
+const MEDIA_DOWNLOAD_LIMIT: u64 = 300 * 1024 * 1024;
 const MEDIA_USER_AGENT: &str =
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko)";
 
-/// Downloads a TAPD-hosted image with the session cookies and returns it as a
-/// `data:` URL, so the main window can show a thumbnail without having the
-/// tapd.cn cookies itself (cross-site image loads are blocked by SameSite).
+/// Opens a TAPD resource locally.
+///
+/// `mode`:
+/// - `file`    download to the media cache, then open with the chosen app
+/// - `browser` open the TAPD URL in the default browser
+/// - `reveal`  download, then reveal it in Finder
+/// - `path`    download only, returning the local path
+///
+/// For `file`, `target` overrides the saved "open with" choice; `kind`
+/// (`image` / `video` / `file`) selects which saved choice applies.
 #[tauri::command]
-pub async fn media_preview(app: AppHandle, url: String) -> Result<String, String> {
+pub async fn open_media(
+    app: AppHandle,
+    state: State<'_, SharedState>,
+    url: String,
+    mode: String,
+    kind: Option<String>,
+    target: Option<String>,
+) -> Result<String, String> {
     if !is_tapd_media_url(&url) {
         return Err("只支持 TAPD 站内资源地址".to_string());
+    }
+
+    match mode.as_str() {
+        "browser" => {
+            run_open(&[url.as_str()])?;
+            Ok(String::new())
+        }
+        "file" => {
+            let kind = open_with::normalize_kind(kind.as_deref().unwrap_or("file"));
+            let selected = match target {
+                Some(target) if !target.trim().is_empty() => target,
+                _ => {
+                    let open_with = state
+                        .config
+                        .lock()
+                        .expect("config lock")
+                        .open_with
+                        .clone();
+                    open_with::selected_target(kind, &open_with)
+                }
+            };
+
+            if selected == open_with::BROWSER_TARGET {
+                run_open(&[url.as_str()])?;
+                return Ok(String::new());
+            }
+
+            let path = download_media(&app, &state.paths, &url).await?;
+            open_local(&path, &selected)?;
+            Ok(path.to_string_lossy().to_string())
+        }
+        "reveal" => {
+            let path = download_media(&app, &state.paths, &url).await?;
+            run_open(&["-R", &path.to_string_lossy()])?;
+            Ok(path.to_string_lossy().to_string())
+        }
+        "path" => {
+            let path = download_media(&app, &state.paths, &url).await?;
+            Ok(path.to_string_lossy().to_string())
+        }
+        other => Err(format!("不支持的打开方式：{other}")),
+    }
+}
+
+/// Opens a downloaded file with the selected target app (or the system default).
+fn open_local(path: &std::path::Path, target: &str) -> Result<(), String> {
+    let path = path.to_string_lossy().to_string();
+    if target == open_with::SYSTEM_TARGET {
+        return run_open(&[path.as_str()]);
+    }
+
+    let app = open_with::app_path_for(target)
+        .ok_or_else(|| format!("找不到要使用的应用：{target}"))?;
+    run_open(&["-a", &app.to_string_lossy(), path.as_str()])
+}
+
+/// Runs `open` and waits for it, so a bad app path surfaces as an error instead
+/// of silently doing nothing.
+fn run_open(args: &[&str]) -> Result<(), String> {
+    let status = std::process::Command::new("open")
+        .args(args)
+        .status()
+        .map_err(|error| format!("启动打开命令失败：{error}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("打开失败（open 退出码 {status}）"))
+    }
+}
+
+/// Lists the "打开方式" options for a resource kind, plus the saved choice.
+#[tauri::command]
+pub async fn open_targets(
+    state: State<'_, SharedState>,
+    kind: String,
+) -> Result<open_with::OpenTargetSet, String> {
+    let cache_dir = state.paths.data_dir.join("app-icons");
+    let open_with = state
+        .config
+        .lock()
+        .expect("config lock")
+        .open_with
+        .clone();
+
+    tokio::task::spawn_blocking(move || open_with::target_set(&kind, &cache_dir, &open_with))
+        .await
+        .map_err(|error| error.to_string())
+}
+
+/// Remembers the chosen app for a resource kind.
+#[tauri::command]
+pub fn set_open_target(
+    state: State<'_, SharedState>,
+    kind: String,
+    id: String,
+) -> Result<(), String> {
+    let kind = open_with::normalize_kind(&kind).to_string();
+    let snapshot = {
+        let mut config = state.config.lock().expect("config lock");
+        config.open_with.insert(kind, id);
+        config.clone()
+    };
+    state
+        .save_config(&snapshot)
+        .map_err(|error| error.to_string())
+}
+
+/// Downloads into `media-cache`, reusing a previous download for the same URL.
+async fn download_media(
+    app: &AppHandle,
+    paths: &tapd_core::paths::AppPaths,
+    url: &str,
+) -> Result<std::path::PathBuf, String> {
+    let dir = paths.data_dir.join("media-cache");
+    std::fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
+
+    let name = format!("{:016x}-{}", fnv1a(url), media_filename(url));
+    let path = dir.join(&name);
+    if std::fs::metadata(&path).is_ok_and(|metadata| metadata.len() > 0) {
+        return Ok(path);
     }
 
     let window = app
@@ -567,10 +710,10 @@ pub async fn media_preview(app: AppHandle, url: String) -> Result<String, String
 
     let response = reqwest::Client::builder()
         .user_agent(MEDIA_USER_AGENT)
-        .timeout(Duration::from_secs(60))
+        .timeout(Duration::from_secs(300))
         .build()
         .map_err(|error| error.to_string())?
-        .get(&url)
+        .get(url)
         .header(reqwest::header::COOKIE, cookie)
         .header(reqwest::header::REFERER, "https://www.tapd.cn/")
         .send()
@@ -579,7 +722,10 @@ pub async fn media_preview(app: AppHandle, url: String) -> Result<String, String
 
     let status = response.status();
     if !status.is_success() {
-        return Err(format!("HTTP {status}"));
+        return Err(format!("下载失败（HTTP {status}）"));
+    }
+    if response.content_length().unwrap_or(0) > MEDIA_DOWNLOAD_LIMIT {
+        return Err("文件超过 300MB，已跳过".to_string());
     }
 
     let content_type = response
@@ -588,54 +734,79 @@ pub async fn media_preview(app: AppHandle, url: String) -> Result<String, String
         .and_then(|value| value.to_str().ok())
         .unwrap_or("")
         .to_string();
-    // TAPD often replies with a bare `image` instead of `image/png`.
-    if !content_type.starts_with("image") {
-        return Err(format!("不是图片（{content_type}）"));
-    }
-    if response.content_length().unwrap_or(0) > MEDIA_PREVIEW_LIMIT {
-        return Err("图片超过 12MB，已跳过预览".to_string());
-    }
-
     let bytes = response
         .bytes()
         .await
         .map_err(|error| error.to_string())?;
-    if bytes.len() as u64 > MEDIA_PREVIEW_LIMIT {
-        return Err("图片超过 12MB，已跳过预览".to_string());
+    if bytes.len() as u64 > MEDIA_DOWNLOAD_LIMIT {
+        return Err("文件超过 300MB，已跳过".to_string());
+    }
+    if content_type.starts_with("text/html") && !bytes.starts_with(b"\x89PNG") {
+        return Err(format!("下载被拒绝（{content_type}）"));
     }
 
-    let mime = if content_type.contains('/') {
-        content_type
+    let path = with_content_extension(path, &content_type);
+    std::fs::write(&path, &bytes).map_err(|error| error.to_string())?;
+    Ok(path)
+}
+
+fn fnv1a(value: &str) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    for byte in value.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
+fn media_filename(url: &str) -> String {
+    let path = url.split(['?', '#']).next().unwrap_or(url);
+    let raw = path.rsplit('/').next().unwrap_or_default();
+    let cleaned: String = raw
+        .chars()
+        .filter(|character| character.is_alphanumeric() || matches!(character, '.' | '-' | '_'))
+        .take(90)
+        .collect();
+    let cleaned = cleaned.trim_matches(['.', '-', '_']).to_string();
+    if cleaned.is_empty() {
+        "media".to_string()
     } else {
-        sniff_image_mime(&bytes).to_string()
+        cleaned
+    }
+}
+
+fn with_content_extension(path: std::path::PathBuf, content_type: &str) -> std::path::PathBuf {
+    let has_extension = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| !extension.is_empty());
+    if has_extension {
+        return path;
+    }
+
+    let extension = match content_type.split(';').next().unwrap_or("") {
+        "image/png" => "png",
+        "image/jpeg" => "jpg",
+        "image/gif" => "gif",
+        "image/webp" => "webp",
+        "video/mp4" => "mp4",
+        "video/quicktime" => "mov",
+        "application/pdf" => "pdf",
+        "application/zip" => "zip",
+        _ => "",
     };
-
-    use base64::Engine;
-    let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
-    Ok(format!("data:{mime};base64,{encoded}"))
+    if extension.is_empty() {
+        path
+    } else {
+        let name = format!(
+            "{}.{extension}",
+            path.file_name().and_then(|name| name.to_str()).unwrap_or("media")
+        );
+        path.with_file_name(name)
+    }
 }
 
-/// Minimal magic-number sniffing for the formats TAPD stores.
-fn sniff_image_mime(bytes: &[u8]) -> &'static str {
-    if bytes.starts_with(&[0x89, b'P', b'N', b'G']) {
-        return "image/png";
-    }
-    if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
-        return "image/jpeg";
-    }
-    if bytes.starts_with(b"GIF8") {
-        return "image/gif";
-    }
-    if bytes.len() > 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
-        return "image/webp";
-    }
-    if bytes.starts_with(b"BM") {
-        return "image/bmp";
-    }
-    "image/png"
-}
-
-fn is_tapd_media_url(url: &str) -> bool {
+pub(crate) fn is_tapd_media_url(url: &str) -> bool {
     ["https://www.tapd.cn/", "https://file.tapd.cn/", "https://tdl.tapd.cn/"]
         .iter()
         .any(|prefix| url.starts_with(prefix))
@@ -646,15 +817,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn sniffs_image_mime_from_magic_bytes() {
-        assert_eq!(sniff_image_mime(&[0x89, b'P', b'N', b'G', 1]), "image/png");
-        assert_eq!(sniff_image_mime(&[0xFF, 0xD8, 0xFF, 0xE0]), "image/jpeg");
-        assert_eq!(sniff_image_mime(b"GIF89a"), "image/gif");
-        assert_eq!(sniff_image_mime(b"RIFF1234WEBPVP8 "), "image/webp");
-        assert_eq!(sniff_image_mime(b"not-an-image"), "image/png");
-    }
-
-    #[test]
     fn only_allows_tapd_media_urls() {
         assert!(is_tapd_media_url(
             "https://www.tapd.cn/tfl/captures/2026-11/a.png"
@@ -662,5 +824,17 @@ mod tests {
         assert!(is_tapd_media_url("https://file.tapd.cn/1/attachments/download/2/a.png"));
         assert!(!is_tapd_media_url("https://evil.example.com/a.png"));
         assert!(!is_tapd_media_url("file:///etc/passwd"));
+    }
+
+    #[test]
+    fn builds_stable_cache_names() {
+        assert_eq!(fnv1a("abc"), fnv1a("abc"));
+        assert_ne!(fnv1a("abc"), fnv1a("abd"));
+        assert_eq!(
+            media_filename("https://file.tapd.cn/1/attachments/download/2/log.ips?x=1"),
+            "log.ips"
+        );
+        assert_eq!(media_filename("https://www.tapd.cn/"), "media");
+        assert_eq!(media_filename("https://www.tapd.cn/a/../b"), "b");
     }
 }

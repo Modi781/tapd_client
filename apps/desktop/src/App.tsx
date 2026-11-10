@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
 import type { ReactNode } from "react";
 import clsx from "clsx";
 import {
@@ -18,10 +19,12 @@ import {
   api,
   onSessionChanged,
   onSessionUrl,
+  setMediaEndpoint,
   type AppInfo,
   type BugDetail,
   type BugSummary,
   type ExportResult,
+  type OpenMediaMode,
   type SessionStatus,
   type WorkspaceContext,
 } from "./lib/api";
@@ -31,6 +34,7 @@ import { CapturesPage } from "./components/CapturesPage";
 import { LoginGate } from "./components/LoginGate";
 import { SettingsPage } from "./components/SettingsPage";
 import { Badge, Button, Spinner } from "./components/ui";
+import { featureCommand } from "./lib/feature";
 
 type View = "bugs" | "captures" | "settings";
 type Scope = "mine" | "all";
@@ -82,6 +86,7 @@ export default function App() {
       ]);
       setInfo(nextInfo);
       setStatus(nextStatus);
+      setMediaEndpoint(nextInfo);
     } catch (error) {
       showToast("error", String(error));
     }
@@ -130,6 +135,43 @@ export default function App() {
     }).then((unlisten) => unlisteners.push(unlisten));
 
     return () => unlisteners.forEach((unlisten) => unlisten());
+  }, [refreshBase]);
+
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    void listen<{ workspaceId: string; bugId: string }>(
+      "notification://open-bug",
+      (event) => {
+        const { workspaceId, bugId } = event.payload;
+        setView("bugs");
+        setWorkspaceId(workspaceId);
+        void api.setLastWorkspace(workspaceId);
+        setDetailOpen(true);
+        setDetail(null);
+        setDetailError(null);
+        setLastExport(null);
+        setDetailLoading(true);
+        void api
+          .bugDetail(workspaceId, bugId)
+          .then((next) => setDetail(next))
+          .catch((error) => setDetailError(String(error)))
+          .finally(() => setDetailLoading(false));
+      },
+    ).then((fn) => {
+      unlisten = fn;
+    });
+    return () => unlisten?.();
+  }, []);
+
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    void listen("data://refresh", () => {
+      setRefreshToken((token) => token + 1);
+      void refreshBase();
+    }).then((fn) => {
+      unlisten = fn;
+    });
+    return () => unlisten?.();
   }, [refreshBase]);
 
   useEffect(() => {
@@ -184,6 +226,34 @@ export default function App() {
     }
   };
 
+  const handleAgentFix = async (target: BugDetail) => {
+    const workspaceName =
+      target.workspaceName ||
+      context?.workspaces.find((item) => item.id === target.workspaceId)?.name ||
+      null;
+
+    try {
+      await featureCommand("agent_enqueue_bug", {
+        workspaceId: target.workspaceId,
+        bugId: target.id,
+        workspaceName,
+        title: target.title,
+        severity: target.severityLabel,
+        priority: target.priorityLabel,
+      });
+      showToast("ok", "已加入 Agent 队列");
+    } catch (error) {
+      showToast("error", String(error));
+      return;
+    }
+
+    try {
+      await featureCommand("agent_console_open");
+    } catch (error) {
+      showToast("error", String(error));
+    }
+  };
+
   const handleLogout = () => {
     if (!window.confirm("退出登录会清除本地 TAPD 会话数据，确定继续吗？")) return;
     void (async () => {
@@ -202,6 +272,21 @@ export default function App() {
 
   const openPath = (path: string) => {
     void api.openPath(path).catch((error) => showToast("error", String(error)));
+  };
+
+  const openMedia = async (
+    url: string,
+    mode: OpenMediaMode,
+    kind?: string,
+    target?: string,
+  ) => {
+    try {
+      // Opening is self-evident (the app comes to the front); only failures
+      // need a toast.
+      await api.openMedia(url, mode, kind, target);
+    } catch (error) {
+      showToast("error", String(error));
+    }
   };
 
   const copy = async (text: string) => {
@@ -462,6 +547,7 @@ export default function App() {
                 }}
                 onOpenPath={openPath}
                 onCopy={(text) => void copy(text)}
+                toast={showToast}
               />
             )}
           </div>
@@ -479,7 +565,9 @@ export default function App() {
         onOpenWeb={(url) => openPath(url)}
         onCopy={(text) => void copy(text)}
         onExport={(target) => void handleExport(target)}
+        onAgentFix={(target) => void handleAgentFix(target)}
         onOpenPath={openPath}
+        onOpenMedia={(url, mode, kind, target) => void openMedia(url, mode, kind, target)}
       />
 
       {toastNode}

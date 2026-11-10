@@ -18,6 +18,9 @@ import {
   type Workspace,
   type WorkspaceContext,
 } from "../lib/api";
+import type { SettingsSectionProps } from "../lib/feature";
+import { AgentSettings } from "./AgentSettings";
+import { NotificationSettings } from "./NotificationSettings";
 import { Badge, Button } from "./ui";
 
 type Props = {
@@ -29,10 +32,11 @@ type Props = {
   onRefresh: () => void;
   onOpenPath: (path: string) => void;
   onCopy: (text: string) => void;
+  toast: SettingsSectionProps["toast"];
 };
 
 export function SettingsPage(props: Props) {
-  const { info, status, context, onShowLogin, onLogout, onRefresh, onOpenPath, onCopy } = props;
+  const { info, status, context, onShowLogin, onLogout, onRefresh, onOpenPath, onCopy, toast } = props;
   const [mcp, setMcp] = useState<McpConfigInfo | null>(null);
 
   useEffect(() => {
@@ -112,6 +116,10 @@ export function SettingsPage(props: Props) {
         </div>
       </section>
 
+      <NotificationSettings toast={toast} />
+
+      <AgentSettings toast={toast} />
+
       <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
         <div className="flex items-start justify-between gap-3">
           <div>
@@ -120,12 +128,12 @@ export function SettingsPage(props: Props) {
               MCP 服务
             </h2>
             <p className="mt-1 text-xs text-slate-500">
-              AI 客户端通过 stdio 连接本应用，读取当前登录账号可见的缺陷。v1 为只读。
+              AI 客户端通过 stdio 连接本应用，读取当前账号可见的缺陷；修复完成后可追加评论、更新状态。
             </p>
           </div>
           <div className="flex items-center gap-2">
             <Badge tone="green">已启用</Badge>
-            <Badge tone="neutral">只读</Badge>
+            <Badge tone={mcp?.readOnly ? "neutral" : "green"}>{mcp?.readOnly ? "只读" : "读写"}</Badge>
           </div>
         </div>
 

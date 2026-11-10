@@ -25,6 +25,7 @@ pub const LIST_SHOW_FIELDS: &[&str] = &[
     "current_owner",
     "reporter",
     "created",
+    "assigned_time",
     "modified",
     "lastmodify",
     "due",
@@ -477,6 +478,14 @@ fn parse_summary(
         owner: clean_people(text(bug, "current_owner")),
         creator: clean_people(text(bug, "reporter")),
         created: text(bug, "created"),
+        assigned_time: {
+            let assigned = text(bug, "assigned_time");
+            if assigned.is_empty() {
+                text(bug, "current_owner_time")
+            } else {
+                assigned
+            }
+        },
         modified,
         due: text(bug, "due"),
         iteration_id: text(bug, "iteration_id"),

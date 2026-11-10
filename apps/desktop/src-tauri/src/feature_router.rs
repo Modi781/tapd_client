@@ -8,6 +8,21 @@ use tauri::{AppHandle, State};
 
 use crate::state::SharedState;
 
+pub async fn dispatch(
+    app: &AppHandle,
+    state: &SharedState,
+    name: &str,
+    payload: Value,
+) -> Result<Value, String> {
+    if name.starts_with("notification_") {
+        crate::notification::command(app, state, name, payload).await
+    } else if name.starts_with("agent_") {
+        crate::agent::command(app, state, name, payload).await
+    } else {
+        Err(format!("unknown feature command: {name}"))
+    }
+}
+
 #[tauri::command]
 pub async fn feature_command(
     app: AppHandle,
@@ -15,11 +30,5 @@ pub async fn feature_command(
     name: String,
     payload: Value,
 ) -> Result<Value, String> {
-    if name.starts_with("notification_") {
-        crate::notification::command(&app, state.inner(), &name, payload).await
-    } else if name.starts_with("agent_") {
-        crate::agent::command(&app, state.inner(), &name, payload).await
-    } else {
-        Err(format!("unknown feature command: {name}"))
-    }
+    dispatch(&app, state.inner(), &name, payload).await
 }

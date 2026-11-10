@@ -370,6 +370,49 @@ fn tool_definitions() -> Value {
                 "required": ["bug_id"],
                 "additionalProperties": false
             }
+        },
+        {
+            "name": "tapd_get_bug_transitions",
+            "description": "读取缺陷的当前状态、状态别名和允许的下一步状态。修改状态前先调用它，避免使用非法的流转目标。",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "workspace_id": {"type": "string", "description": "项目 ID；省略时使用上次选择的项目"},
+                    "bug_id": {"type": "string", "description": "缺陷长 ID"}
+                },
+                "required": ["bug_id"],
+                "additionalProperties": false
+            }
+        },
+        {
+            "name": "tapd_add_bug_comment",
+            "description": "在缺陷下追加评论（纯文本，自动转换为 TAPD 富文本）。修复完成后用它说明原因、解决方案与影响范围。",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "workspace_id": {"type": "string"},
+                    "bug_id": {"type": "string", "description": "缺陷长 ID"},
+                    "comment": {"type": "string", "description": "评论正文，可包含换行"}
+                },
+                "required": ["bug_id", "comment"],
+                "additionalProperties": false
+            }
+        },
+        {
+            "name": "tapd_update_bug_status",
+            "description": "更新缺陷状态。status 可传 key（如 resolved）或中文名（如 已解决）。若目标不能直接到达（例如 new → 已解决），会自动先流转到处理中再执行。可先调用 tapd_get_bug_transitions 查看允许的下一步。可同时传入 comment，在状态变更前追加说明。",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "workspace_id": {"type": "string"},
+                    "bug_id": {"type": "string", "description": "缺陷长 ID"},
+                    "status": {"type": "string", "description": "目标状态 key 或中文名，如 resolved / 已解决 / verified / 已验证"},
+                    "comment": {"type": "string", "description": "可选；状态变更前追加的评论"},
+                    "fields": {"description": "可选；透传给 TAPD 流转接口的额外字段，通常为空数组"}
+                },
+                "required": ["bug_id", "status"],
+                "additionalProperties": false
+            }
         }
     ])
 }

@@ -45,11 +45,11 @@ opencode mcp list
 # ✓ tapd  connected
 ```
 
-> 注意：`opencode mcp list` 第一次执行时可能尚未加载项目配置，重跑一次即可。
+> 注意：`opencode mcp list` 第一次执行时可能尚未加载项目配置，重跑一次即可；新增/修改工具后需要重启 opencode 让它重新拉取 `tools/list`。
 
 ## 3. 工具
 
-默认只读，共 6 个工具：
+共 9 个工具：6 个查询/导出 + 3 个修复后回写（评论、状态、状态查询）。
 
 | 工具 | 作用 | 关键参数 |
 | --- | --- | --- |
@@ -59,6 +59,9 @@ opencode mcp list
 | `tapd_list_my_bugs` | 我的未解决缺陷 | `workspace_id`、`limit`、`page` |
 | `tapd_get_bug` | 完整详情（含 `embeddedMedia` 内嵌图片/视频、`changes` 变更记录） | `bug_id`（必填）、`workspace_id` |
 | `tapd_export_bug_md` | 导出 MD 包 | `bug_id`（必填）、`workspace_id`、`workspace_name` |
+| `tapd_get_bug_transitions` | 当前状态与允许的下一步 | `bug_id`（必填）、`workspace_id` |
+| `tapd_add_bug_comment` | 追加评论（纯文本自动转富文本） | `bug_id`、`comment`（必填） |
+| `tapd_update_bug_status` | 更新状态，可同时评论 | `bug_id`、`status`（key 或中文名）、`comment`、`fields` |
 
 约定：
 
@@ -74,7 +77,17 @@ opencode mcp list
 {"tool": "tapd_list_bugs", "arguments": {"workspace_id": "45336192", "owner": "me", "limit": 10}}
 {"tool": "tapd_get_bug", "arguments": {"workspace_id": "45336192", "bug_id": "1145336192001010606"}}
 {"tool": "tapd_export_bug_md", "arguments": {"workspace_id": "45336192", "bug_id": "1145336192001010582"}}
+{"tool": "tapd_get_bug_transitions", "arguments": {"bug_id": "1145336192001010582"}}
+{"tool": "tapd_add_bug_comment", "arguments": {"bug_id": "1145336192001010582", "comment": "根因：草稿状态未写入 store。\n方案：补持久化并加回归测试。\n影响范围：会话详情草稿。"}}
+{"tool": "tapd_update_bug_status", "arguments": {"bug_id": "1145336192001010582", "status": "已解决", "comment": "已修复并验证。"}}
 ```
+
+写回规则：
+
+- `status` 可传 key（`resolved`）或中文名（`已解决`）；中文会按项目状态别名映射。
+- 若目标不能直接到达（例如 `new → 已解决`），客户端会自动先流转到处理中，再执行目标状态。
+- `tapd_update_bug_status` 的 `comment` 会先追加评论，再进行状态流转；状态流转失败时评论仍保留，便于追溯。
+- 如果需要填流转必填字段，可传 `fields` 数组，原样透传给 TAPD（通常留空）。
 
 ## 4. 导出产物
 
@@ -105,8 +118,9 @@ opencode mcp list
 
 - sidecar 只能访问 `127.0.0.1` 上的客户端，使用每次启动轮换的 Bearer token（`runtime.json`，权限 0600）。
 - Cookie 不写入文件、不返回给 AI；资源下载在客户端进程内完成。
-- v1 不提供写操作（评论、改状态、改处理人），工具白名单固定为只读。
-- 所有工具调用记录在客户端日志（数据目录 `logs/`），包含工具名、客户端、耗时与结果。
+- 写回仅开放「追加评论」和「更新状态」，不提供删除、改处理人、批量操作等工具。
+- 写操作使用当前 TAPD 会话 Cookie + `dsc-token`，受 TAPD 工作流与权限约束；非法流转会被拒绝并把允许的下一步返回给 AI。
+- 所有工具调用（含写操作）记录在客户端日志（数据目录 `logs/`），包含工具名、客户端、耗时与结果；写操作额外记录 bug id。
 
 ## 6. 常见问题
 
