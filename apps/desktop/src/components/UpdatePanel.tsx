@@ -10,6 +10,7 @@ import {
   RefreshCw,
 } from "lucide-react";
 
+import { api } from "../lib/api";
 import {
   formatBytes,
   formatCheckTime,
@@ -119,6 +120,18 @@ export function UpdatePanel({ toast, bare = false }: Props) {
         <span>上次检查 {formatCheckTime(state?.checkedAt ?? null)}</span>
         <span className="text-slate-300">·</span>
         <span>每小时自动检查</span>
+        <button
+          type="button"
+          onClick={() =>
+            void api
+              .openPath("https://github.com/wwog/tapd_client/releases")
+              .catch((error) => toast?.("error", String(error)))
+          }
+          className="inline-flex items-center gap-1 text-sky-600 transition hover:text-sky-700"
+        >
+          <ExternalLink size={10} />
+          历史更新日志
+        </button>
       </p>
 
       {phase === "downloading" ? (
