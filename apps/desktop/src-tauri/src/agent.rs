@@ -59,6 +59,14 @@ const MAX_LOG_TAIL_BYTES: usize = 400 * 1024;
 const COMPLETION_GRACE: Duration = Duration::from_secs(2);
 /// Upper bound for waiting on the TUI to exit after a completion/cancel signal.
 const PTY_TEARDOWN_TIMEOUT: Duration = Duration::from_secs(3);
+/// When no session event shows up after the prompt was injected, the TUI
+/// dropped the text (it was not accepting input yet). Re-inject once after this
+/// delay; the task used to stay `running` forever in that case.
+const PROMPT_RETRY_AFTER: Duration = Duration::from_secs(12);
+/// Give up and fail the task when the agent session still never started.
+const PROMPT_VERIFY_TIMEOUT: Duration = Duration::from_secs(30);
+/// How often the injection watchdog re-checks the guard.
+const PROMPT_WATCHDOG_TICK: Duration = Duration::from_secs(2);
 
 pub const DEFAULT_PROMPT_TEMPLATE: &str = "请修复 TAPD 缺陷：{{title}}\n\n缺陷详情文件：{{md_path}}\n本地仓库：{{repo_path}}\n项目：{{workspace_name}} / 严重程度：{{severity}} / 优先级：{{priority}}\n\n项目规则：\n{{project_rule}}\n\n要求：\n1. 先完整阅读 bug.md 和 assets/ 下的截图、视频。\n2. 定位根因，做最小必要修改。\n3.修复时请遵循团队代码规范，确保代码可读、可维护。\n4. 修复完成后，提交代码并在 TAPD 中更新缺陷状态并简要评论原由以及解决方案和修复影响范围。";
 
@@ -556,18 +564,94 @@ fn apply_finish(task: &mut AgentTask, outcome: &PtyOutcome, now: &str) -> bool {
     true
 }
 
-/// Marks tasks that were mid-flight when the client exited as failed, so the
+/// Turn outcome already recorded in a task's event log.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum RecordedOutcome {
+    Succeeded,
+    Failed(String),
+}
+
+/// Reads the tail of `agent-events/<task>.jsonl` and returns the last
+/// turn-boundary signal the client had already received.
+///
+/// The event log is appended by the SSE pump independently of task state, so it
+/// still tells the truth when the client dies right after a turn finished.
+/// Signals are only trusted after a turn actually started, which filters
+/// history replayed by the server on reconnect.
+fn last_recorded_outcome(events_dir: &Path, task_id: &str) -> Option<RecordedOutcome> {
+    let path = events_dir.join(format!("{task_id}.jsonl"));
+    let bytes = std::fs::read(&path).ok()?;
+    let slice = if bytes.len() > MAX_LOG_TAIL_BYTES {
+        &bytes[bytes.len() - MAX_LOG_TAIL_BYTES..]
+    } else {
+        &bytes[..]
+    };
+    let text = String::from_utf8_lossy(slice);
+
+    let mut turn_started = false;
+    let mut outcome = None;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(event) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        let event_type = opencode::event_type(&event);
+        if matches!(
+            event_type.as_str(),
+            "session.created" | "session.execution.started" | "session.inbox.delivered"
+        ) {
+            turn_started = true;
+            outcome = None;
+            continue;
+        }
+        if !turn_started {
+            continue;
+        }
+        match opencode::turn_signal(&event_type, &event) {
+            Some(opencode::TurnSignal::Succeeded) => outcome = Some(RecordedOutcome::Succeeded),
+            Some(opencode::TurnSignal::Failed(message)) => {
+                outcome = Some(RecordedOutcome::Failed(message));
+            }
+            Some(opencode::TurnSignal::Busy) | None => {}
+        }
+    }
+    outcome
+}
+
+/// Marks tasks that were mid-flight when the client exited as finished, so the
 /// queue can make progress after a restart. Returns how many were recovered.
-fn recover_incomplete(tasks: &mut [AgentTask], now: &str) -> usize {
+///
+/// A task that already recorded a turn outcome before the exit keeps that
+/// outcome; everything else is reported as interrupted.
+fn recover_incomplete(tasks: &mut [AgentTask], events_dir: &Path, now: &str) -> usize {
     let mut recovered = 0usize;
     for task in tasks.iter_mut() {
-        if task.status.is_active() {
-            task.status = TaskStatus::Failed;
-            task.error = Some("客户端重启".to_string());
-            task.finished_at = Some(now.to_string());
-            task.exit_code = None;
-            recovered += 1;
+        if !task.status.is_active() {
+            continue;
         }
+        match last_recorded_outcome(events_dir, &task.id) {
+            Some(RecordedOutcome::Succeeded) => {
+                task.status = TaskStatus::Succeeded;
+                task.error = None;
+                task.exit_code = Some(0);
+            }
+            Some(RecordedOutcome::Failed(message)) => {
+                task.status = TaskStatus::Failed;
+                task.error = Some(message);
+                task.exit_code = None;
+            }
+            None => {
+                task.status = TaskStatus::Failed;
+                task.error = Some("客户端重启".to_string());
+                task.exit_code = None;
+            }
+        }
+        task.finished_at = Some(now.to_string());
+        task.review = None;
+        recovered += 1;
     }
     recovered
 }
@@ -674,6 +758,10 @@ struct PtyOutcome {
 struct PromptGuard {
     injected: AtomicBool,
     injected_at: Mutex<Option<Instant>>,
+    /// Set as soon as an event carries a session id, i.e. the injected prompt
+    /// actually reached the agent. A TUI that is not ready yet silently drops
+    /// the input, which leaves the task running with no session behind it.
+    session_seen: AtomicBool,
 }
 
 impl PromptGuard {
@@ -684,6 +772,22 @@ impl PromptGuard {
 
     fn injected(&self) -> bool {
         self.injected.load(Ordering::SeqCst)
+    }
+
+    fn mark_session_seen(&self) {
+        self.session_seen.store(true, Ordering::SeqCst);
+    }
+
+    fn session_seen(&self) -> bool {
+        self.session_seen.load(Ordering::SeqCst)
+    }
+
+    /// Time since the prompt was injected, `None` before injection.
+    fn injected_elapsed(&self) -> Option<Duration> {
+        self.injected_at
+            .lock()
+            .ok()
+            .and_then(|at| at.map(|at| at.elapsed()))
     }
 
     fn completion_allowed(&self) -> bool {
@@ -698,17 +802,47 @@ impl PromptGuard {
     }
 }
 
+/// Takes the longest complete UTF-8 prefix out of `buffer` and keeps an
+/// incomplete trailing sequence for the next batch.
+///
+/// PTY reads are chunked, so a multi-byte character (e.g. Chinese text in the
+/// TUI) can be split in half. Decoding such a batch used to surface as U+FFFD
+/// in the terminal, which looked like corrupted output.
+fn take_utf8_prefix(buffer: &mut Vec<u8>) -> Vec<u8> {
+    let cut = match std::str::from_utf8(buffer) {
+        Ok(_) => buffer.len(),
+        Err(error) => {
+            let valid = error.valid_up_to();
+            if error.error_len().is_some() {
+                // A genuinely invalid byte would block the buffer forever;
+                // emit it (the terminal shows U+FFFD) and keep going.
+                valid.max(1)
+            } else {
+                valid
+            }
+        }
+    };
+    if cut == 0 {
+        return Vec::new();
+    }
+    let rest = buffer.split_off(cut);
+    std::mem::replace(buffer, rest)
+}
+
 fn flush_output(app: &AppHandle, task_id: &str, log: &mut Option<std::fs::File>, pending: &mut Vec<u8>) {
     if pending.is_empty() {
         return;
     }
+    let bytes = take_utf8_prefix(pending);
+    if bytes.is_empty() {
+        return;
+    }
     if let Some(file) = log.as_mut() {
-        let _ = file.write_all(pending);
+        let _ = file.write_all(&bytes);
         let _ = file.flush();
     }
 
-    let text = String::from_utf8_lossy(pending).to_string();
-    pending.clear();
+    let text = String::from_utf8_lossy(&bytes).to_string();
     if text.is_empty() {
         return;
     }
@@ -738,6 +872,9 @@ pub struct AgentCore {
     /// Per-task cancel flag; created when the worker takes a queued task so a
     /// cancel can interrupt server startup before the PTY exists.
     cancels: Mutex<HashMap<String, Arc<AtomicBool>>>,
+    /// Terminal size the UI asked for. The console can be opened before the
+    /// PTY exists, so the size is remembered and applied when it starts.
+    sizes: Mutex<HashMap<String, (u16, u16)>>,
     wake: tokio::sync::Notify,
 }
 
@@ -751,6 +888,7 @@ impl AgentCore {
             runtimes: Mutex::new(HashMap::new()),
             servers: Mutex::new(HashMap::new()),
             cancels: Mutex::new(HashMap::new()),
+            sizes: Mutex::new(HashMap::new()),
             wake: tokio::sync::Notify::new(),
         }
     }
@@ -783,9 +921,9 @@ impl AgentCore {
         let mut tasks = read_json::<TaskFile>(&self.tasks_path())
             .map(|file| file.tasks)
             .unwrap_or_default();
-        let recovered = recover_incomplete(&mut tasks, &now());
+        let recovered = recover_incomplete(&mut tasks, &self.events_dir(), &now());
         if recovered > 0 {
-            tracing::warn!(recovered, "marked interrupted agent tasks as failed");
+            tracing::warn!(recovered, "recovered interrupted agent tasks");
         }
         *self.tasks.lock().expect("agent tasks lock") = tasks;
 
@@ -1090,6 +1228,10 @@ impl AgentCore {
         }
 
         self.stop_runtime(task_id);
+        self.sizes
+            .lock()
+            .expect("agent sizes lock")
+            .remove(task_id);
 
         let server = self
             .servers
@@ -1130,7 +1272,7 @@ impl AgentCore {
         }
 
         // Persist the relation on the task so history can reopen the session.
-        self.mutate_tasks(|tasks| {
+        let recorded = self.mutate_tasks(|tasks| {
             let Some(task) = tasks.iter_mut().find(|task| task.id == task_id) else {
                 return false;
             };
@@ -1140,6 +1282,28 @@ impl AgentCore {
             task.session_id = Some(session_id.to_string());
             true
         });
+        if recorded {
+            tracing::debug!(task_id, session_id, "agent session id recorded");
+        }
+    }
+
+    /// Kills every TUI and `opencode serve` this process started.
+    ///
+    /// Both are started in their own session, so a plain process exit leaves
+    /// them running: the turn keeps going after the window is gone and keeps
+    /// writing back to TAPD while the task already looks abandoned.
+    fn shutdown(&self) {
+        let task_ids: Vec<String> = match self.tasks.lock() {
+            Ok(tasks) => tasks.iter().map(|task| task.id.clone()).collect(),
+            Err(error) => {
+                tracing::warn!(%error, "agent tasks lock poisoned during shutdown");
+                Vec::new()
+            }
+        };
+        for task_id in &task_ids {
+            self.teardown_task(task_id);
+        }
+        tracing::info!(tasks = task_ids.len(), "agent processes stopped");
     }
 
     /// Marks a task succeeded from a turn-boundary event. Returns whether the
@@ -1289,7 +1453,12 @@ impl AgentCore {
         }
 
         if let Some(session_id) = opencode::event_session_id(event) {
-            self.remember_session(task_id, &session_id);
+            // Only events after our prompt was injected belong to this task;
+            // the server replays older sessions when a stream reconnects.
+            if guard.injected() {
+                guard.mark_session_seen();
+                self.remember_session(task_id, &session_id);
+            }
         }
 
         if event_type.contains("permission") {
@@ -1354,6 +1523,76 @@ impl AgentCore {
         })
     }
 
+    /// Makes sure the injected prompt actually reached the agent.
+    ///
+    /// The TUI can start slower than the "output + quiet" readiness check, in
+    /// which case it discards the written text and never creates a session —
+    /// the task then sat in `running` until the client exited. Re-inject once,
+    /// then fail the task with a clear error instead of hanging.
+    fn spawn_injection_watchdog(
+        self: &Arc<Self>,
+        task_id: &str,
+        prompt: &str,
+        guard: Arc<PromptGuard>,
+        done: Arc<tokio::sync::Notify>,
+    ) -> tauri::async_runtime::JoinHandle<()> {
+        let core = self.clone();
+        let task_id = task_id.to_string();
+        let prompt = prompt.to_string();
+        tauri::async_runtime::spawn(async move {
+            let mut reinjected = false;
+            loop {
+                tokio::time::sleep(PROMPT_WATCHDOG_TICK).await;
+
+                // Terminal (canceled/finished) or a session already exists:
+                // nothing left to verify.
+                if core
+                    .current_status(&task_id)
+                    .map(TaskStatus::is_terminal)
+                    .unwrap_or(true)
+                {
+                    return;
+                }
+                if guard.session_seen() {
+                    return;
+                }
+                // The PTY thread may still be waiting for the TUI to settle;
+                // keep watching until the prompt is actually written.
+                if !guard.injected() {
+                    continue;
+                }
+
+                let elapsed = guard.injected_elapsed().unwrap_or_default();
+                if !reinjected && elapsed >= PROMPT_RETRY_AFTER {
+                    reinjected = true;
+                    tracing::warn!(
+                        task_id = %task_id,
+                        "no agent session after prompt injection, re-injecting"
+                    );
+                    // 先回车清掉可能残留的输入，再重新注入，并重置计时。
+                    let _ = core.write_input(&task_id, "\r");
+                    let _ = core.write_input(&task_id, &format!("{prompt}\r"));
+                    guard.mark_injected();
+                    continue;
+                }
+
+                if elapsed >= PROMPT_VERIFY_TIMEOUT {
+                    tracing::warn!(
+                        task_id = %task_id,
+                        "agent session never started, failing the task"
+                    );
+                    core.fail_task(
+                        &task_id,
+                        "Agent 会话未启动：提示词没有送达终端，请重试".to_string(),
+                    );
+                    core.stop_runtime(&task_id);
+                    done.notify_one();
+                    return;
+                }
+            }
+        })
+    }
+
     fn retry(&self, task_id: &str) -> Result<AgentTask, String> {
         let original = self
             .task_snapshot(task_id)
@@ -1392,7 +1631,12 @@ impl AgentCore {
             .ok_or_else(|| "任务不存在".to_string())?;
         let bytes = std::fs::read(&task.log_path).map_err(|error| error.to_string())?;
         let slice = if bytes.len() > MAX_LOG_TAIL_BYTES {
-            &bytes[bytes.len() - MAX_LOG_TAIL_BYTES..]
+            let tail = &bytes[bytes.len() - MAX_LOG_TAIL_BYTES..];
+            // 从下一行开始：否则终端会先收到半条转义序列/半个字符。
+            match tail.iter().position(|byte| *byte == b'\n') {
+                Some(index) => &tail[index + 1..],
+                None => tail,
+            }
         } else {
             &bytes[..]
         };
@@ -1434,19 +1678,28 @@ impl AgentCore {
     }
 
     fn resize(&self, task_id: &str, cols: u16, rows: u16) -> Result<(), String> {
+        let size = (cols.max(1), rows.max(1));
+        // 控制台可能在 PTY 起来之前就打开了：先记下尺寸，等 run_pty 创建后套用。
+        self.sizes
+            .lock()
+            .expect("agent sizes lock")
+            .insert(task_id.to_string(), size);
+
         let runtime = self
             .runtimes
             .lock()
             .expect("agent runtimes lock")
             .get(task_id)
-            .cloned()
-            .ok_or_else(|| "任务未在运行".to_string())?;
+            .cloned();
+        let Some(runtime) = runtime else {
+            return Ok(());
+        };
         let runtime = runtime.lock().expect("agent runtime lock");
         runtime
             .master
             .resize(PtySize {
-                rows: rows.max(1),
-                cols: cols.max(1),
+                rows: size.1,
+                cols: size.0,
                 pixel_width: 0,
                 pixel_height: 0,
             })
@@ -1667,6 +1920,9 @@ impl AgentCore {
         };
 
         let mut server_active = false;
+        // Whether the event stream is live: the injection watchdog relies on
+        // session events, so it only makes sense in this mode.
+        let mut events_live = false;
         if let Some(server) = server {
             match server.wait_ready(opencode::READY_TIMEOUT, &cancel).await {
                 Ok(()) => {
@@ -1675,6 +1931,7 @@ impl AgentCore {
                     let (sink, receiver) = tokio_mpsc::unbounded_channel();
                     match server.subscribe_events(sink, events_path, cancel.clone()).await {
                         Ok((pump, flavor)) => {
+                            events_live = true;
                             tracing::info!(
                                 task_id = %task.id,
                                 base = server.base_url(),
@@ -1774,6 +2031,20 @@ impl AgentCore {
             .map_err(|error| tracing::warn!(%error, "failed to spawn agent pty thread"))
             .ok();
 
+        // Watch the prompt injection: a TUI that was not ready yet drops the
+        // text, and without a session the task would run forever. Only possible
+        // when session events are actually flowing.
+        let watchdog = if events_live {
+            Some(self.spawn_injection_watchdog(
+                &task.id,
+                &task.prompt,
+                guard.clone(),
+                done.clone(),
+            ))
+        } else {
+            None
+        };
+
         // Wait for the TUI to exit or for a server event to close the turn.
         let mut outcome = tokio::select! {
             result = &mut receiver => match result {
@@ -1799,6 +2070,10 @@ impl AgentCore {
                 }
             }
         };
+
+        if let Some(watchdog) = watchdog {
+            watchdog.abort();
+        }
 
         if !warnings.is_empty() {
             let message = warnings.join("；");
@@ -1893,6 +2168,24 @@ impl AgentCore {
             .lock()
             .expect("agent runtimes lock")
             .insert(task.id.clone(), runtime.clone());
+
+        // The console may already be open and have asked for a size before the
+        // PTY existed; apply it now so the TUI lays out for that panel.
+        let requested = self
+            .sizes
+            .lock()
+            .ok()
+            .and_then(|sizes| sizes.get(&task.id).copied());
+        if let Some((cols, rows)) = requested {
+            if let Ok(runtime) = runtime.lock() {
+                let _ = runtime.master.resize(PtySize {
+                    rows,
+                    cols,
+                    pixel_width: 0,
+                    pixel_height: 0,
+                });
+            }
+        }
 
         // Close the race where a cancel arrived just before the runtime became
         // visible to `agent_task_cancel`.
@@ -2267,6 +2560,14 @@ pub fn init(app: &AppHandle, state: SharedState) {
             }
         }
     });
+}
+
+/// Stops every agent process on app exit. Called from `RunEvent::Exit`, which
+/// is the only place a normal quit can still reap the children.
+pub fn shutdown(app: &AppHandle) {
+    if let Some(core) = app.try_state::<Arc<AgentCore>>() {
+        core.shutdown();
+    }
 }
 
 pub async fn command(
@@ -2743,8 +3044,9 @@ mod tests {
             sample_task("waiting", TaskStatus::WaitingReview),
             sample_task("done", TaskStatus::Succeeded),
         ];
+        let events_dir = temp_events_dir();
 
-        let recovered = recover_incomplete(&mut tasks, "2026-11-10T01:00:00Z");
+        let recovered = recover_incomplete(&mut tasks, &events_dir, "2026-11-10T01:00:00Z");
         assert_eq!(recovered, 3);
         assert_eq!(tasks[0].status, TaskStatus::Queued);
         assert_eq!(tasks[1].status, TaskStatus::Failed);
@@ -2753,6 +3055,115 @@ mod tests {
         assert_eq!(tasks[2].status, TaskStatus::Failed);
         assert_eq!(tasks[3].status, TaskStatus::Failed);
         assert_eq!(tasks[4].status, TaskStatus::Succeeded);
+
+        let _ = std::fs::remove_dir_all(&events_dir);
+    }
+
+    fn temp_events_dir() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "tapd-agent-events-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&dir).expect("events dir");
+        dir
+    }
+
+    fn write_events(dir: &Path, task_id: &str, events: &[Value]) {
+        let mut raw = String::new();
+        for event in events {
+            raw.push_str(&serde_json::to_string(event).expect("event json"));
+            raw.push('\n');
+        }
+        std::fs::write(dir.join(format!("{task_id}.jsonl")), raw).expect("write events");
+    }
+
+    #[test]
+    fn recorded_turn_outcome_ignores_events_before_the_turn() {
+        let dir = temp_events_dir();
+        // A replayed idle from history must not count as our turn finishing.
+        write_events(
+            &dir,
+            "task-a",
+            &[
+                json!({ "type": "session.idle", "data": { "sessionID": "ses_old" } }),
+                json!({ "type": "session.created", "data": { "sessionID": "ses_new" } }),
+                json!({ "type": "session.step.started", "data": { "sessionID": "ses_new" } }),
+            ],
+        );
+        assert_eq!(last_recorded_outcome(&dir, "task-a"), None);
+
+        // A real turn boundary after the session started is trusted.
+        write_events(
+            &dir,
+            "task-b",
+            &[
+                json!({ "type": "session.created", "data": { "sessionID": "ses_new" } }),
+                json!({ "type": "session.execution.succeeded", "data": { "sessionID": "ses_new" } }),
+            ],
+        );
+        assert_eq!(
+            last_recorded_outcome(&dir, "task-b"),
+            Some(RecordedOutcome::Succeeded)
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn recovery_keeps_a_finished_turn_successful() {
+        let dir = temp_events_dir();
+        write_events(
+            &dir,
+            "running",
+            &[
+                json!({ "type": "session.created", "data": { "sessionID": "ses_1" } }),
+                json!({ "type": "session.execution.succeeded", "data": { "sessionID": "ses_1" } }),
+            ],
+        );
+        write_events(
+            &dir,
+            "waiting",
+            &[
+                json!({ "type": "session.created", "data": { "sessionID": "ses_2" } }),
+                json!({
+                    "type": "session.execution.failed",
+                    "data": { "sessionID": "ses_2", "message": "模型额度用尽" }
+                }),
+            ],
+        );
+
+        let mut tasks = vec![
+            sample_task("running", TaskStatus::Running),
+            sample_task("waiting", TaskStatus::WaitingReview),
+        ];
+        let recovered = recover_incomplete(&mut tasks, &dir, "2026-11-10T01:00:00Z");
+
+        assert_eq!(recovered, 2);
+        assert_eq!(tasks[0].status, TaskStatus::Succeeded);
+        assert_eq!(tasks[0].error, None);
+        assert_eq!(tasks[0].exit_code, Some(0));
+        assert_eq!(tasks[1].status, TaskStatus::Failed);
+        assert_eq!(tasks[1].error.as_deref(), Some("模型额度用尽"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn utf8_prefix_keeps_split_characters_for_the_next_batch() {
+        // "中" is E4 B8 AD; a batch that ends after two bytes must not emit
+        // U+FFFD and must keep the tail for the next flush.
+        let mut pending = vec![b'a', 0xE4, 0xB8];
+        assert_eq!(take_utf8_prefix(&mut pending), b"a".to_vec());
+        assert_eq!(pending, vec![0xE4, 0xB8]);
+
+        pending.extend_from_slice(&[0xAD, b'b']);
+        assert_eq!(take_utf8_prefix(&mut pending), "中b".as_bytes().to_vec());
+        assert!(pending.is_empty());
+
+        // Invalid bytes are emitted instead of stalling the buffer.
+        let mut invalid = vec![0xFF, b'c'];
+        assert_eq!(take_utf8_prefix(&mut invalid), vec![0xFF]);
+        assert_eq!(invalid, b"c".to_vec());
     }
 
     #[test]

@@ -270,7 +270,7 @@ export function AgentHistory({ tasks, focusTaskId, onOpenBug, onQueued, toast }:
                   disabled={!selected.logPath}
                   onClick={() => setLogTask(selected)}
                 >
-                  查看日志
+                  查看终端
                 </Button>
                 <Button
                   size="sm"

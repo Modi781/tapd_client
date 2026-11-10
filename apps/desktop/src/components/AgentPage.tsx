@@ -11,7 +11,6 @@ import {
   FolderOpen,
   Loader2,
   RefreshCw,
-  ScrollText,
   ShieldAlert,
   Square,
   Terminal,
@@ -29,7 +28,7 @@ import {
   type PermissionReply,
 } from "../lib/agent";
 import { AgentHistory } from "./AgentHistory";
-import { AgentLogViewer } from "./AgentLogViewer";
+import { AgentTerminal } from "./AgentTerminal";
 import { Segmented } from "./Segmented";
 import { Badge, Button } from "./ui";
 
@@ -63,7 +62,6 @@ export function AgentPage({ focusTaskId, onOpenBug, toast }: Props) {
   const [explicitTaskId, setExplicitTaskId] = useState<string | null>(null);
   const [permissionBusy, setPermissionBusy] = useState<PermissionReply | null>(null);
   const [actionBusy, setActionBusy] = useState<string | null>(null);
-  const [logTask, setLogTask] = useState<AgentTask | null>(null);
   const [resumeBusy, setResumeBusy] = useState<string | null>(null);
 
   const appliedFocusRef = useRef<string | null>(null);
@@ -299,7 +297,7 @@ export function AgentPage({ focusTaskId, onOpenBug, toast }: Props) {
                   当前没有运行中的任务
                 </h3>
                 <p className="mt-1 text-xs leading-5 text-slate-500">
-                  在缺陷详情点击「用 Agent 修复」后，任务会出现在这里；已结束的任务在「历史」中查看日志或恢复会话。
+                  在缺陷详情点击「用 Agent 修复」后，任务会出现在这里；已结束的任务在「历史」中查看终端或恢复会话。
                 </p>
               </div>
             </div>
@@ -338,6 +336,9 @@ export function AgentPage({ focusTaskId, onOpenBug, toast }: Props) {
                         排队 {counts.queued} · 运行 {counts.active} · 待审核{" "}
                         {counts.waiting}
                       </span>
+                      {logReady ? (
+                        <span className="shrink-0">Option+拖动选中文本</span>
+                      ) : null}
                       {runTask.exitCode !== undefined ? (
                         <span className="shrink-0">exit {runTask.exitCode}</span>
                       ) : null}
@@ -364,15 +365,6 @@ export function AgentPage({ focusTaskId, onOpenBug, toast }: Props) {
                       }
                     >
                       中断
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant="secondary"
-                      icon={<ScrollText size={11} />}
-                      disabled={!logReady}
-                      onClick={() => setLogTask(runTask)}
-                    >
-                      查看日志
                     </Button>
                     <Button
                       size="sm"
@@ -531,62 +523,35 @@ export function AgentPage({ focusTaskId, onOpenBug, toast }: Props) {
                 </div>
               ) : null}
 
-              <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 overflow-y-auto bg-slate-50/70 p-6 text-center">
-                <div className="grid h-12 w-12 place-items-center rounded-2xl bg-slate-900 text-sky-300">
-                  <Terminal size={22} />
+              {logReady ? (
+                <div className="min-h-0 flex-1 bg-zinc-950 p-1.5">
+                  <AgentTerminal
+                    key={runTask.id}
+                    taskId={runTask.id}
+                    interactive
+                    className="h-full w-full"
+                  />
                 </div>
-                <div>
-                  <p className="text-sm font-medium text-slate-700">
-                    {runTask.status === "queued" || runTask.status === "preparing"
-                      ? "任务尚未开始"
-                      : "终端输出已写入日志"}
-                  </p>
-                  <p className="mt-1 max-w-md text-[11px] leading-5 text-slate-500">
-                    {runTask.status === "queued" || runTask.status === "preparing"
-                      ? "任务开始后，输出会写入本地日志；可查看日志或在 Terminal 中恢复会话。"
-                      : "查看保留换行的日志，或在 Terminal 中恢复会话继续操作。"}
-                  </p>
-                  <p className="mt-2 break-all font-mono text-[10px] text-slate-400">
-                    {runTask.logPath}
-                  </p>
+              ) : (
+                <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 bg-slate-50/70 p-6 text-center">
+                  <div className="grid h-12 w-12 place-items-center rounded-2xl bg-slate-900 text-sky-300">
+                    <Terminal size={22} />
+                  </div>
+                  <div>
+                    <p className="text-sm font-medium text-slate-700">任务尚未开始</p>
+                    <p className="mt-1 max-w-md text-[11px] leading-5 text-slate-500">
+                      任务开始后，opencode TUI 会直接显示在这里，可以像命令行一样操作。
+                    </p>
+                    <p className="mt-2 break-all font-mono text-[10px] text-slate-400">
+                      {runTask.logPath}
+                    </p>
+                  </div>
                 </div>
-                <div className="flex flex-wrap justify-center gap-2">
-                  <Button
-                    size="sm"
-                    variant="secondary"
-                    icon={<ScrollText size={12} />}
-                    disabled={!logReady}
-                    onClick={() => setLogTask(runTask)}
-                  >
-                    查看日志
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="primary"
-                    icon={
-                      resumeBusy === runTask.id ? (
-                        <Loader2 size={12} className="animate-spin" />
-                      ) : (
-                        <ExternalLink size={12} />
-                      )
-                    }
-                    disabled={!runTask.sessionId || resumeBusy !== null}
-                    onClick={() => void resumeSession(runTask)}
-                  >
-                    终端恢复
-                  </Button>
-                </div>
-              </div>
+              )}
             </>
           )}
         </div>
       )}
-
-      <AgentLogViewer
-        task={logTask}
-        onClose={() => setLogTask(null)}
-        toast={toast}
-      />
     </div>
   );
 }
