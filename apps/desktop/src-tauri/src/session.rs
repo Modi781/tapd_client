@@ -181,7 +181,10 @@ pub fn spawn_session_watcher(app: AppHandle, state: SharedState) {
                 continue;
             };
             let url_string = url.to_string();
-            if url_string == last_url {
+            // During the logout guard we still re-evaluate the same URL, so a
+            // login that finishes inside the guard window is picked up as soon
+            // as it expires instead of being stuck logged out.
+            if url_string == last_url && !logout_in_progress() {
                 continue;
             }
             last_url = url_string.clone();
@@ -190,10 +193,9 @@ pub fn spawn_session_watcher(app: AppHandle, state: SharedState) {
             let auth_page = looks_like_auth_page(&url_string);
 
             let mut login_changed = false;
+            let mut expired = false;
             let mut open_login = false;
-            let snapshot = {
-                let mut config = state.config.lock().expect("config lock");
-                let url_changed = config.last_session_url.as_deref() != Some(url_string.as_str());
+            let persisted = state.update_config(|config| {
                 config.last_session_url = Some(url_string.clone());
 
                 // A logout just cleared cookies and is still navigating: don't
@@ -208,7 +210,10 @@ pub fn spawn_session_watcher(app: AppHandle, state: SharedState) {
                     // The login screen picks it up from the hidden webview; the
                     // window itself must never pop up on its own.
                     config.logged_in = false;
+                    config.me = None;
+                    config.me_avatar = None;
                     login_changed = true;
+                    expired = true;
                 }
 
                 // TAPD's marketing home never redirects to the login form on
@@ -216,24 +221,22 @@ pub fn spawn_session_watcher(app: AppHandle, state: SharedState) {
                 if !suppress_login && !config.logged_in && is_bare_tapd_home(&url_string) {
                     open_login = true;
                 }
-
-                if login_changed || url_changed {
-                    Some(config.clone())
-                } else {
-                    None
-                }
-            };
-
-            if let Some(snapshot) = snapshot {
-                if let Err(error) = state.save_config(&snapshot) {
-                    tracing::warn!(%error, "failed to persist session state");
-                }
+            });
+            if let Err(error) = persisted {
+                tracing::warn!(%error, "failed to persist session state");
             }
 
             if open_login && now_millis() > LOGIN_BOUNCE_UNTIL.load(Ordering::SeqCst) {
                 LOGIN_BOUNCE_UNTIL.store(now_millis() + 5000, Ordering::SeqCst);
                 if let Ok(login) = tauri::Url::parse(TAPD_LOGIN) {
                     let _ = window.navigate(login);
+                }
+            }
+
+            if expired {
+                // Cached projects/bugs belong to the session that just ended.
+                if let Err(error) = state.cache.clear() {
+                    tracing::warn!(%error, "failed to clear offline cache after session expiry");
                 }
             }
 

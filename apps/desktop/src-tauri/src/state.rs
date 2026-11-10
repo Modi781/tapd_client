@@ -7,6 +7,7 @@ use tapd_core::{
 };
 
 use crate::cache::Cache;
+use crate::mcp_audit::McpAudit;
 
 /// Shared state for Tauri commands, the local HTTP server and the session watcher.
 pub struct AppState {
@@ -16,17 +17,21 @@ pub struct AppState {
     pub runtime: Mutex<Option<RuntimeInfo>>,
     /// Offline snapshot cache (projects/bugs). Disabled if SQLite failed to open.
     pub cache: Arc<Cache>,
+    /// Bounded MCP call audit log.
+    pub mcp_audit: McpAudit,
 }
 
 impl AppState {
     pub fn new(paths: AppPaths, config_store: ConfigStore, config: AppConfig) -> Self {
         let cache = Arc::new(Cache::open(paths.data_dir.join("cache.sqlite3")));
+        let mcp_audit = McpAudit::load(paths.data_dir.join("mcp-audit.json"));
         Self {
             paths,
             config_store,
             config: Mutex::new(config),
             runtime: Mutex::new(None),
             cache,
+            mcp_audit,
         }
     }
 
@@ -34,8 +39,19 @@ impl AppState {
         self.config.lock().expect("config lock").clone()
     }
 
-    pub fn save_config(&self, config: &AppConfig) -> std::io::Result<()> {
-        self.config_store.save(config)
+    /// Mutates the config under its lock and persists before releasing it.
+    ///
+    /// Every writer must go through this helper: cloning under the lock and
+    /// saving afterwards lets concurrent writers persist stale snapshots (for
+    /// example flipping `loggedIn` back to false mid-login).
+    pub fn update_config<T>(
+        &self,
+        mutate: impl FnOnce(&mut AppConfig) -> T,
+    ) -> std::io::Result<T> {
+        let mut config = self.config.lock().expect("config lock");
+        let output = mutate(&mut config);
+        self.config_store.save(&config)?;
+        Ok(output)
     }
 
     pub fn runtime_info(&self) -> Option<RuntimeInfo> {

@@ -29,10 +29,14 @@ use tauri::{
     WebviewWindowBuilder,
 };
 use tapd_core::{
+    config::AppConfig,
     store::{read_json, write_json_atomic},
-    tapd::api::{
-        bug_detail_body, bug_detail_url, bug_list_url, parse_bug_detail, parse_bug_list,
-        parse_workspaces, user_workspace_url, BugQuery,
+    tapd::{
+        api::{
+            bug_detail_body, bug_detail_url, bug_list_url, parse_bug_detail, parse_bug_list,
+            parse_workspaces, user_workspace_url, BugQuery,
+        },
+        Workspace,
     },
 };
 
@@ -140,7 +144,7 @@ impl Default for NotificationSettings {
             enabled: true,
             scope: NotificationScope::Mine,
             include_new: true,
-            include_transferred: false,
+            include_transferred: true,
             include_reopened: true,
             poll_interval_secs: 60,
             quiet_hours: QuietHours::default(),
@@ -723,22 +727,17 @@ impl NotificationService {
         apply_island(&self.app, &self.state, !items.is_empty() && !quiet, items.len(), true);
     }
 
-    async fn ensure_identity(&self, workspace_id: &str) -> Result<Option<String>, String> {
+    /// Resolves the signed-in user plus the accessible workspaces in one call.
+    async fn ensure_identity(
+        &self,
+        workspace_id: &str,
+    ) -> Result<(Option<String>, Vec<Workspace>), String> {
         let cached = self
             .state
             .config_snapshot()
             .me
             .map(|me| me.trim().to_string())
             .filter(|me| !me.is_empty());
-        let names_known = self
-            .workspace_names
-            .lock()
-            .expect("workspace names lock")
-            .contains_key(workspace_id);
-
-        if cached.is_some() && names_known {
-            return Ok(cached);
-        }
 
         let root = session_request_json(
             &self.app,
@@ -749,16 +748,17 @@ impl NotificationService {
         )
         .await?;
 
-        if let Ok(workspaces) = parse_workspaces(&root) {
-            if let Some(first) = workspaces.first() {
-                *self
-                    .default_workspace
-                    .lock()
-                    .expect("default workspace lock") = Some(first.id.clone());
-            }
+        let workspaces = parse_workspaces(&root).unwrap_or_default();
+        if let Some(first) = workspaces.first() {
+            *self
+                .default_workspace
+                .lock()
+                .expect("default workspace lock") = Some(first.id.clone());
+        }
+        {
             let mut names = self.workspace_names.lock().expect("workspace names lock");
-            for workspace in workspaces {
-                names.insert(workspace.id, workspace.name);
+            for workspace in &workspaces {
+                names.insert(workspace.id.clone(), workspace.name.clone());
             }
         }
 
@@ -770,17 +770,16 @@ impl NotificationService {
             .to_string();
 
         if !nick.is_empty() && cached.as_deref() != Some(nick.as_str()) {
-            let snapshot = {
-                let mut config = self.state.config.lock().expect("config lock");
-                config.me = Some(nick.clone());
-                config.clone()
-            };
-            if let Err(error) = self.state.save_config(&snapshot) {
+            let persisted = self
+                .state
+                .update_config(|config| config.me = Some(nick.clone()));
+            if let Err(error) = persisted {
                 tracing::warn!(%error, "failed to persist current user");
             }
         }
 
-        Ok(if nick.is_empty() { cached } else { Some(nick) })
+        let resolved = if nick.is_empty() { cached } else { Some(nick) };
+        Ok((resolved, workspaces))
     }
 
     async fn poll_once(self: &Arc<Self>) {
@@ -837,47 +836,62 @@ impl NotificationService {
             return Ok(());
         }
 
-        let mut workspace_id = config
-            .last_workspace_id
-            .clone()
-            .unwrap_or_default()
-            .trim()
-            .to_string();
-        if workspace_id.is_empty() {
-            // The session watcher knows the last TAPD workspace page even
-            // before the UI persists `lastWorkspaceId`.
-            workspace_id = config
-                .last_session_url
-                .as_deref()
-                .and_then(workspace_from_session_url)
-                .unwrap_or_default();
-        }
-        if workspace_id.is_empty() {
-            self.ensure_identity("0").await?;
-            workspace_id = self
-                .default_workspace
-                .lock()
-                .expect("default workspace lock")
-                .clone()
-                .unwrap_or_default();
-        }
-        if workspace_id.is_empty() {
+        let (me, workspaces) = self.ensure_identity("0").await?;
+        let Some(me) = me else {
+            return Ok(());
+        };
+        if me.trim().is_empty() || workspaces.is_empty() {
             return Ok(());
         }
 
-        let Some(me) = self.ensure_identity(&workspace_id).await? else {
-            return Ok(());
+        // "Mine" polls every accessible project. "Project" keeps the previous
+        // single-project behaviour, otherwise one busy project floods the queue.
+        let workspace_ids: Vec<String> = if settings.scope == NotificationScope::Mine {
+            workspaces
+                .iter()
+                .map(|workspace| workspace.id.clone())
+                .collect()
+        } else {
+            current_workspace_id(&config, &workspaces)
+                .into_iter()
+                .collect()
         };
-        if me.trim().is_empty() {
+        if workspace_ids.is_empty() {
             return Ok(());
         }
 
         let now = Local::now().naive_local();
+        let mut first_error: Option<String> = None;
+        for workspace_id in workspace_ids {
+            if let Err(error) = self
+                .poll_workspace(&workspace_id, &me, &settings, now)
+                .await
+            {
+                tracing::warn!(%workspace_id, %error, "notification poll failed");
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+            }
+        }
+
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+
+    async fn poll_workspace(
+        &self,
+        workspace_id: &str,
+        me: &str,
+        settings: &NotificationSettings,
+        now: NaiveDateTime,
+    ) -> Result<(), String> {
         let (baseline, cursor) = {
             let store = self.store.lock().expect("notification store lock");
             (
-                !store.baseline_done.contains_key(&workspace_id),
-                store.cursors.get(&workspace_id).cloned(),
+                !store.baseline_done.contains_key(workspace_id),
+                store.cursors.get(workspace_id).cloned(),
             )
         };
 
@@ -893,12 +907,12 @@ impl NotificationService {
             ))
         };
 
-        let mut query = BugQuery::new(&workspace_id);
+        let mut query = BugQuery::new(workspace_id);
         query.page = 1;
         query.perpage = POLL_PAGE_SIZE;
         query.modified_after = modified_after;
         if settings.scope == NotificationScope::Mine {
-            query.owner = Some(me.clone());
+            query.owner = Some(me.to_string());
         }
 
         let root = session_request_json(
@@ -1029,11 +1043,11 @@ impl NotificationService {
                     kinds.push(kind.as_str().to_string());
                     store.items.push(NotificationItem {
                         id: uuid::Uuid::new_v4().to_string(),
-                        workspace_id: bug.workspace_id.clone(),
+                        workspace_id: bug.workspace_id.to_string(),
                         workspace_name: names
                             .get(&bug.workspace_id)
                             .cloned()
-                            .unwrap_or_else(|| bug.workspace_id.clone()),
+                            .unwrap_or_else(|| bug.workspace_id.to_string()),
                         bug_id: bug.id.clone(),
                         title: bug.title.clone(),
                         kind,
@@ -1062,11 +1076,11 @@ impl NotificationService {
             if baseline {
                 store
                     .baseline_done
-                    .insert(workspace_id.clone(), format_tapd_time(now));
+                    .insert(workspace_id.to_string(), format_tapd_time(now));
             }
             store
                 .cursors
-                .insert(workspace_id.clone(), format_tapd_time(now));
+                .insert(workspace_id.to_string(), format_tapd_time(now));
             if store.items.len() > MAX_ITEMS {
                 let excess = store.items.len() - MAX_ITEMS;
                 store.items.drain(0..excess);
@@ -1076,6 +1090,28 @@ impl NotificationService {
         self.persist();
         Ok(())
     }
+}
+
+/// The project used for `project`-scope polling: last selected, then the URL.
+fn current_workspace_id(config: &AppConfig, workspaces: &[Workspace]) -> Option<String> {
+    let known = |id: &str| workspaces.iter().any(|workspace| workspace.id == id);
+
+    if let Some(id) = config.last_workspace_id.as_deref().map(str::trim) {
+        if !id.is_empty() && known(id) {
+            return Some(id.to_string());
+        }
+    }
+    if let Some(id) = config
+        .last_session_url
+        .as_deref()
+        .and_then(workspace_from_session_url)
+    {
+        if known(&id) {
+            return Some(id);
+        }
+    }
+
+    workspaces.first().map(|workspace| workspace.id.clone())
 }
 
 /// Whether this `(workspace, bug, kind)` de-dup key was already emitted.
@@ -1119,6 +1155,35 @@ static LAST_SET_POSITION: Mutex<(i32, i32)> = Mutex::new((0, 0));
 static ANIMATING_UNTIL: AtomicU64 = AtomicU64::new(0);
 /// Debounce token for persisting a user drag.
 static MOVE_SEQ: AtomicU64 = AtomicU64::new(0);
+/// While an update owns the capsule, ordinary notification layouts must not
+/// resize it back to pill/card size.
+static UPDATE_MODE: AtomicBool = AtomicBool::new(false);
+/// The update panel is the collapsed capsule at 4x.
+const UPDATE_WIDTH: f64 = PILL_WIDTH * 4.0;
+const UPDATE_HEIGHT: f64 = PILL_HEIGHT * 4.0;
+
+/// Enters/leaves the update-owned capsule. Call `refresh_island_layout`
+/// afterwards to apply the matching size.
+pub fn set_update_mode(active: bool) {
+    UPDATE_MODE.store(active, Ordering::SeqCst);
+}
+
+/// Re-applies the correct island layout: 4x update panel while an update owns
+/// the screen, otherwise the notification pill/cards.
+pub fn refresh_island_layout(app: &AppHandle, state: &SharedState) {
+    if UPDATE_MODE.load(Ordering::SeqCst) {
+        apply_island_sized(app, state, UPDATE_WIDTH, UPDATE_HEIGHT, true, 0, true);
+        return;
+    }
+
+    let (expanded, count) = service()
+        .map(|service| {
+            let (items, _quiet) = service.pending_payload();
+            (!items.is_empty(), items.len())
+        })
+        .unwrap_or((false, 0));
+    apply_island(app, state, expanded, count, true);
+}
 
 fn ensure_window(app: &AppHandle, state: &SharedState) -> Result<WebviewWindow, String> {
     if let Some(window) = app.get_webview_window(WINDOW_LABEL) {
@@ -1181,12 +1246,9 @@ fn ensure_window(app: &AppHandle, state: &SharedState) -> Result<WebviewWindow, 
                         return;
                     };
                     let anchor = (position.x + size.width as i32 / 2, position.y);
-                    let snapshot = {
-                        let mut config = state.config.lock().expect("config lock");
-                        config.island_anchor = Some(anchor);
-                        config.clone()
-                    };
-                    if let Err(error) = state.save_config(&snapshot) {
+                    if let Err(error) =
+                        state.update_config(|config| config.island_anchor = Some(anchor))
+                    {
                         tracing::warn!(%error, "failed to persist island position");
                     }
                 });
@@ -1316,7 +1378,24 @@ fn apply_island(
     count: usize,
     animated: bool,
 ) {
+    // An update owns the capsule: polling, notification expansion and user
+    // clicks must not shrink it back.
+    if UPDATE_MODE.load(Ordering::SeqCst) {
+        return;
+    }
     let (width, height) = island_size(expanded, count);
+    apply_island_sized(app, state, width, height, expanded, count, animated);
+}
+
+fn apply_island_sized(
+    app: &AppHandle,
+    state: &SharedState,
+    width: f64,
+    height: f64,
+    expanded: bool,
+    count: usize,
+    animated: bool,
+) {
     let Some((x, y, w, h)) = island_rect(app, state, width, height) else {
         return;
     };
@@ -1371,12 +1450,18 @@ fn apply_island(
             "width": width,
             "height": height,
             "count": count,
+            "mode": if UPDATE_MODE.load(Ordering::SeqCst) { "update" } else { "notifications" },
         }),
     );
 }
 
 /// Brings the main window to the front (capsule click without pending items).
 fn focus_main_window(app: &AppHandle) {
+    // While an update owns the screen the main window is deliberately
+    // unreachable; the capsule must stay on the progress/error panel.
+    if crate::update::is_updating() {
+        return;
+    }
     if let Some(main) = app.get_webview_window("main") {
         let _ = main.show();
         let _ = main.unminimize();
@@ -1737,12 +1822,9 @@ async fn resolve_me(
         return Ok(nick);
     }
 
-    let snapshot = {
-        let mut config = state.config.lock().expect("config lock");
-        config.me = Some(nick.clone());
-        config.clone()
-    };
-    state.save_config(&snapshot).map_err(|error| error.to_string())?;
+    state
+        .update_config(|config| config.me = Some(nick.clone()))
+        .map_err(|error| error.to_string())?;
     Ok(nick)
 }
 

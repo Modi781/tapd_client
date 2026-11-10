@@ -1,7 +1,22 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import { listen } from "@tauri-apps/api/event";
 import clsx from "clsx";
-import { Check, Eye, Loader2, X } from "lucide-react";
+import {
+  AlertTriangle,
+  Check,
+  CheckCircle2,
+  Download,
+  Eye,
+  Loader2,
+  X,
+} from "lucide-react";
 
 import { agentApi, type AgentSummary } from "../lib/agent";
 import {
@@ -15,6 +30,15 @@ import {
   type NotificationItem,
   type NotificationStateSnapshot,
 } from "../lib/notification";
+import {
+  formatBytes,
+  getUpdateSnapshot,
+  startUpdateStore,
+  subscribeUpdate,
+  updateApi,
+  updateOwnsScreen,
+  type UpdateState,
+} from "../lib/update";
 
 const PILL_LAYOUT: IslandLayout = { expanded: false, width: 210, height: 34, count: 0 };
 
@@ -33,6 +57,17 @@ export function IslandWindow() {
   const [agentSummary, setAgentSummary] = useState<AgentSummary | null>(null);
   const [busy, setBusy] = useState<Busy>(null);
   const [errors, setErrors] = useState<Record<string, string>>({});
+  /** Update progress/error panel replaces the capsule while active. */
+  const updateState = useSyncExternalStore(
+    subscribeUpdate,
+    getUpdateSnapshot,
+    getUpdateSnapshot,
+  );
+  const updateActive = updateOwnsScreen(updateState?.phase);
+
+  useEffect(() => {
+    startUpdateStore();
+  }, []);
   // Click vs double-click: a single click waits briefly so a double-click can
   // open the main window instead.
   const clickTimer = useRef<number | null>(null);
@@ -169,6 +204,9 @@ export function IslandWindow() {
       : null;
 
   const { label: statusLabel, tone } = useMemo(() => {
+    if (updateState?.available) {
+      return { label: `可更新 v${updateState.available.version}`, tone: "alert" as const };
+    }
     if (agentSummary?.waitingReview) return { label: "Agent 待审核", tone: "review" as const };
     if (agentSummary?.running) return { label: "Agent 运行中", tone: "agent" as const };
     if (!snapshot) return { label: "连接中", tone: "idle" as const };
@@ -176,7 +214,11 @@ export function IslandWindow() {
     if (snapshot.lastError) return { label: "同步异常", tone: "error" as const };
     if (items.length > 0) return { label: "待处理", tone: "alert" as const };
     return { label: "待命", tone: "ok" as const };
-  }, [agentSummary, snapshot, items.length]);
+  }, [agentSummary, snapshot, items.length, updateState?.available]);
+
+  if (updateActive) {
+    return <UpdateCapsule state={updateState} />;
+  }
 
   if (!layout.expanded) {
     return (
@@ -375,6 +417,132 @@ function StatusDot({
         )}
       />
     </span>
+  );
+}
+
+/**
+ * The 4x capsule shown while an update owns the screen. The Rust side sizes
+ * the window to 840x136; the panel is intentionally compact enough to fit.
+ */
+function UpdateCapsule({ state }: { state: UpdateState | null }) {
+  const phase = state?.phase ?? "idle";
+  const progress = state?.progress;
+  const failed = phase === "error";
+  const target = state?.available?.version;
+  const percent = progress?.percent;
+  const [cancelling, setCancelling] = useState(false);
+
+  const cancel = async () => {
+    setCancelling(true);
+    try {
+      await updateApi.cancel();
+    } catch {
+      // The main window is restored by the Rust side; a failed call leaves
+      // the error panel in place so the user can retry.
+    } finally {
+      setCancelling(false);
+    }
+  };
+
+  const manual = () => {
+    void updateApi.openManual().catch(() => undefined);
+  };
+
+  if (failed) {
+    return (
+      <div className="island-expand flex h-full w-full items-center gap-4 rounded-[30px] bg-slate-900/95 px-7 text-slate-100 shadow-2xl ring-1 ring-white/10 backdrop-blur-xl">
+        <span className="grid h-10 w-10 shrink-0 place-items-center rounded-full bg-rose-500/15 text-rose-400">
+          <AlertTriangle size={20} />
+        </span>
+        <div className="min-w-0 flex-1">
+          <p className="text-sm font-semibold">更新失败</p>
+          <p
+            className="mt-0.5 truncate text-[11px] text-slate-400"
+            title={state?.error ?? undefined}
+          >
+            {state?.error ?? "下载或安装过程中出现错误。"}
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={manual}
+          className="inline-flex shrink-0 items-center gap-1.5 rounded-xl bg-white/10 px-4 py-2 text-xs font-medium text-slate-100 ring-1 ring-white/10 transition hover:bg-white/15"
+        >
+          <Download size={13} />
+          手动下载
+        </button>
+        <button
+          type="button"
+          disabled={cancelling}
+          onClick={() => void cancel()}
+          className="inline-flex shrink-0 items-center gap-1.5 rounded-xl bg-white/5 px-4 py-2 text-xs font-medium text-slate-300 ring-1 ring-white/10 transition hover:bg-white/10 disabled:opacity-50"
+        >
+          {cancelling ? <Loader2 size={13} className="animate-spin" /> : <X size={13} />}
+          取消
+        </button>
+      </div>
+    );
+  }
+
+  const title =
+    phase === "installing"
+      ? "正在解包并安装"
+      : phase === "ready"
+        ? "更新完成"
+        : "正在下载更新";
+  const detail =
+    phase === "downloading"
+      ? `${percent != null ? `${percent.toFixed(0)}%` : "下载中"} · ${
+          progress?.total
+            ? `${formatBytes(progress.received)} / ${formatBytes(progress.total)}`
+            : formatBytes(progress?.received)
+        }`
+      : phase === "ready"
+        ? "应用即将重启…"
+        : "校验更新包并写入应用目录…";
+
+  return (
+    <div className="island-expand flex h-full w-full flex-col justify-center gap-2.5 rounded-[30px] bg-slate-900/95 px-7 py-4 text-slate-100 shadow-2xl ring-1 ring-white/10 backdrop-blur-xl">
+      <div className="flex items-center gap-2.5">
+        {phase === "ready" ? (
+          <CheckCircle2 size={17} className="text-emerald-400" />
+        ) : (
+          <Loader2 size={17} className="animate-spin text-sky-400" />
+        )}
+        <span className="text-sm font-semibold tracking-wide">{title}</span>
+        <span className="rounded-full bg-white/5 px-2 py-0.5 text-[10px] text-slate-300">
+          TAPD Client
+        </span>
+        <span className="font-mono text-[10px] text-slate-400">
+          v{state?.currentVersion ?? "—"}
+          {target ? ` → v${target}` : ""}
+        </span>
+        <span className="ml-auto text-[11px] tabular-nums text-slate-400">
+          {phase === "downloading" && percent != null ? `${percent.toFixed(0)}%` : detail}
+        </span>
+      </div>
+
+      <div className="h-1.5 w-full overflow-hidden rounded-full bg-white/10">
+        <div
+          className={clsx(
+            "h-full rounded-full transition-[width] duration-200",
+            phase === "ready" ? "bg-emerald-400" : "bg-sky-500",
+            phase === "installing" && "w-full animate-pulse",
+          )}
+          style={{
+            width:
+              phase === "downloading" || phase === "ready"
+                ? `${percent ?? 4}%`
+                : "100%",
+          }}
+        />
+      </div>
+
+      <div className="flex items-center justify-between text-[10px] text-slate-400">
+        <span>{detail}</span>
+        <span>更新期间主窗口不可打开</span>
+      </div>
+    </div>
   );
 }
 

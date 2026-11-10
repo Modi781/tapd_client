@@ -1,10 +1,14 @@
-use std::time::Duration;
+use std::{
+    sync::atomic::{AtomicBool, Ordering},
+    time::Duration,
+};
 
 use serde::Serialize;
 use serde_json::Value;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tapd_core::{
     bridge::{BridgeHttpResult, BridgePing, CapturedRequest},
+    config::McpPolicy,
     tapd::{
         api::{
             bug_detail_body, bug_detail_url, bug_list_url, parse_bug_detail, parse_bug_list,
@@ -15,6 +19,7 @@ use tapd_core::{
 };
 
 use crate::{
+    mcp_audit::McpAuditEntry,
     open_with, session,
     state::SharedState,
 };
@@ -41,6 +46,7 @@ pub struct AppInfo {
     paths: tapd_core::paths::AppPaths,
     logged_in: bool,
     me: Option<String>,
+    me_avatar: Option<String>,
     last_workspace_id: Option<String>,
     poll_interval_secs: u64,
     runtime_port: Option<u16>,
@@ -49,6 +55,7 @@ pub struct AppInfo {
     media_token: Option<String>,
     session_url: Option<String>,
     hidden_workspace_ids: Vec<String>,
+    onboarded: bool,
 }
 
 #[derive(Serialize)]
@@ -123,6 +130,7 @@ pub fn app_info(state: State<'_, SharedState>) -> AppInfo {
         paths: state.paths.clone(),
         logged_in: config.logged_in,
         me: config.me,
+        me_avatar: config.me_avatar,
         last_workspace_id: config.last_workspace_id,
         poll_interval_secs: config.poll_interval_secs,
         runtime_port: runtime.as_ref().map(|runtime| runtime.port),
@@ -130,6 +138,7 @@ pub fn app_info(state: State<'_, SharedState>) -> AppInfo {
         media_token: runtime.map(|runtime| runtime.media_token),
         session_url: config.last_session_url,
         hidden_workspace_ids: config.hidden_workspace_ids,
+        onboarded: config.onboarded,
     }
 }
 
@@ -261,24 +270,43 @@ pub async fn session_reload_login(
 }
 
 #[tauri::command]
+pub fn session_cache_avatar(
+    state: State<'_, SharedState>,
+    avatar_url: Option<String>,
+) -> Result<(), String> {
+    let Some(url) = avatar_url
+        .map(|value| value.trim().to_string())
+        .filter(|value| value.starts_with("https://") || value.starts_with("http://"))
+    else {
+        return Ok(());
+    };
+
+    state
+        .update_config(|config| {
+            if config.me_avatar.as_deref() != Some(url.as_str()) {
+                config.me_avatar = Some(url);
+            }
+        })
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 pub fn session_mark_logged_in(
     app: AppHandle,
     state: State<'_, SharedState>,
     nick: Option<String>,
 ) -> Result<(), String> {
-    let snapshot = {
-        let mut config = state.config.lock().expect("config lock");
-        config.logged_in = true;
-        if let Some(nick) = nick {
-            let trimmed = nick.trim();
-            if !trimmed.is_empty() {
-                config.me = Some(trimmed.to_string());
+    state
+        .update_config(|config| {
+            config.logged_in = true;
+            if let Some(nick) = nick {
+                let trimmed = nick.trim();
+                if !trimmed.is_empty() {
+                    config.me = Some(trimmed.to_string());
+                }
             }
-        }
-        config.clone()
-    };
-
-    state.save_config(&snapshot).map_err(|error| error.to_string())?;
+        })
+        .map_err(|error| error.to_string())?;
 
     if let Some(window) = app.get_webview_window(session::SESSION_LABEL) {
         let _ = window.hide();
@@ -292,14 +320,23 @@ pub async fn session_logout(
     app: AppHandle,
     state: State<'_, SharedState>,
 ) -> Result<(), String> {
-    let snapshot = {
-        let mut config = state.config.lock().expect("config lock");
+    logout_session(&app, state.inner(), "logout").await;
+    Ok(())
+}
+
+/// Clears the TAPD session in config, cache, cookies and the hidden webview.
+///
+/// Shared by the explicit "退出登录" action and automatic expiry detection, so
+/// both paths leave the app on the login screen with no stale identity left.
+pub(crate) async fn logout_session(app: &AppHandle, state: &SharedState, reason: &str) {
+    if let Err(error) = state.update_config(|config| {
         config.logged_in = false;
         config.me = None;
+        config.me_avatar = None;
         config.last_session_url = None;
-        config.clone()
-    };
-    state.save_config(&snapshot).map_err(|error| error.to_string())?;
+    }) {
+        tracing::warn!(%error, reason, "failed to clear session config");
+    }
 
     // Drop cached user/project/bug data: it belongs to the session being ended.
     // Best effort — a broken cache must never block logging out.
@@ -310,6 +347,7 @@ pub async fn session_logout(
     // Keep the URL watcher from resurrecting the old session while TAPD boots.
     // The login page takes a few seconds to settle, so cover the whole window.
     session::begin_logout_guard(30_000);
+    let _ = app.emit("session://changed", ());
 
     if let Some(window) = app.get_webview_window(session::SESSION_LABEL) {
         // Clear page storage while the webview is still on the TAPD origin.
@@ -330,6 +368,7 @@ pub async fn session_logout(
 
         let window_for_reload = window.clone();
         let app_for_emit = app.clone();
+        let reason = reason.to_string();
         tauri::async_runtime::spawn(async move {
             // Give WKWebsiteDataStore time to actually remove the cookies
             // before loading TAPD again, otherwise the SPA signs straight back
@@ -347,13 +386,55 @@ pub async fn session_logout(
 
             tracing::info!(
                 cookies_removed = removed + removed_again,
+                reason,
                 "session cleared"
             );
         });
     }
+}
 
-    let _ = app.emit("session://changed", ());
-    Ok(())
+/// A TAPD response proves the session is gone: an explicit 401, a redirect
+/// that landed on the login page, or the login shell returned in place of an
+/// API body. Transient network errors never match.
+fn session_expired(http: &BridgeHttpResult) -> bool {
+    if http.status == 401 || session::looks_like_auth_page(&http.url) {
+        return true;
+    }
+
+    let content_type = http
+        .content_type
+        .as_deref()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if !content_type.contains("text/html") {
+        return false;
+    }
+
+    let head = http
+        .body
+        .chars()
+        .take(2400)
+        .collect::<String>()
+        .to_ascii_lowercase();
+    head.contains("wwlogin") || head.contains("<title>登录") || head.contains("<title>企业微信")
+}
+
+/// Guards against several in-flight requests all clearing the session at once.
+static EXPIRING: AtomicBool = AtomicBool::new(false);
+
+/// Signs out once when an authenticated TAPD call reports an expired session.
+pub(crate) async fn expire_session(app: &AppHandle) {
+    let Some(state) = app.try_state::<SharedState>() else {
+        return;
+    };
+    let logged_in = state.config.lock().expect("config lock").logged_in;
+    if !logged_in || EXPIRING.swap(true, Ordering::SeqCst) {
+        return;
+    }
+
+    tracing::warn!("TAPD session expired; signing out");
+    logout_session(app, state.inner(), "expired").await;
+    EXPIRING.store(false, Ordering::SeqCst);
 }
 
 /// Removes every TAPD cookie from a webview and returns how many were deleted.
@@ -577,6 +658,16 @@ pub(crate) async fn fetch_change_history(
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct McpClientInfo {
+    id: String,
+    /// User-scope config file, when it can be located.
+    path: Option<String>,
+    /// Whether that file already registers `tapd-mcp`.
+    imported: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct McpConfigInfo {
     command_path: String,
     snippet: String,
@@ -584,10 +675,8 @@ pub struct McpConfigInfo {
     read_only: bool,
     tools: Vec<&'static str>,
     port: Option<u16>,
-    /// Path of the opencode global config, when it can be discovered.
-    config_path: Option<String>,
-    /// Whether that config already registers `tapd-mcp`.
-    imported: bool,
+    /// One-click import status for every supported client.
+    clients: Vec<McpClientInfo>,
 }
 
 /// Path to the bundled `tapd-mcp` sidecar (falls back to PATH lookup in dev).
@@ -601,26 +690,91 @@ pub(crate) fn sidecar_command_path() -> String {
 }
 
 #[tauri::command]
-pub async fn mcp_config(
+pub fn reset_onboarding(state: State<'_, SharedState>) -> Result<(), String> {
+    state
+        .update_config(|config| config.onboarded = false)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn complete_onboarding(state: State<'_, SharedState>) -> Result<(), String> {
+    state
+        .update_config(|config| config.onboarded = true)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn mcp_policy_get(state: State<'_, SharedState>) -> McpPolicy {
+    state.config_snapshot().mcp_policy
+}
+
+#[tauri::command]
+pub fn mcp_policy_set(
     state: State<'_, SharedState>,
-) -> Result<McpConfigInfo, String> {
+    policy: McpPolicy,
+) -> Result<McpPolicy, String> {
+    let policy = policy.normalized();
+    state
+        .update_config(|config| config.mcp_policy = policy.clone())
+        .map_err(|error| error.to_string())?;
+    Ok(policy)
+}
+
+#[tauri::command]
+pub fn mcp_audit_list(
+    state: State<'_, SharedState>,
+    limit: Option<usize>,
+) -> Vec<McpAuditEntry> {
+    state.mcp_audit.list(limit.unwrap_or(200))
+}
+
+#[tauri::command]
+pub fn mcp_audit_clear(state: State<'_, SharedState>) -> Result<(), String> {
+    state
+        .mcp_audit
+        .clear()
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn mcp_audit_export(state: State<'_, SharedState>) -> Result<String, String> {
+    std::fs::create_dir_all(&state.paths.exports_dir).map_err(|error| error.to_string())?;
+    let path = state.paths.exports_dir.join(format!(
+        "mcp-audit-{}.json",
+        chrono::Local::now().format("%Y%m%d-%H%M%S")
+    ));
+    state
+        .mcp_audit
+        .export(&path)
+        .map_err(|error| error.to_string())?;
+    Ok(path.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+pub async fn mcp_config(state: State<'_, SharedState>) -> Result<McpConfigInfo, String> {
     let command_path = sidecar_command_path();
 
-    // Discovering the opencode config shells out to `opencode debug paths`
-    // (up to 3s); keep it off the UI thread and discover it only once.
-    let discovery_command = command_path.clone();
-    let (config_path, imported) = tokio::task::spawn_blocking(move || {
-        match crate::mcp_import::opencode_config_path() {
-            Some(path) => {
-                let imported =
-                    crate::mcp_import::is_imported_in(&path, &discovery_command);
-                (Some(path), imported)
-            }
-            None => (None, false),
-        }
+    // Discovering client configs shells out to `opencode debug paths` (up to
+    // 3s); keep the whole probe off the UI thread.
+    let status_command = command_path.clone();
+    let clients = tokio::task::spawn_blocking(move || {
+        crate::mcp_import::CLIENTS
+            .iter()
+            .map(|client| {
+                let path = crate::mcp_import::client_config_path(client);
+                let imported = path.as_deref().is_some_and(|path| {
+                    crate::mcp_import::imported_in_path(client, path, &status_command)
+                });
+                McpClientInfo {
+                    id: (*client).to_string(),
+                    path: path.map(|path| path.to_string_lossy().to_string()),
+                    imported,
+                }
+            })
+            .collect::<Vec<_>>()
     })
     .await
-    .unwrap_or((None, false));
+    .unwrap_or_default();
 
     let snippet = serde_json::to_string_pretty(&serde_json::json!({
         "$schema": "https://opencode.ai/config.json",
@@ -639,7 +793,7 @@ pub async fn mcp_config(
         command_path: command_path.clone(),
         snippet,
         transport: "stdio".to_string(),
-        read_only: false,
+        read_only: !state.config_snapshot().mcp_policy.writes_enabled,
         tools: vec![
             "tapd_whoami",
             "tapd_list_projects",
@@ -652,8 +806,7 @@ pub async fn mcp_config(
             "tapd_update_bug_status",
         ],
         port: state.runtime_info().map(|runtime| runtime.port),
-        config_path: config_path.map(|path| path.to_string_lossy().to_string()),
-        imported,
+        clients,
     })
 }
 
@@ -698,15 +851,14 @@ pub fn set_current_user(
     state: State<'_, SharedState>,
     nick: String,
 ) -> Result<(), String> {
-    let snapshot = {
-        let mut config = state.config.lock().expect("config lock");
-        let trimmed = nick.trim();
-        if !trimmed.is_empty() {
-            config.me = Some(trimmed.to_string());
-        }
-        config.clone()
-    };
-    state.save_config(&snapshot).map_err(|error| error.to_string())
+    state
+        .update_config(|config| {
+            let trimmed = nick.trim();
+            if !trimmed.is_empty() {
+                config.me = Some(trimmed.to_string());
+            }
+        })
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -721,12 +873,9 @@ pub fn set_hidden_workspaces(
             normalized.push(id);
         }
     }
-    let snapshot = {
-        let mut config = state.config.lock().expect("config lock");
-        config.hidden_workspace_ids = normalized;
-        config.clone()
-    };
-    state.save_config(&snapshot).map_err(|error| error.to_string())
+    state
+        .update_config(|config| config.hidden_workspace_ids = normalized)
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -734,12 +883,9 @@ pub fn set_last_workspace(
     state: State<'_, SharedState>,
     workspace_id: String,
 ) -> Result<(), String> {
-    let snapshot = {
-        let mut config = state.config.lock().expect("config lock");
-        config.last_workspace_id = Some(workspace_id);
-        config.clone()
-    };
-    state.save_config(&snapshot).map_err(|error| error.to_string())
+    state
+        .update_config(|config| config.last_workspace_id = Some(workspace_id))
+        .map_err(|error| error.to_string())
 }
 
 pub(crate) async fn session_request_json(
@@ -777,6 +923,14 @@ pub(crate) async fn session_request_text(
     let value = session::eval_async_json(&window, &expression, timeout).await?;
     let http: BridgeHttpResult = serde_json::from_value(value)
         .map_err(|error| format!("unexpected bridge payload: {error}"))?;
+
+    // An expired TAPD session usually surfaces as a 401 or a redirect to the
+    // login page. Detect it on every authenticated call so cached data never
+    // makes the app look signed in after the cookie has gone stale.
+    if session_expired(&http) {
+        expire_session(app).await;
+        return Err("TAPD 登录状态已失效，请重新扫码登录".to_string());
+    }
 
     if !http.ok {
         let preview: String = http.body.chars().take(240).collect();
@@ -1074,13 +1228,10 @@ pub fn set_open_target(
     id: String,
 ) -> Result<(), String> {
     let kind = open_with::normalize_kind(&kind).to_string();
-    let snapshot = {
-        let mut config = state.config.lock().expect("config lock");
-        config.open_with.insert(kind, id);
-        config.clone()
-    };
     state
-        .save_config(&snapshot)
+        .update_config(|config| {
+            config.open_with.insert(kind, id);
+        })
         .map_err(|error| error.to_string())
 }
 
@@ -1200,6 +1351,21 @@ fn with_content_extension(path: std::path::PathBuf, content_type: &str) -> std::
         );
         path.with_file_name(name)
     }
+}
+
+/// Deletes every entry under the app data directory and restarts the app.
+///
+/// The wipe runs on the next launch, before logging or SQLite opens anything,
+/// because the current process holds those files open (and Windows would
+/// refuse to delete them). The caller gets its result before the restart.
+#[tauri::command]
+pub fn clear_app_data(app: AppHandle, state: State<'_, SharedState>) -> Result<(), String> {
+    crate::reset::request(&state.paths).map_err(|error| error.to_string())?;
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(400));
+        app.restart();
+    });
+    Ok(())
 }
 
 pub(crate) fn is_tapd_media_url(url: &str) -> bool {

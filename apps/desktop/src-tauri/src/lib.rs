@@ -1,16 +1,20 @@
 mod agent;
 mod cache;
 mod commands;
+mod diagnostics;
 mod export;
 mod feature_router;
 mod mcp;
+mod mcp_audit;
 mod mcp_import;
 mod notification;
 mod open_with;
 mod opencode;
+mod reset;
 mod server;
 mod session;
 mod state;
+mod update;
 
 use std::sync::Arc;
 
@@ -33,7 +37,20 @@ pub fn run() {
         }
     };
 
+    // A reset requested from settings must happen before logging or SQLite
+    // opens anything in the data directory.
+    let reset_applied = match reset::apply_pending(&paths) {
+        Ok(applied) => applied,
+        Err(error) => {
+            eprintln!("failed to clear local data: {error}");
+            false
+        }
+    };
+
     init_tracing(&paths);
+    if reset_applied {
+        tracing::info!("local data directory cleared on startup");
+    }
 
     let config_store = ConfigStore::new(paths.config_file.clone());
     let config = config_store.load();
@@ -41,6 +58,7 @@ pub fn run() {
     let setup_state = state.clone();
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(state.clone())
         .invoke_handler(tauri::generate_handler![
             commands::app_info,
@@ -50,6 +68,7 @@ pub fn run() {
             commands::session_login_state,
             commands::session_refresh_qr,
             commands::session_reload_login,
+            commands::session_cache_avatar,
             commands::session_mark_logged_in,
             commands::session_logout,
             commands::session_ping,
@@ -61,18 +80,32 @@ pub fn run() {
             commands::set_current_user,
             commands::ensure_window_width,
             commands::mcp_config,
+            commands::complete_onboarding,
+            commands::reset_onboarding,
+            commands::mcp_policy_get,
+            commands::mcp_policy_set,
+            commands::mcp_audit_list,
+            commands::mcp_audit_clear,
+            commands::mcp_audit_export,
+            diagnostics::export_diagnostics,
             feature_router::feature_command,
             commands::set_last_workspace,
             commands::set_hidden_workspaces,
             commands::capture_snapshot,
             commands::capture_clear,
             commands::capture_export,
+            commands::clear_app_data,
             commands::open_path,
             commands::open_media,
             commands::media_endpoint,
             commands::list_dirs,
             commands::open_targets,
             commands::set_open_target,
+            update::update_state,
+            update::update_check,
+            update::update_install,
+            update::update_cancel,
+            update::update_open_manual,
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
@@ -107,6 +140,8 @@ pub fn run() {
 
             notification::init(&handle, state.clone());
             agent::init(&handle, state.clone());
+            // Check GitHub Releases shortly after launch, then hourly.
+            update::init(&handle, state.clone());
             session::spawn_session_watcher(handle, state);
 
             Ok(())
@@ -122,9 +157,13 @@ pub fn run() {
                     RuntimeInfo::clear(&state.paths.runtime_file);
                 }
             }
-            // macOS: clicking the Dock icon brings the hidden main window back.
+            // macOS: clicking the Dock icon brings the hidden main window back,
+            // unless an update owns the screen (then it must stay hidden).
             #[cfg(target_os = "macos")]
             RunEvent::Reopen { .. } => {
+                if update::is_updating() {
+                    return;
+                }
                 if let Some(window) = app.get_webview_window("main") {
                     let _ = window.show();
                     let _ = window.set_focus();

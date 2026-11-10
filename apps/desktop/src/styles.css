@@ -118,3 +118,130 @@ body {
     animation: none;
   }
 }
+
+/* Left rail: one playful press animation per destination. */
+@keyframes rail-bug-jump {
+  0%,
+  100% {
+    transform: translateY(0) rotate(0deg) scale(1);
+  }
+  25% {
+    transform: translateY(-6px) rotate(-9deg) scale(1.08);
+  }
+  55% {
+    transform: translateY(2px) rotate(5deg) scale(0.98);
+  }
+  78% {
+    transform: translateY(-2px) rotate(-2deg) scale(1.03);
+  }
+}
+
+.rail-bug-jump {
+  animation: rail-bug-jump 520ms cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+@keyframes rail-bot-shake {
+  0%,
+  100% {
+    transform: rotate(0deg);
+  }
+  18% {
+    transform: rotate(-16deg);
+  }
+  42% {
+    transform: rotate(13deg);
+  }
+  66% {
+    transform: rotate(-8deg);
+  }
+  84% {
+    transform: rotate(4deg);
+  }
+}
+
+.rail-bot-shake {
+  animation: rail-bot-shake 500ms ease-in-out;
+  transform-origin: 50% 80%;
+}
+
+@keyframes rail-plug-rise {
+  0% {
+    transform: translateY(13px) scale(0.82);
+    opacity: 0.15;
+  }
+  62% {
+    transform: translateY(-2px) scale(1.09);
+    opacity: 1;
+  }
+  100% {
+    transform: translateY(0) scale(1);
+    opacity: 1;
+  }
+}
+
+.rail-plug-rise {
+  animation: rail-plug-rise 440ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+@keyframes rail-settings-spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.rail-settings-spin {
+  animation: rail-settings-spin 640ms cubic-bezier(0.45, 0, 0.2, 1);
+}
+
+@keyframes rail-avatar-pop {
+  0%,
+  100% {
+    transform: scale(1);
+  }
+  35% {
+    transform: scale(1.2);
+  }
+  70% {
+    transform: scale(0.94);
+  }
+}
+
+.rail-avatar-pop {
+  animation: rail-avatar-pop 460ms ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rail-bug-jump,
+  .rail-bot-shake,
+  .rail-plug-rise,
+  .rail-settings-spin,
+  .rail-avatar-pop {
+    animation: none;
+  }
+}
+
+@keyframes rail-folder-bounce {
+  0%,
+  100% {
+    transform: translateY(0) rotate(0deg);
+  }
+  35% {
+    transform: translateY(-4px) rotate(-7deg);
+  }
+  70% {
+    transform: translateY(1px) rotate(3deg);
+  }
+}
+
+.rail-folder-bounce {
+  animation: rail-folder-bounce 480ms cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rail-folder-bounce {
+    animation: none;
+  }
+}

@@ -1,23 +1,37 @@
 import { useCallback, useEffect, useState } from "react";
 import type { ReactNode } from "react";
+import clsx from "clsx";
 import {
   CheckCircle2,
+  ChevronDown,
+  ClipboardList,
   Copy,
   Download,
   FileJson,
   FileText,
   Plug,
   RefreshCw,
+  ShieldCheck,
   Sparkles,
   Terminal,
+  Trash2,
   Wrench,
+  Zap,
 } from "lucide-react";
 
-import { api, type McpConfigInfo } from "../lib/api";
+import {
+  api,
+  type McpAuditEntry,
+  type McpClientId,
+  type McpConfigInfo,
+  type McpPolicy,
+  type Workspace,
+} from "../lib/api";
 import { mcpApi, type McpImportResult } from "../lib/mcp";
 import { Badge, Button, Spinner } from "./ui";
 
 type Props = {
+  workspaces: Workspace[];
   onCopy: (text: string) => void;
   toast: (kind: "ok" | "error", text: string) => void;
 };
@@ -25,16 +39,28 @@ type Props = {
 const COPY_BUTTON =
   "inline-flex shrink-0 items-center gap-1 rounded border border-slate-200 bg-white px-2 py-1 text-[10px] text-slate-600 transition hover:border-slate-300";
 
+const INPUT_CLASS =
+  "w-full rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-700 outline-none transition placeholder:text-slate-300 focus:border-sky-300 focus:ring-2 focus:ring-sky-100";
+
 /**
- * MCP tab: server status, one-click opencode import and integration guides for
- * other agents.
+ * MCP tab: server status, policy/audit, and per-client one-click import
+ * (opencode / Claude Code / Cursor / Codex) with manual project-level config.
  */
-export function McpPage({ onCopy, toast }: Props) {
+export function McpPage({ workspaces, onCopy, toast }: Props) {
   const [mcp, setMcp] = useState<McpConfigInfo | null>(null);
   const [configError, setConfigError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
-  const [importing, setImporting] = useState(false);
-  const [importResult, setImportResult] = useState<McpImportResult | null>(null);
+  const [importingClient, setImportingClient] = useState<McpClientId | null>(null);
+  const [importResults, setImportResults] = useState<
+    Partial<Record<McpClientId, McpImportResult>>
+  >({});
+  const [expandedClients, setExpandedClients] = useState<Partial<Record<McpClientId, boolean>>>({});
+  const [policy, setPolicy] = useState<McpPolicy | null>(null);
+  const [audit, setAudit] = useState<McpAuditEntry[]>([]);
+  const [auditFilter, setAuditFilter] = useState<"all" | "denied" | "error">("all");
+  const [savingPolicy, setSavingPolicy] = useState(false);
+  const [auditBusy, setAuditBusy] = useState(false);
+  const [statusInput, setStatusInput] = useState("");
 
   const loadConfig = useCallback(async () => {
     setRefreshing(true);
@@ -53,24 +79,105 @@ export function McpPage({ onCopy, toast }: Props) {
     void loadConfig();
   }, [loadConfig]);
 
-  const importOpencode = async () => {
-    if (!mcp) return;
-    if (mcp.imported) {
-      toast("ok", "已导入，无需重复写入");
-      return;
-    }
-
-    setImporting(true);
+  const loadAudit = useCallback(async () => {
     try {
-      const result = await mcpApi.importOpencode();
-      setImportResult(result);
-      toast("ok", result.changed ? "已写入 opencode 配置" : "已导入，无需重复写入");
+      setAudit(await api.mcpAuditList(120));
+    } catch (error) {
+      toast("error", String(error));
+    }
+  }, [toast]);
+
+  const loadPolicy = useCallback(async () => {
+    try {
+      const next = await api.mcpPolicyGet();
+      setPolicy(next);
+      setStatusInput(next.allowedStatuses.join(", "));
+    } catch (error) {
+      toast("error", String(error));
+    }
+  }, [toast]);
+
+  useEffect(() => {
+    void loadPolicy();
+    void loadAudit();
+  }, [loadPolicy, loadAudit]);
+
+  const savePolicy = async (patch: Partial<McpPolicy>) => {
+    if (!policy) return;
+    const next = { ...policy, ...patch };
+    setPolicy(next);
+    setSavingPolicy(true);
+    try {
+      const saved = await api.mcpPolicySet(next);
+      setPolicy(saved);
+      setStatusInput(saved.allowedStatuses.join(", "));
+    } catch (error) {
+      toast("error", String(error));
+      await loadPolicy();
+    } finally {
+      setSavingPolicy(false);
+    }
+  };
+
+  const commitStatuses = async () => {
+    if (!policy) return;
+    const raw = statusInput
+      .split(/[,，\n]/)
+      .map((value) => value.trim())
+      .filter(Boolean);
+    if (raw.join("\u0000") === policy.allowedStatuses.join("\u0000")) return;
+    await savePolicy({ allowedStatuses: raw });
+  };
+
+  const toggleWorkspace = (workspaceId: string) => {
+    if (!policy) return;
+    const allowed = new Set(policy.allowedWorkspaceIds);
+    if (allowed.has(workspaceId)) allowed.delete(workspaceId);
+    else allowed.add(workspaceId);
+    void savePolicy({ allowedWorkspaceIds: [...allowed] });
+  };
+
+  const exportAudit = async () => {
+    setAuditBusy(true);
+    try {
+      const path = await api.mcpAuditExport();
+      toast("ok", `已导出审计日志：${path}`);
+    } catch (error) {
+      toast("error", String(error));
+    } finally {
+      setAuditBusy(false);
+    }
+  };
+
+  const clearAudit = async () => {
+    setAuditBusy(true);
+    try {
+      await api.mcpAuditClear();
+      setAudit([]);
+      toast("ok", "已清空 MCP 审计日志");
+    } catch (error) {
+      toast("error", String(error));
+    } finally {
+      setAuditBusy(false);
+    }
+  };
+
+  const importClient = async (client: McpClientId, label: string) => {
+    setImportingClient(client);
+    try {
+      const result = await mcpApi.importClient(client);
+      setImportResults((previous) => ({ ...previous, [client]: result }));
+      toast("ok", result.changed ? `已写入 ${label} 配置` : `已导入 ${label}，无需重复写入`);
       await loadConfig();
     } catch (error) {
       toast("error", String(error));
     } finally {
-      setImporting(false);
+      setImportingClient(null);
     }
+  };
+
+  const toggleClient = (client: McpClientId) => {
+    setExpandedClients((previous) => ({ ...previous, [client]: !previous[client] }));
   };
 
   if (!mcp) {
@@ -104,30 +211,71 @@ export function McpPage({ onCopy, toast }: Props) {
 
   const commandPath = mcp.commandPath || "tapd-mcp";
   const port = mcp.port ? `127.0.0.1:${mcp.port}` : "—";
+  const writable = policy ? policy.writesEnabled : !mcp.readOnly;
+  const filteredAudit = audit.filter((entry) =>
+    auditFilter === "all" ? true : entry.decision === auditFilter,
+  );
 
-  const guides = [
+  const guides: Array<{
+    id: McpClientId;
+    title: string;
+    hint: string;
+    icon: ReactNode;
+    code: string;
+    manual: string;
+  }> = [
+    {
+      id: "opencode",
+      title: "opencode",
+      hint: "用户级全局配置",
+      icon: <Sparkles size={15} className="text-slate-400" />,
+      code: mcp.snippet,
+      manual: "只想对某个项目生效时，把上面的 JSON 写入项目根目录的 opencode.json。",
+    },
+    {
+      id: "zcode",
+      title: "ZCode",
+      hint: "用户级：~/.zcode/cli/config.json",
+      icon: <Zap size={15} className="text-slate-400" />,
+      code: JSON.stringify(
+        { mcp: { servers: { tapd: { type: "stdio", command: commandPath } } } },
+        null,
+        2,
+      ),
+      manual:
+        "只想对某个项目生效时，把同样的 mcp.servers.tapd 写入项目的 .zcode/config.json（command 是字符串）。写入后重启 ZCode，在 设置 → MCP 确认状态。",
+    },
     {
       id: "claude",
       title: "Claude Code",
-      hint: "命令行注册（stdio）",
+      hint: "用户级：claude mcp add --scope user",
       icon: <Terminal size={15} className="text-slate-400" />,
-      code: `claude mcp add --transport stdio tapd -- ${commandPath}`,
+      code: `claude mcp add --scope user --transport stdio tapd -- "${commandPath}"`,
+      manual:
+        "只想对某个项目生效时，去掉 --scope user；或改用 --scope project 写入项目的 .mcp.json。",
     },
     {
       id: "cursor",
       title: "Cursor",
-      hint: "~/.cursor/mcp.json",
+      hint: "用户级：~/.cursor/mcp.json",
       icon: <FileJson size={15} className="text-slate-400" />,
       code: JSON.stringify({ mcpServers: { tapd: { command: commandPath } } }, null, 2),
+      manual:
+        "只想对某个项目生效时，把同样的 mcpServers.tapd 写入项目的 .cursor/mcp.json。",
     },
     {
       id: "codex",
       title: "Codex",
-      hint: "~/.codex/config.toml",
+      hint: "用户级：~/.codex/config.toml",
       icon: <FileText size={15} className="text-slate-400" />,
       code: `[mcp_servers.tapd]\ncommand = "${commandPath}"`,
+      manual:
+        "只想对某个项目生效时，把上面的配置写入该项目的 Codex 配置，或在启动时用 -c 覆盖。",
     },
   ];
+
+  const clientStatus = (id: McpClientId) =>
+    mcp.clients.find((client) => client.id === id);
 
   return (
     <div className="mx-auto max-w-4xl space-y-4">
@@ -146,12 +294,16 @@ export function McpPage({ onCopy, toast }: Props) {
             <Badge tone="green" dot>
               已启用
             </Badge>
-            <Badge tone={mcp.readOnly ? "neutral" : "blue"}>
-              {mcp.readOnly ? "只读" : "读写"}
+            <Badge tone={writable ? "blue" : "neutral"}>
+              {writable ? "读写" : "只读"}
             </Badge>
             <Button
               size="sm"
-              onClick={() => void loadConfig()}
+              onClick={() => {
+                void loadConfig();
+                void loadPolicy();
+                void loadAudit();
+              }}
               loading={refreshing}
               icon={<RefreshCw size={13} />}
             >
@@ -164,7 +316,7 @@ export function McpPage({ onCopy, toast }: Props) {
           <StatusTile label="传输" value={mcp.transport} mono />
           <StatusTile label="本地端口" value={port} mono />
           <StatusTile label="工具" value={`${mcp.tools.length} 个`} />
-          <StatusTile label="权限" value={mcp.readOnly ? "只读" : "读写"} />
+          <StatusTile label="权限" value={writable ? "读写" : "只读"} />
         </div>
 
         <div className="mt-3 flex flex-wrap gap-1.5">
@@ -180,23 +332,6 @@ export function McpPage({ onCopy, toast }: Props) {
 
         <div className="mt-4 space-y-2">
           <PathRow label="MCP 程序路径" value={mcp.commandPath} onCopy={onCopy} />
-          <PathRow
-            label="opencode 配置"
-            value={mcp.configPath ?? "未找到 opencode 配置目录"}
-            copyable={Boolean(mcp.configPath)}
-            onCopy={onCopy}
-            badge={
-              mcp.configPath ? (
-                mcp.imported ? (
-                  <Badge tone="green">已导入</Badge>
-                ) : (
-                  <Badge tone="amber">未导入</Badge>
-                )
-              ) : (
-                <Badge tone="neutral">未找到</Badge>
-              )
-            }
-          />
         </div>
       </section>
 
@@ -204,121 +339,385 @@ export function McpPage({ onCopy, toast }: Props) {
         <div className="flex items-start justify-between gap-3">
           <div>
             <h2 className="flex items-center gap-2 text-sm font-semibold text-slate-900">
-              <Sparkles size={15} className="text-slate-400" />
-              一键导入 opencode
+              <ShieldCheck size={15} className="text-slate-400" />
+              MCP 策略
             </h2>
             <p className="mt-1 text-xs leading-5 text-slate-500">
-              自动写入 opencode 全局配置；改动前备份，重复导入不会重复写入。
+              策略只会在 TAPD 权限之上进一步收窄范围，不会扩大 AI 的访问能力。
             </p>
           </div>
-          <Badge tone={mcp.imported ? "green" : "amber"}>
-            {mcp.imported ? "已导入" : "待导入"}
-          </Badge>
-        </div>
-
-        <div className="mt-3 rounded-xl border border-slate-100 bg-slate-50 p-3">
-          <div className="text-[10px] uppercase tracking-wide text-slate-400">目标配置</div>
-          <div className="mt-1 break-all font-mono text-[11px] text-slate-600">
-            {mcp.configPath ?? "未找到 opencode 配置目录"}
-          </div>
-          <p className="mt-2 text-[10px] leading-5 text-slate-400">
-            无法安全解析配置时会保留原文件并提示。
-          </p>
-        </div>
-
-        <div className="mt-4 flex flex-wrap items-center gap-2">
-          <Button
-            variant="primary"
-            onClick={() => void importOpencode()}
-            loading={importing}
-            icon={<Download size={13} />}
-          >
-            一键导入 opencode
-          </Button>
-          <Button size="sm" onClick={() => onCopy(mcp.snippet)} icon={<Copy size={13} />}>
-            复制配置片段
-          </Button>
-          <span className="text-[10px] text-slate-400">
-            重启 opencode 后运行 <span className="font-mono">opencode mcp list</span> 确认已连接。
+          <span className="shrink-0 text-[10px] text-slate-400">
+            {savingPolicy ? "保存中…" : "改动即保存"}
           </span>
         </div>
 
-        {importResult ? (
-          <div className="mt-3 rounded-xl border border-emerald-100 bg-emerald-50/60 p-3 text-[11px] leading-5 text-emerald-800">
-            <div className="flex items-center gap-1.5 font-medium">
-              <CheckCircle2 size={12} />
-              {importResult.changed ? "已写入 opencode 配置" : "已导入，无需重复写入"}
-            </div>
-            <div className="mt-1 break-all font-mono text-emerald-700">{importResult.path}</div>
-            {importResult.backupPath ? (
-              <div className="mt-1 break-all text-emerald-700">
-                备份：<span className="font-mono">{importResult.backupPath}</span>
-              </div>
-            ) : null}
-            {!importResult.imported ? (
-              <div className="mt-1 text-emerald-700/80">
-                配置中未检测到 tapd server，请检查写入结果。
-              </div>
-            ) : null}
+        {!policy ? (
+          <div className="mt-4 flex items-center gap-2 text-xs text-slate-400">
+            <Spinner />
+            读取 MCP 策略…
           </div>
-        ) : null}
+        ) : (
+          <div className="mt-4 space-y-4">
+            <div className="space-y-3">
+              <PolicyRow
+                title="允许写操作"
+                hint="评论与状态回写。关闭后仅保留查询、详情与导出工具。"
+              >
+                <Toggle
+                  checked={policy.writesEnabled}
+                  onChange={(value) => void savePolicy({ writesEnabled: value })}
+                />
+              </PolicyRow>
+              <PolicyRow
+                title="记录调用审计"
+                hint="记录工具、客户端、决策、耗时与项目/缺陷；不保存评论正文和 Cookie。"
+              >
+                <Toggle
+                  checked={policy.auditEnabled}
+                  onChange={(value) => void savePolicy({ auditEnabled: value })}
+                />
+              </PolicyRow>
+            </div>
 
-        <div className="mt-4 flex items-center justify-between text-[11px] text-slate-500">
-          <span>配置片段（可手动粘贴到 opencode.json / opencode.jsonc）</span>
-          <button type="button" onClick={() => onCopy(mcp.snippet)} className={COPY_BUTTON}>
-            <Copy size={10} />
-            复制配置
-          </button>
+            <div>
+              <div className="flex items-center justify-between gap-2">
+                <div className="text-[11px] font-medium text-slate-600">
+                  允许访问的项目
+                </div>
+                <div className="text-[10px] text-slate-400">
+                  不选任何项目 = 全部项目
+                </div>
+              </div>
+              <div className="mt-2 flex flex-wrap gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => void savePolicy({ allowedWorkspaceIds: [] })}
+                  className={chipClass(policy.allowedWorkspaceIds.length === 0)}
+                >
+                  全部项目
+                </button>
+                {workspaces.map((workspace) => {
+                  const active = policy.allowedWorkspaceIds.includes(workspace.id);
+                  return (
+                    <button
+                      key={workspace.id}
+                      type="button"
+                      onClick={() => toggleWorkspace(workspace.id)}
+                      className={chipClass(active)}
+                      title={workspace.prettyName || workspace.name}
+                    >
+                      {workspace.name}
+                    </button>
+                  );
+                })}
+                {workspaces.length === 0 ? (
+                  <span className="text-[10px] text-slate-400">
+                    项目列表尚未加载，稍后再试。
+                  </span>
+                ) : null}
+              </div>
+            </div>
+
+            <div>
+              <label className="text-[11px] font-medium text-slate-600">
+                允许的目标状态
+              </label>
+              <input
+                value={statusInput}
+                onChange={(event) => setStatusInput(event.target.value)}
+                onBlur={() => void commitStatuses()}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") event.currentTarget.blur();
+                }}
+                placeholder="例如 resolved, closed；留空 = 遵循 TAPD 工作流"
+                className={`${INPUT_CLASS} mt-1.5 font-mono`}
+              />
+              <p className="mt-1 text-[10px] leading-5 text-slate-400">
+                可填状态 key（resolved）或中文名（已解决），多个用逗号分隔。
+              </p>
+            </div>
+          </div>
+        )}
+      </section>
+
+      <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h2 className="flex items-center gap-2 text-sm font-semibold text-slate-900">
+              <ClipboardList size={15} className="text-slate-400" />
+              调用审计
+            </h2>
+            <p className="mt-1 text-xs leading-5 text-slate-500">
+              最近 {audit.length || 120} 次 MCP 调用；拒绝与失败也会记录。
+            </p>
+          </div>
+          <div className="flex flex-wrap items-center gap-1.5">
+            <select
+              value={auditFilter}
+              onChange={(event) =>
+                setAuditFilter(event.target.value as "all" | "denied" | "error")
+              }
+              className="rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-[11px] text-slate-600 outline-none focus:border-sky-300"
+            >
+              <option value="all">全部</option>
+              <option value="denied">被拒绝</option>
+              <option value="error">失败</option>
+            </select>
+            <Button
+              size="sm"
+              onClick={() => void loadAudit()}
+              icon={<RefreshCw size={12} />}
+            >
+              刷新
+            </Button>
+            <Button
+              size="sm"
+              onClick={() => void exportAudit()}
+              loading={auditBusy}
+              icon={<Download size={12} />}
+            >
+              导出
+            </Button>
+            <Button
+              size="sm"
+              variant="danger"
+              onClick={() => void clearAudit()}
+              loading={auditBusy}
+              icon={<Trash2 size={12} />}
+            >
+              清空
+            </Button>
+          </div>
         </div>
-        <pre className="mt-2 max-h-56 overflow-auto rounded-xl bg-slate-900 p-3 font-mono text-[10px] leading-5 text-slate-200">
-          {mcp.snippet}
-        </pre>
+
+        <div className="mt-3 max-h-[360px] overflow-auto rounded-xl border border-slate-100">
+          {filteredAudit.length === 0 ? (
+            <div className="p-6 text-center text-[11px] text-slate-400">
+              {audit.length ? "没有匹配的记录" : "暂无调用记录"}
+            </div>
+          ) : (
+            <table className="w-full text-left text-[11px]">
+              <thead className="sticky top-0 bg-slate-50 text-[10px] uppercase tracking-wide text-slate-400">
+                <tr>
+                  <th className="px-3 py-2 font-medium">时间</th>
+                  <th className="px-2 py-2 font-medium">工具</th>
+                  <th className="px-2 py-2 font-medium">客户端</th>
+                  <th className="px-2 py-2 font-medium">结果</th>
+                  <th className="px-2 py-2 font-medium">耗时</th>
+                  <th className="px-2 py-2 font-medium">项目 / 缺陷</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {filteredAudit.map((entry) => (
+                  <tr
+                    key={entry.id}
+                    className="text-slate-600"
+                    title={entry.error ?? undefined}
+                  >
+                    <td className="whitespace-nowrap px-3 py-2 font-mono text-[10px] text-slate-400">
+                      {formatAuditTime(entry.ts)}
+                    </td>
+                    <td className="px-2 py-2 font-mono text-[10px] text-slate-700">
+                      {entry.tool}
+                    </td>
+                    <td className="px-2 py-2">{entry.client}</td>
+                    <td className="px-2 py-2">
+                      <Badge
+                        tone={
+                          entry.decision === "allowed"
+                            ? "green"
+                            : entry.decision === "denied"
+                              ? "amber"
+                              : "red"
+                        }
+                      >
+                        {entry.decision === "allowed"
+                          ? "允许"
+                          : entry.decision === "denied"
+                            ? "拒绝"
+                            : "失败"}
+                      </Badge>
+                    </td>
+                    <td className="px-2 py-2 tabular-nums text-slate-500">
+                      {entry.durationMs}ms
+                    </td>
+                    <td className="max-w-[190px] truncate px-2 py-2 font-mono text-[10px] text-slate-400">
+                      {entry.workspaceId ?? "—"}
+                      {entry.bugId ? ` / ${entry.bugId}` : ""}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
       </section>
 
       <section className="space-y-3">
         <div className="px-1">
           <h2 className="flex items-center gap-2 text-sm font-semibold text-slate-900">
             <Wrench size={15} className="text-slate-400" />
-            接入其他 AI 客户端
+            接入 AI 客户端
           </h2>
           <p className="mt-1 text-xs leading-5 text-slate-500">
-            复制对应的命令或配置，替换为实际程序路径即可。
+            一键写入各客户端的用户级配置，改动前自动备份；只想对某个项目生效时，展开手动配置。
           </p>
         </div>
 
-        <div className="grid gap-4 lg:grid-cols-3">
-          {guides.map((guide) => (
-            <section
-              key={guide.id}
-              className="flex flex-col rounded-2xl border border-slate-200 bg-white p-4 shadow-sm"
-            >
-              <div className="flex items-start justify-between gap-2">
-                <div className="min-w-0">
-                  <h3 className="flex items-center gap-2 text-xs font-semibold text-slate-900">
+        <div className="space-y-2">
+          {guides.map((guide) => {
+            const status = clientStatus(guide.id);
+            const expanded = Boolean(expandedClients[guide.id]);
+            const result = importResults[guide.id];
+            return (
+              <section
+                key={guide.id}
+                className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm"
+              >
+                <div className="flex flex-wrap items-center gap-3">
+                  <div className="flex min-w-0 flex-1 items-center gap-2.5">
                     {guide.icon}
-                    {guide.title}
-                  </h3>
-                  <p className="mt-1 break-all text-[10px] text-slate-400">{guide.hint}</p>
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2">
+                        <h3 className="text-xs font-semibold text-slate-900">{guide.title}</h3>
+                        <Badge tone={status?.imported ? "green" : "amber"}>
+                          {status?.imported ? "已导入" : "未导入"}
+                        </Badge>
+                      </div>
+                      <p
+                        className="mt-0.5 truncate text-[10px] text-slate-400"
+                        title={status?.path ?? guide.hint}
+                      >
+                        {status?.path ?? guide.hint}
+                      </p>
+                    </div>
+                  </div>
+                  <div className="flex shrink-0 items-center gap-2">
+                    <Button
+                      size="sm"
+                      variant={status?.imported ? "secondary" : "primary"}
+                      loading={importingClient === guide.id}
+                      onClick={() => void importClient(guide.id, guide.title)}
+                      icon={<Download size={13} />}
+                    >
+                      {status?.imported ? "重新导入" : "一键导入"}
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => toggleClient(guide.id)}
+                      icon={
+                        <ChevronDown
+                          size={13}
+                          className={clsx("transition", expanded && "rotate-180")}
+                        />
+                      }
+                    >
+                      手动配置
+                    </Button>
+                  </div>
                 </div>
-                <button
-                  type="button"
-                  onClick={() => onCopy(guide.code)}
-                  title="复制"
-                  className={COPY_BUTTON}
-                >
-                  <Copy size={10} />
-                  复制
-                </button>
-              </div>
-              <pre className="mt-3 min-h-[96px] flex-1 overflow-auto rounded-xl bg-slate-900 p-3 font-mono text-[10px] leading-5 text-slate-200">
-                {guide.code}
-              </pre>
-            </section>
-          ))}
+
+                {result ? (
+                  <div className="mt-2 break-all text-[10px] leading-5 text-emerald-700">
+                    <CheckCircle2 size={11} className="mr-1 inline" />
+                    {result.changed ? "已写入" : "已存在，无需重复写入"}：
+                    <span className="font-mono">{result.path}</span>
+                    {result.backupPath ? (
+                      <span className="text-emerald-600/80">
+                        （备份：<span className="font-mono">{result.backupPath}</span>）
+                      </span>
+                    ) : null}
+                  </div>
+                ) : null}
+
+                {expanded ? (
+                  <div className="mt-3 rounded-xl border border-slate-100 bg-slate-50 p-3">
+                    <div className="flex items-start justify-between gap-3">
+                      <p className="text-[10px] leading-5 text-slate-500">{guide.manual}</p>
+                      <button
+                        type="button"
+                        onClick={() => onCopy(guide.code)}
+                        className={COPY_BUTTON}
+                      >
+                        <Copy size={10} />
+                        复制
+                      </button>
+                    </div>
+                    <pre className="mt-2 overflow-auto rounded-lg bg-slate-900 p-3 font-mono text-[10px] leading-5 text-slate-200">
+                      {guide.code}
+                    </pre>
+                  </div>
+                ) : null}
+              </section>
+            );
+          })}
         </div>
       </section>
     </div>
   );
+}
+
+function chipClass(active: boolean): string {
+  return clsx(
+    "rounded-full border px-2.5 py-1 text-[10px] transition",
+    active
+      ? "border-sky-200 bg-sky-50 text-sky-700"
+      : "border-slate-200 bg-white text-slate-500 hover:border-slate-300",
+  );
+}
+
+function PolicyRow(props: { title: string; hint: string; children: ReactNode }) {
+  return (
+    <div className="flex items-start justify-between gap-4 rounded-xl border border-slate-100 bg-slate-50/70 p-3">
+      <div className="min-w-0">
+        <div className="text-[11px] font-medium text-slate-700">{props.title}</div>
+        <div className="mt-0.5 text-[10px] leading-5 text-slate-400">{props.hint}</div>
+      </div>
+      {props.children}
+    </div>
+  );
+}
+
+function Toggle(props: {
+  checked: boolean;
+  onChange: (checked: boolean) => void;
+  disabled?: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={props.checked}
+      disabled={props.disabled}
+      onClick={() => props.onChange(!props.checked)}
+      className={clsx(
+        "relative mt-0.5 h-5 w-9 shrink-0 rounded-full transition",
+        props.checked ? "bg-sky-500" : "bg-slate-200",
+        props.disabled && "cursor-not-allowed opacity-50",
+      )}
+    >
+      <span
+        className={clsx(
+          "absolute top-0.5 h-4 w-4 rounded-full bg-white shadow transition-all",
+          props.checked ? "left-[18px]" : "left-0.5",
+        )}
+      />
+    </button>
+  );
+}
+
+function formatAuditTime(raw: string): string {
+  const date = new Date(raw);
+  if (Number.isNaN(date.getTime())) return raw;
+  return date.toLocaleString("zh-CN", {
+    hour12: false,
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
 }
 
 function StatusTile({

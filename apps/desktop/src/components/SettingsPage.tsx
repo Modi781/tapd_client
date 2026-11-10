@@ -1,35 +1,66 @@
-import { useState } from "react";
-import { Copy, FileJson, FolderOpen, ShieldCheck, X } from "lucide-react";
+import { useState, type ReactNode } from "react";
+import clsx from "clsx";
+import {
+  Copy,
+  FileJson,
+  FolderOpen,
+  Info,
+  PackageOpen,
+  ShieldCheck,
+  Sparkles,
+  Trash2,
+  X,
+} from "lucide-react";
 
-import type { AppInfo, WorkspaceContext } from "../lib/api";
+import { api, type AppInfo } from "../lib/api";
 import type { SettingsSectionProps } from "../lib/feature";
 import { AgentSettings } from "./AgentSettings";
 import { CapturesPage } from "./CapturesPage";
-import { ProjectSettings } from "./ProjectSettings";
 import { NotificationSettings } from "./NotificationSettings";
 import { Button } from "./ui";
 
 type Props = {
   info: AppInfo | null;
-  context: WorkspaceContext | null;
   onOpenPath: (path: string) => void;
   onCopy: (text: string) => void;
-  hiddenWorkspaceIds: string[];
-  onSetWorkspaceVisible: (id: string, visible: boolean) => void;
+  onShowOnboarding: () => void;
   toast: SettingsSectionProps["toast"];
 };
 
 export function SettingsPage(props: Props) {
-  const {
-    info,
-    context,
-    onOpenPath,
-    onCopy,
-    hiddenWorkspaceIds,
-    onSetWorkspaceVisible,
-    toast,
-  } = props;
+  const { info, onOpenPath, onCopy, onShowOnboarding, toast } = props;
   const [capturesOpen, setCapturesOpen] = useState(false);
+  const [detailsOpen, setDetailsOpen] = useState(false);
+  const [diagnosing, setDiagnosing] = useState(false);
+  const [confirmClear, setConfirmClear] = useState(false);
+  const [clearing, setClearing] = useState(false);
+
+  const clearLocalData = async () => {
+    setClearing(true);
+    try {
+      await api.clearAppData();
+      toast("ok", "本地数据已清理，应用正在重启…");
+    } catch (error) {
+      setClearing(false);
+      toast("error", String(error));
+    }
+  };
+
+  const exportDiagnostics = async () => {
+    setDiagnosing(true);
+    try {
+      const result = await api.exportDiagnostics();
+      toast(
+        "ok",
+        `诊断包已导出（${result.files} 个文件，${formatKilobytes(result.bytes)}）：${result.path}`,
+      );
+      onOpenPath(result.folder);
+    } catch (error) {
+      toast("error", String(error));
+    } finally {
+      setDiagnosing(false);
+    }
+  };
 
   const paths: Array<[string, string]> = info
     ? [
@@ -44,57 +75,156 @@ export function SettingsPage(props: Props) {
 
   return (
     <div className="mx-auto max-w-4xl space-y-4">
-      <ProjectSettings
-        context={context}
-        hiddenWorkspaceIds={hiddenWorkspaceIds}
-        onSetWorkspaceVisible={onSetWorkspaceVisible}
-        toast={toast}
-      />
 
       <NotificationSettings toast={toast} />
 
       <AgentSettings toast={toast} />
 
       <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-        <h2 className="flex items-center gap-2 text-sm font-semibold text-slate-900">
-          <ShieldCheck size={15} className="text-slate-400" />
-          运行信息
-        </h2>
-
-        <dl className="mt-3 space-y-1 text-xs">
-          <PlainRow label="版本" value={info?.version ?? "—"} onCopy={onCopy} />
-          <PlainRow
-            label="MCP 本地端口"
-            value={info?.runtimePort ? `127.0.0.1:${info.runtimePort}` : "未启动"}
-            onCopy={onCopy}
-          />
-          <PlainRow label="轮询间隔" value={`${info?.pollIntervalSecs ?? 60}s`} onCopy={onCopy} />
-        </dl>
-
-        <div className="mt-4 divide-y divide-slate-100">
-          {paths.map(([label, value]) => (
-            <div key={label} className="flex items-center gap-3 py-2 text-xs">
-              <span className="w-24 shrink-0 text-slate-400">{label}</span>
-              <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-slate-600" title={value}>
-                {value}
-              </span>
-              <button
-                type="button"
-                onClick={() => onOpenPath(value)}
-                className="inline-flex shrink-0 items-center gap-1 rounded border border-slate-200 px-2 py-1 text-[11px] text-slate-600 transition hover:border-slate-300"
-              >
-                <FolderOpen size={11} />
-              </button>
-              <button
-                type="button"
-                onClick={() => onCopy(value)}
-                className="inline-flex shrink-0 items-center gap-1 rounded border border-slate-200 px-2 py-1 text-[11px] text-slate-600 transition hover:border-slate-300"
-              >
-                <Copy size={11} />
-              </button>
-            </div>
-          ))}
+        <div className="flex items-center justify-between gap-3">
+          <div className="min-w-0">
+            <h2 className="flex items-center gap-2 text-sm font-semibold text-slate-900">
+              <ShieldCheck size={15} className="text-slate-400" />
+              运行信息
+            </h2>
+            <p className="mt-1 truncate text-xs text-slate-500">
+              {info
+                ? `v${info.version} · MCP ${
+                    info.runtimePort ? `127.0.0.1:${info.runtimePort}` : "未启动"
+                  } · 轮询 ${info.pollIntervalSecs}s`
+                : "正在读取运行信息…"}
+            </p>
+          </div>
+          <Button
+            size="sm"
+            variant="secondary"
+            onClick={() => setDetailsOpen(true)}
+            icon={<Info size={13} />}
+          >
+            查看详情
+          </Button>
         </div>
+      </section>
+
+      {detailsOpen ? (
+        <Dialog
+          title="运行信息"
+          icon={<ShieldCheck size={15} className="text-slate-400" />}
+          onClose={() => setDetailsOpen(false)}
+          action={
+            <Button
+              size="sm"
+              onClick={() => void exportDiagnostics()}
+              loading={diagnosing}
+              icon={<PackageOpen size={13} />}
+            >
+              导出诊断包
+            </Button>
+          }
+        >
+          <p className="text-[11px] leading-5 text-slate-500">
+            打包版本、脱敏配置、最近日志与 MCP 审计；不含 Cookie、API token 和请求正文。
+          </p>
+
+          <dl className="mt-3 space-y-1 text-xs">
+            <PlainRow label="版本" value={info?.version ?? "—"} onCopy={onCopy} />
+            <PlainRow
+              label="MCP 本地端口"
+              value={info?.runtimePort ? `127.0.0.1:${info.runtimePort}` : "未启动"}
+              onCopy={onCopy}
+            />
+            <PlainRow
+              label="轮询间隔"
+              value={`${info?.pollIntervalSecs ?? 60}s`}
+              onCopy={onCopy}
+            />
+          </dl>
+
+          <div className="mt-4 divide-y divide-slate-100">
+            {paths.map(([label, value]) => (
+              <div key={label} className="flex items-center gap-3 py-2 text-xs">
+                <span className="w-24 shrink-0 text-slate-400">{label}</span>
+                <span
+                  className="min-w-0 flex-1 truncate font-mono text-[11px] text-slate-600"
+                  title={value}
+                >
+                  {value}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => onOpenPath(value)}
+                  className="inline-flex shrink-0 items-center gap-1 rounded border border-slate-200 px-2 py-1 text-[11px] text-slate-600 transition hover:border-slate-300"
+                >
+                  <FolderOpen size={11} />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onCopy(value)}
+                  className="inline-flex shrink-0 items-center gap-1 rounded border border-slate-200 px-2 py-1 text-[11px] text-slate-600 transition hover:border-slate-300"
+                >
+                  <Copy size={11} />
+                </button>
+              </div>
+            ))}
+          </div>
+        </Dialog>
+      ) : null}
+
+      <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <h2 className="flex items-center gap-2 text-sm font-semibold text-slate-900">
+              <Trash2 size={15} className="text-slate-400" />
+              本地数据
+            </h2>
+            <p className="mt-1 text-xs leading-5 text-slate-500">
+              删除应用数据目录下的全部配置、离线缓存、日志、抓包与 Agent 任务记录，然后自动重启应用。导出目录不受影响。
+            </p>
+            {info ? (
+              <p
+                className="mt-1 truncate font-mono text-[11px] text-slate-400"
+                title={info.paths.dataDir}
+              >
+                {info.paths.dataDir}
+              </p>
+            ) : null}
+          </div>
+          {confirmClear ? (
+            <div className="flex shrink-0 items-center gap-2">
+              <Button
+                size="sm"
+                variant="ghost"
+                disabled={clearing}
+                onClick={() => setConfirmClear(false)}
+              >
+                取消
+              </Button>
+              <Button
+                size="sm"
+                variant="danger"
+                loading={clearing}
+                onClick={() => void clearLocalData()}
+              >
+                确认清理
+              </Button>
+            </div>
+          ) : (
+            <Button
+              size="sm"
+              variant="danger"
+              icon={<Trash2 size={13} />}
+              onClick={() => setConfirmClear(true)}
+            >
+              清理缓存
+            </Button>
+          )}
+        </div>
+        {confirmClear ? (
+          <p className="mt-3 rounded-lg bg-rose-50 px-3 py-2 text-[11px] leading-5 text-rose-600">
+            操作不可撤销：引导进度、MCP 策略、Agent 任务与离线缓存都会被清除。TAPD Cookie
+            保存在 WebView 会话中，如需退出登录请使用账户页。
+          </p>
+        ) : null}
       </section>
 
       <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
@@ -119,34 +249,46 @@ export function SettingsPage(props: Props) {
         </div>
       </section>
 
-      {capturesOpen ? (
-        <div
-          className="fixed inset-0 z-[80] flex items-center justify-center bg-slate-900/30 p-6 backdrop-blur-[1px]"
-          onMouseDown={(event) => {
-            if (event.target === event.currentTarget) setCapturesOpen(false);
-          }}
-        >
-          <div className="flex h-[min(82vh,760px)] w-[min(1180px,94vw)] flex-col overflow-hidden rounded-2xl bg-white shadow-2xl ring-1 ring-black/10">
-            <header className="flex shrink-0 items-center gap-2 border-b border-slate-100 px-4 py-3">
-              <FileJson size={15} className="text-slate-400" />
-              <h2 className="text-[13px] font-semibold text-slate-900">接口抓包</h2>
-              <button
-                type="button"
-                aria-label="关闭抓包"
-                onClick={() => setCapturesOpen(false)}
-                className="ml-auto grid h-8 w-8 place-items-center rounded-lg text-slate-400 transition hover:bg-slate-100 hover:text-slate-700"
-              >
-                <X size={16} />
-              </button>
-            </header>
-            <div className="min-h-0 flex-1 overflow-y-auto p-4">
-              <CapturesPage toast={toast} onOpenPath={onOpenPath} />
-            </div>
+      <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <h2 className="flex items-center gap-2 text-sm font-semibold text-slate-900">
+              <Sparkles size={15} className="text-slate-400" />
+              新手引导
+            </h2>
+            <p className="mt-1 text-xs text-slate-500">
+              重新查看产品卖点与快速开始。
+            </p>
           </div>
+          <Button
+            size="sm"
+            variant="secondary"
+            onClick={onShowOnboarding}
+            icon={<Sparkles size={13} />}
+          >
+            查看引导
+          </Button>
         </div>
+      </section>
+
+      {capturesOpen ? (
+        <Dialog
+          title="接口抓包"
+          icon={<FileJson size={15} className="text-slate-400" />}
+          onClose={() => setCapturesOpen(false)}
+          size="wide"
+        >
+          <CapturesPage toast={toast} onOpenPath={onOpenPath} />
+        </Dialog>
       ) : null}
     </div>
   );
+}
+
+function formatKilobytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
 function PlainRow(props: { label: string; value: string; onCopy: (text: string) => void }) {
@@ -164,3 +306,51 @@ function PlainRow(props: { label: string; value: string; onCopy: (text: string) 
     </div>
   );
 }
+
+function Dialog(props: {
+  title: string;
+  icon: ReactNode;
+  onClose: () => void;
+  action?: ReactNode;
+  size?: "default" | "wide";
+  children: ReactNode;
+}) {
+  return (
+    <div
+      className="fixed inset-0 z-[80] flex items-center justify-center bg-slate-900/30 p-6 backdrop-blur-[1px]"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) props.onClose();
+      }}
+    >
+      <div
+        className={clsx(
+          "flex flex-col overflow-hidden rounded-2xl bg-white shadow-2xl ring-1 ring-black/10",
+          props.size === "wide"
+            ? "h-[min(82vh,760px)] w-[min(1180px,94vw)]"
+            : "max-h-[min(82vh,760px)] w-[min(560px,92vw)]",
+        )}
+      >
+        <header className="flex shrink-0 items-center gap-2 border-b border-slate-100 px-4 py-3">
+          {props.icon}
+          <h2 className="text-[13px] font-semibold text-slate-900">{props.title}</h2>
+          {props.action ? (
+            <div className="ml-auto flex items-center gap-2">{props.action}</div>
+          ) : null}
+          <button
+            type="button"
+            aria-label={`关闭${props.title}`}
+            onClick={props.onClose}
+            className={clsx(
+              "grid h-8 w-8 place-items-center rounded-lg text-slate-400 transition hover:bg-slate-100 hover:text-slate-700",
+              props.action ? "" : "ml-auto",
+            )}
+          >
+            <X size={16} />
+          </button>
+        </header>
+        <div className="min-h-0 flex-1 overflow-y-auto p-4">{props.children}</div>
+      </div>
+    </div>
+  );
+}
+

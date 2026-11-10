@@ -12,6 +12,8 @@ pub struct AppConfig {
     pub logged_in: bool,
     /// TAPD nickname of the signed-in user, when known.
     pub me: Option<String>,
+    /// Cached avatar URL (from the WeCom scan panel) for the local user.
+    pub me_avatar: Option<String>,
     /// Last selected workspace, restored on launch.
     pub last_workspace_id: Option<String>,
     /// Last known TAPD page URL (used for diagnostics only).
@@ -32,6 +34,76 @@ pub struct AppConfig {
     pub island_anchor: Option<(i32, i32)>,
     /// TAPD workspaces hidden from the left project list (local preference).
     pub hidden_workspace_ids: Vec<String>,
+    /// Capability boundary enforced for every MCP tool call.
+    pub mcp_policy: McpPolicy,
+    /// RFC 3339 time of the last successful update check (GitHub Releases).
+    pub last_update_check_at: Option<String>,
+}
+
+/// Policy for the MCP sidecar bridge. Filters can only narrow access; TAPD's
+/// own permissions always apply on top.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct McpPolicy {
+    /// Allow comment / status write-back tools. Read tools stay available.
+    pub writes_enabled: bool,
+    /// Record every tool call in the local audit log.
+    pub audit_enabled: bool,
+    /// Workspace ids the MCP tools may touch. Empty = every project.
+    pub allowed_workspace_ids: Vec<String>,
+    /// Status keys/labels allowed for `tapd_update_bug_status`.
+    /// Empty = TAPD's workflow decides.
+    pub allowed_statuses: Vec<String>,
+}
+
+impl Default for McpPolicy {
+    fn default() -> Self {
+        Self {
+            writes_enabled: true,
+            audit_enabled: true,
+            allowed_workspace_ids: Vec::new(),
+            allowed_statuses: Vec::new(),
+        }
+    }
+}
+
+impl McpPolicy {
+    /// Normalizes user-entered ids/labels (trim, drop empties/duplicates).
+    pub fn normalized(mut self) -> Self {
+        self.allowed_workspace_ids = normalize_list(self.allowed_workspace_ids);
+        self.allowed_statuses = normalize_list(self.allowed_statuses);
+        self
+    }
+
+    pub fn allows_workspace(&self, workspace_id: &str) -> bool {
+        self.allowed_workspace_ids.is_empty()
+            || self
+                .allowed_workspace_ids
+                .iter()
+                .any(|allowed| allowed == workspace_id.trim())
+    }
+
+    pub fn allows_status(&self, status: &str) -> bool {
+        if self.allowed_statuses.is_empty() {
+            return true;
+        }
+        let target = status.trim();
+        self.allowed_statuses
+            .iter()
+            .any(|allowed| allowed.eq_ignore_ascii_case(target) || allowed == target)
+    }
+}
+
+fn normalize_list(values: Vec<String>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for value in values {
+        let trimmed = value.trim();
+        if trimmed.is_empty() || out.iter().any(|item| item == trimmed) {
+            continue;
+        }
+        out.push(trimmed.to_string());
+    }
+    out
 }
 
 impl Default for AppConfig {
@@ -39,6 +111,7 @@ impl Default for AppConfig {
         Self {
             logged_in: false,
             me: None,
+            me_avatar: None,
             last_workspace_id: None,
             last_session_url: None,
             capture_enabled: true,
@@ -48,6 +121,8 @@ impl Default for AppConfig {
             open_with: BTreeMap::new(),
             island_anchor: None,
             hidden_workspace_ids: Vec::new(),
+            mcp_policy: McpPolicy::default(),
+            last_update_check_at: None,
         }
     }
 }
@@ -91,5 +166,35 @@ impl ConfigStore {
         }
         std::fs::rename(&tmp, &self.path)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod policy_tests {
+    use super::McpPolicy;
+
+    #[test]
+    fn policy_narrows_workspaces_and_statuses() {
+        let policy = McpPolicy {
+            allowed_workspace_ids: vec![" 45336192 ".into(), "45336192".into(), "".into()],
+            allowed_statuses: vec!["resolved".into(), " 已解决 ".into()],
+            ..McpPolicy::default()
+        }
+        .normalized();
+
+        assert_eq!(policy.allowed_workspace_ids, vec!["45336192"]);
+        assert!(policy.allows_workspace("45336192"));
+        assert!(!policy.allows_workspace("999"));
+        assert!(policy.allows_status("resolved"));
+        assert!(policy.allows_status("已解决"));
+        assert!(!policy.allows_status("closed"));
+    }
+
+    #[test]
+    fn empty_filters_mean_no_restriction() {
+        let policy = McpPolicy::default();
+        assert!(policy.allows_workspace("anything"));
+        assert!(policy.allows_status("anything"));
+        assert!(policy.writes_enabled);
     }
 }

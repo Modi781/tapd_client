@@ -300,55 +300,9 @@
     lastSwitch: 0,
     lastLinkClick: 0,
     lastRefresh: 0,
-    qrShownAt: 0,
-    sawQr: false,
     sawScan: false,
     badLoginAt: 0,
   };
-
-  /// The WeCom panel offers an automatic "quick login" when the desktop app is
-  /// running. Disable it so the QR code is the only entry point and the login
-  /// always finishes in the hidden webview (the browser redirect).
-  function disableQuickLoginOnFrame(frame) {
-    if (!frame || !frame.getAttribute) return;
-    var src = frame.getAttribute("src") || "";
-    if (!src || src.indexOf("work.weixin.qq.com") === -1) return;
-    if (src.indexOf("disable_quick_login") !== -1) return;
-
-    var joiner = src.indexOf("?") === -1 ? "?" : "&";
-    frame.setAttribute("src", src + joiner + "disable_quick_login=true");
-  }
-
-  function patchWecomFrames() {
-    var frames = document.querySelectorAll('iframe[src*="work.weixin.qq.com"]');
-    for (var index = 0; index < frames.length; index += 1) {
-      disableQuickLoginOnFrame(frames[index]);
-    }
-  }
-
-  function observeWecomFrames() {
-    var root = document.documentElement || document;
-    if (!root) return;
-    var observer = new MutationObserver(function (mutations) {
-      for (var index = 0; index < mutations.length; index += 1) {
-        var added = mutations[index].addedNodes;
-        for (var nodeIndex = 0; nodeIndex < added.length; nodeIndex += 1) {
-          var node = added[nodeIndex];
-          if (!node || node.nodeType !== 1) continue;
-          if (node.tagName === "IFRAME") {
-            disableQuickLoginOnFrame(node);
-          } else if (node.querySelectorAll) {
-            var frames = node.querySelectorAll('iframe[src*="work.weixin.qq.com"]');
-            for (var frameIndex = 0; frameIndex < frames.length; frameIndex += 1) {
-              disableQuickLoginOnFrame(frames[frameIndex]);
-            }
-          }
-        }
-      }
-    });
-    observer.observe(root, { childList: true, subtree: true });
-    patchWecomFrames();
-  }
 
   function compactText(node) {
     return String((node && node.textContent) || "")
@@ -362,6 +316,12 @@
     if (rect.width <= 1 || rect.height <= 1) return false;
     var style = window.getComputedStyle(node);
     return style.display !== "none" && style.visibility !== "hidden" && style.opacity !== "0";
+  }
+
+  function sizedAvatar(raw) {
+    var url = absoluteAsset(raw);
+    // WeCom avatar URLs end with a size segment (`/0` = original, ~1MB).
+    return url.replace(/\/0(\?.*)?$/, "/132$1");
   }
 
   function absoluteAsset(raw) {
@@ -414,9 +374,6 @@
   function scanTopLoginPage() {
     if (!isTopFrame || !tapdHost) return;
     if (!isAuthPath(window.location.href)) return;
-    // Covers iframes whose src was assigned after insertion.
-    patchWecomFrames();
-
     var tab = document.querySelector(".login-tab-qy");
     if (!tab) {
       var form = document.querySelector("#login_cn_form, .login-form");
@@ -530,8 +487,6 @@
     try {
       var qrImg = document.querySelector(".wwLogin_qrcode_img");
       if (isShown(qrImg)) {
-        if (!loginBridge.sawQr) loginBridge.qrShownAt = Date.now();
-        loginBridge.sawQr = true;
         state.qrUrl = absoluteAsset(qrImg.currentSrc || qrImg.src);
         var tip = compactText(document.querySelector(".wwLogin_qrcode_tips_cnt h4"));
         if (tip.indexOf("过期") !== -1) {
@@ -559,15 +514,12 @@
         var avatarEl = quick.querySelector(".wwLogin_quick_userAvatar");
         state.name = name || null;
         state.corp = corp || null;
-        state.avatarUrl = avatarEl ? absoluteAsset(avatarEl.src) : null;
+        state.avatarUrl = avatarEl ? sizedAvatar(avatarEl.src) : null;
 
-        // The desktop quick-login panel can appear either before a scan (the
-        // WeCom desktop account) or after one. Only the latter may continue:
-        // a real scan leaves the "扫码成功" tip behind, and a QR that has been
-        // on screen for a while means the user had time to scan.
-        var canContinue =
-          loginBridge.sawScan ||
-          (loginBridge.sawQr && Date.now() - loginBridge.qrShownAt > 10000);
+        // The desktop quick-login panel also appears before any scan (the
+        // desktop WeCom account). Only continue after a real scan, which is
+        // signalled by the "扫码成功" tip; otherwise force the QR view back.
+        var canContinue = loginBridge.sawScan;
 
         if (!canContinue) {
           // WeCom desktop offered its own quick login before any scan. Force
@@ -575,8 +527,6 @@
           state.phase = "loading";
           state.message = "正在加载二维码";
           state.qrUrl = null;
-          loginBridge.sawQr = false;
-          loginBridge.qrShownAt = 0;
           var switcher = quick.querySelector(".wwLogin_quick_switch");
           if (switcher && Date.now() - loginBridge.lastSwitch > 1600) {
             loginBridge.lastSwitch = Date.now();
@@ -654,7 +604,6 @@
   }
 
   if (isTopFrame) {
-    observeWecomFrames();
     window.addEventListener("message", function (event) {
       var data = event.data;
       if (data && data.__tapdcb === "login" && data.state) {

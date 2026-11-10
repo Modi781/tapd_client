@@ -15,6 +15,7 @@ export type AppInfo = {
   paths: AppPaths;
   loggedIn: boolean;
   me: string | null;
+  meAvatar: string | null;
   lastWorkspaceId: string | null;
   pollIntervalSecs: number;
   runtimePort: number | null;
@@ -23,6 +24,7 @@ export type AppInfo = {
   mediaToken: string | null;
   sessionUrl: string | null;
   hiddenWorkspaceIds: string[];
+  onboarded: boolean;
 };
 
 export type SessionStatus = {
@@ -219,6 +221,17 @@ export type BugDetail = BugSummary & {
   changes: ChangeHistory;
 };
 
+export type McpClientId = "opencode" | "zcode" | "claude" | "cursor" | "codex";
+
+/** Per-client one-click import status. */
+export type McpClientStatus = {
+  id: McpClientId;
+  /** User-scope config file, when it can be located. */
+  path: string | null;
+  /** Whether the config already registers tapd-mcp. */
+  imported: boolean;
+};
+
 export type McpConfigInfo = {
   commandPath: string;
   snippet: string;
@@ -226,10 +239,42 @@ export type McpConfigInfo = {
   readOnly: boolean;
   tools: string[];
   port: number | null;
-  /** opencode global config path, when discoverable. */
-  configPath: string | null;
-  /** Whether the opencode config already registers tapd-mcp. */
-  imported: boolean;
+  clients: McpClientStatus[];
+};
+
+/** User-configurable capability boundary for MCP tool calls. */
+export type McpPolicy = {
+  writesEnabled: boolean;
+  auditEnabled: boolean;
+  /** Empty = every project. */
+  allowedWorkspaceIds: string[];
+  /** Status keys/labels; empty = TAPD workflow decides. */
+  allowedStatuses: string[];
+};
+
+export type McpAuditEntry = {
+  id: string;
+  ts: string;
+  tool: string;
+  client: string;
+  decision: "allowed" | "denied" | "error";
+  ok: boolean;
+  durationMs: number;
+  workspaceId: string | null;
+  bugId: string | null;
+  error: string | null;
+  summary: Record<string, unknown>;
+};
+
+/** A redacted support bundle written to the local diagnostics directory. */
+export type DiagnosticsResult = {
+  /** The zip when compression succeeded, otherwise the folder. */
+  path: string;
+  /** Directory to reveal in Finder. */
+  folder: string;
+  files: number;
+  bytes: number;
+  zipped: boolean;
 };
 
 export type OpenMediaMode = "file" | "browser" | "reveal" | "path";
@@ -272,6 +317,8 @@ export const api = {
   loginState: () => invoke<LoginQrState>("session_login_state"),
   refreshLoginQr: () => invoke<void>("session_refresh_qr"),
   reloadLogin: () => invoke<void>("session_reload_login"),
+  cacheAvatar: (avatarUrl: string) =>
+    invoke<void>("session_cache_avatar", { avatarUrl }),
   markLoggedIn: (nick?: string) =>
     invoke<void>("session_mark_logged_in", { nick: nick ?? null }),
   logout: () => invoke<void>("session_logout"),
@@ -307,6 +354,18 @@ export const api = {
   setHiddenWorkspaces: (ids: string[]) =>
     invoke<void>("set_hidden_workspaces", { ids }),
   mcpConfig: () => invoke<McpConfigInfo>("mcp_config"),
+  completeOnboarding: () => invoke<void>("complete_onboarding"),
+  resetOnboarding: () => invoke<void>("reset_onboarding"),
+  mcpPolicyGet: () => invoke<McpPolicy>("mcp_policy_get"),
+  mcpPolicySet: (policy: McpPolicy) =>
+    invoke<McpPolicy>("mcp_policy_set", { policy }),
+  mcpAuditList: (limit?: number) =>
+    invoke<McpAuditEntry[]>("mcp_audit_list", { limit: limit ?? null }),
+  mcpAuditClear: () => invoke<void>("mcp_audit_clear"),
+  mcpAuditExport: () => invoke<string>("mcp_audit_export"),
+  exportDiagnostics: () => invoke<DiagnosticsResult>("export_diagnostics"),
+  /** Wipes the app data directory and restarts the app. */
+  clearAppData: () => invoke<void>("clear_app_data"),
 };
 
 export const onSessionChanged = (callback: () => void): Promise<UnlistenFn> =>

@@ -151,7 +151,7 @@ export function ProjectSettings(props: {
     <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
       <h2 className="flex items-center gap-2 text-sm font-semibold text-slate-900">
         <FolderGit2 size={15} className="text-slate-400" />
-        项目
+        项目列表
       </h2>
       <p className="mt-1 text-xs text-slate-500">
         每个项目可设置本地文件夹、项目规则和是否显示在左侧列表；改动自动保存。

@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import clsx from "clsx";
 import {
   Ban,
   Bot,
@@ -30,6 +29,7 @@ import {
 } from "../lib/agent";
 import { AgentHistory } from "./AgentHistory";
 import { AgentTerminal } from "./AgentTerminal";
+import { Segmented } from "./Segmented";
 import { Badge, Button } from "./ui";
 
 const ACTIVE_STATUSES: AgentTaskStatus[] = [
@@ -242,28 +242,26 @@ export function AgentPage({ focusTaskId, onOpenBug, toast }: Props) {
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-3 p-4 pt-2.5">
       <div className="flex shrink-0 flex-wrap items-center gap-2">
-        <div className="inline-flex items-center gap-0.5 rounded-lg bg-slate-100 p-0.5">
-          {(["run", "history"] as const).map((value) => (
-            <button
-              key={value}
-              type="button"
-              onClick={() => setTab(value)}
-              className={clsx(
-                "inline-flex items-center gap-1.5 rounded-[7px] px-3 py-1 text-xs font-medium transition",
-                tab === value
-                  ? "bg-white text-slate-900 shadow-sm"
-                  : "text-slate-500 hover:text-slate-700",
-              )}
-            >
-              {value === "run" ? "运行" : "历史"}
-              {value === "run" && counts.waiting > 0 ? (
-                <span className="rounded-full bg-rose-500 px-1.5 py-0.5 text-[9px] font-semibold leading-none text-white">
-                  {counts.waiting}
+        <Segmented
+          value={tab}
+          onChange={setTab}
+          options={[
+            {
+              value: "run",
+              label: (
+                <span className="inline-flex items-center gap-1.5">
+                  运行
+                  {counts.waiting > 0 ? (
+                    <span className="inline-flex min-w-[2ch] justify-center rounded-full bg-rose-500 px-1.5 py-0.5 text-[9px] font-semibold leading-none tabular-nums text-white">
+                      {counts.waiting}
+                    </span>
+                  ) : null}
                 </span>
-              ) : null}
-            </button>
-          ))}
-        </div>
+              ),
+            },
+            { value: "history", label: "历史" },
+          ]}
+        />
 
         <span className="text-[11px] text-slate-400">
           {counts.active} 运行 · {counts.queued} 排队 · {counts.waiting} 待审核

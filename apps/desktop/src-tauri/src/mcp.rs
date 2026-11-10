@@ -1,22 +1,30 @@
 //! MCP tool dispatch running inside the desktop app.
 //!
 //! The sidecar speaks MCP over stdio and forwards tool calls to `/mcp/call`.
-//! Read tools are always available; comment / status write-back tools are
-//! enabled for the agent workflow and logged through `mcp tool call`.
+//! Every call passes the user-configurable policy (read/write, project scope,
+//! allowed statuses) and is written to the local audit log.
 
 use std::{
     collections::BTreeMap,
     time::{Duration, Instant},
 };
 
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use tauri::{AppHandle, Manager};
-use tapd_core::tapd::{
-    api::{bug_list_url, parse_bug_list, parse_workspaces, user_workspace_url, BugQuery},
-    BugListPage, Workspace,
+use tapd_core::{
+    config::McpPolicy,
+    tapd::{
+        api::{bug_list_url, parse_bug_list, parse_workspaces, user_workspace_url, BugQuery},
+        BugListPage, Workspace,
+    },
 };
 
-use crate::{commands::session_request_json, session, state::SharedState};
+use crate::{
+    commands::session_request_json,
+    mcp_audit::McpAuditEntry,
+    session,
+    state::SharedState,
+};
 
 const MAX_RESULTS: u32 = 50;
 const DEFAULT_RESULTS: u32 = 20;
@@ -38,18 +46,144 @@ pub async fn handle(
     client: &str,
 ) -> Result<Value, String> {
     let started = Instant::now();
+    let policy = state.config_snapshot().mcp_policy;
+    let summary = summarize_arguments(arguments);
+
+    if let Some(message) = policy_violation(&policy, tool, arguments) {
+        record_audit(
+            state,
+            &policy,
+            tool,
+            client,
+            "denied",
+            false,
+            started,
+            arguments,
+            Some(message.clone()),
+            summary,
+        );
+        tracing::info!(tool, client, ok = false, error = %message, "mcp tool denied by policy");
+        return Err(message);
+    }
+
     let result = dispatch(app, state, tool, arguments).await;
+    let (decision, ok) = match &result {
+        Ok(_) => ("allowed", true),
+        Err(_) => ("error", false),
+    };
+
+    record_audit(
+        state,
+        &policy,
+        tool,
+        client,
+        decision,
+        ok,
+        started,
+        arguments,
+        result.as_ref().err().cloned(),
+        summary,
+    );
 
     tracing::info!(
         tool,
         client,
-        ok = result.is_ok(),
+        ok,
         duration_ms = started.elapsed().as_millis() as u64,
         error = result.as_ref().err().map(String::as_str).unwrap_or(""),
         "mcp tool call"
     );
 
     result
+}
+
+fn is_write_tool(tool: &str) -> bool {
+    matches!(
+        tool,
+        "tapd_add_bug_comment" | "tapd_update_bug_status"
+    )
+}
+
+/// Returns a user-facing reason when the policy forbids the call.
+fn policy_violation(policy: &McpPolicy, tool: &str, arguments: &Value) -> Option<String> {
+    if is_write_tool(tool) && !policy.writes_enabled {
+        return Some("MCP 写操作已在「MCP 策略」中关闭".to_string());
+    }
+
+    if let Some(workspace_id) = string_arg(arguments, "workspace_id") {
+        if !policy.allows_workspace(&workspace_id) {
+            return Some(format!(
+                "项目 {workspace_id} 不在 MCP 策略允许的项目范围内"
+            ));
+        }
+    }
+
+    None
+}
+
+/// Non-sensitive snapshot of the call shape for the audit table.
+fn summarize_arguments(arguments: &Value) -> Value {
+    let mut summary = Map::new();
+    for key in [
+        "workspace_id",
+        "bug_id",
+        "status",
+        "next_status",
+        "owner",
+        "limit",
+        "page",
+        "only_unresolved",
+    ] {
+        if let Some(value) = arguments.get(key) {
+            summary.insert(key.to_string(), value.clone());
+        }
+    }
+    if let Some(comment) = arguments.get("comment").and_then(Value::as_str) {
+        summary.insert(
+            "commentChars".to_string(),
+            Value::from(comment.chars().count() as u64),
+        );
+    }
+    if let Some(fields) = arguments.get("fields").and_then(Value::as_array) {
+        summary.insert("fields".to_string(), Value::from(fields.len() as u64));
+    }
+    Value::Object(summary)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn record_audit(
+    state: &SharedState,
+    policy: &McpPolicy,
+    tool: &str,
+    client: &str,
+    decision: &str,
+    ok: bool,
+    started: Instant,
+    arguments: &Value,
+    error: Option<String>,
+    summary: Value,
+) {
+    if !policy.audit_enabled {
+        return;
+    }
+
+    let entry = McpAuditEntry {
+        id: uuid::Uuid::new_v4().simple().to_string(),
+        ts: chrono::Local::now().to_rfc3339(),
+        tool: tool.to_string(),
+        client: client.to_string(),
+        decision: decision.to_string(),
+        ok,
+        duration_ms: started.elapsed().as_millis() as u64,
+        workspace_id: string_arg(arguments, "workspace_id"),
+        bug_id: string_arg(arguments, "bug_id"),
+        error,
+        summary,
+    };
+
+    if let Err(error) = state.mcp_audit.record(entry) {
+        tracing::warn!(%error, "failed to persist MCP audit entry");
+    }
 }
 
 async fn dispatch(
@@ -60,7 +194,7 @@ async fn dispatch(
 ) -> Result<Value, String> {
     match tool {
         "tapd_whoami" => whoami(app, state).await,
-        "tapd_list_projects" => list_projects(app).await,
+        "tapd_list_projects" => list_projects(app, state).await,
         "tapd_list_bugs" => list_bugs(app, state, arguments).await,
         "tapd_list_my_bugs" => list_my_bugs(app, state, arguments).await,
         "tapd_get_bug" => get_bug(app, state, arguments).await,
@@ -74,20 +208,30 @@ async fn dispatch(
 
 async fn whoami(app: &AppHandle, state: &SharedState) -> Result<Value, String> {
     let (user, workspaces) = load_context(app).await?;
-    let default_workspace = default_workspace_id(state, &workspaces);
+    let policy = state.config_snapshot().mcp_policy;
+    let allowed: Vec<Workspace> = workspaces
+        .into_iter()
+        .filter(|workspace| policy.allows_workspace(&workspace.id))
+        .collect();
+    let default_workspace = default_workspace_id(state, &allowed, &policy);
 
     Ok(json!({
         "nick": user.get("user_nick").and_then(Value::as_str).unwrap_or_default(),
         "userId": user.get("user_id").and_then(Value::as_str).unwrap_or_default(),
         "company": user.get("company").and_then(Value::as_str).unwrap_or_default(),
         "defaultWorkspaceId": default_workspace,
-        "workspaces": workspaces.len(),
+        "workspaces": allowed.len(),
     }))
 }
 
-async fn list_projects(app: &AppHandle) -> Result<Value, String> {
+async fn list_projects(app: &AppHandle, state: &SharedState) -> Result<Value, String> {
     let (_, workspaces) = load_context(app).await?;
-    serde_json::to_value(workspaces).map_err(|error| error.to_string())
+    let policy = state.config_snapshot().mcp_policy;
+    let allowed: Vec<Workspace> = workspaces
+        .into_iter()
+        .filter(|workspace| policy.allows_workspace(&workspace.id))
+        .collect();
+    serde_json::to_value(allowed).map_err(|error| error.to_string())
 }
 
 async fn list_bugs(
@@ -274,12 +418,7 @@ async fn resolve_me(
         return Ok(None);
     }
 
-    let snapshot = {
-        let mut config = state.config.lock().expect("config lock");
-        config.me = Some(nick.clone());
-        config.clone()
-    };
-    let _ = state.save_config(&snapshot);
+    let _ = state.update_config(|config| config.me = Some(nick.clone()));
 
     Ok(Some(nick))
 }
@@ -289,22 +428,32 @@ fn resolve_workspace(
     workspaces: &[Workspace],
     arguments: &Value,
 ) -> Result<String, String> {
+    let policy = state.config_snapshot().mcp_policy;
+
     if let Some(workspace_id) = string_arg(arguments, "workspace_id") {
         if !workspace_id.is_empty() {
+            if !policy.allows_workspace(&workspace_id) {
+                return Err(format!(
+                    "项目 {workspace_id} 不在 MCP 策略允许的项目范围内"
+                ));
+            }
             return Ok(workspace_id);
         }
     }
 
     if let Some(workspace_id) = state.config_snapshot().last_workspace_id {
-        if workspaces.iter().any(|workspace| workspace.id == workspace_id) {
+        if workspaces.iter().any(|workspace| workspace.id == workspace_id)
+            && policy.allows_workspace(&workspace_id)
+        {
             return Ok(workspace_id);
         }
     }
 
     workspaces
-        .first()
+        .iter()
+        .find(|workspace| policy.allows_workspace(&workspace.id))
         .map(|workspace| workspace.id.clone())
-        .ok_or_else(|| "no accessible TAPD workspace".to_string())
+        .ok_or_else(|| "没有符合 MCP 策略的可用项目".to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -392,6 +541,16 @@ async fn update_bug_status(
 
     let mut info = load_transition_info(app, &workspace_id, &bug_id).await?;
     let target = resolve_status_key(&target_input, &info)?;
+    let policy = state.config_snapshot().mcp_policy;
+    if !policy.allowed_statuses.is_empty()
+        && !policy.allows_status(&target)
+        && !policy.allows_status(&target_input)
+    {
+        return Err(format!(
+            "状态「{}」不在 MCP 策略的状态白名单中",
+            target_input
+        ));
+    }
     let original_status = info.current_status.clone();
     let mut current_status = info.current_status.clone();
     let mut steps: Vec<Value> = Vec::new();
@@ -779,12 +938,24 @@ fn ensure_api_ok(root: &Value, action: &str) -> Result<(), String> {
     }
 }
 
-fn default_workspace_id(state: &SharedState, workspaces: &[Workspace]) -> Option<String> {
+fn default_workspace_id(
+    state: &SharedState,
+    workspaces: &[Workspace],
+    policy: &McpPolicy,
+) -> Option<String> {
     state
         .config_snapshot()
         .last_workspace_id
-        .filter(|id| workspaces.iter().any(|workspace| &workspace.id == id))
-        .or_else(|| workspaces.first().map(|workspace| workspace.id.clone()))
+        .filter(|id| {
+            workspaces.iter().any(|workspace| &workspace.id == id)
+                && policy.allows_workspace(id)
+        })
+        .or_else(|| {
+            workspaces
+                .iter()
+                .find(|workspace| policy.allows_workspace(&workspace.id))
+                .map(|workspace| workspace.id.clone())
+        })
 }
 
 fn string_arg(arguments: &Value, key: &str) -> Option<String> {
@@ -872,5 +1043,57 @@ mod tests {
         assert!(api_ok(&json!({"meta": {"code": 0}})));
         assert!(api_ok(&json!({"meta": {"code": "0"}})));
         assert!(!api_ok(&json!({"meta": {"code": 10015, "message": "no"}})));
+    }
+}
+
+#[cfg(test)]
+mod policy_tests {
+    use super::{policy_violation, summarize_arguments};
+    use serde_json::json;
+    use tapd_core::config::McpPolicy;
+
+    #[test]
+    fn writes_can_be_disabled() {
+        let args = json!({ "bug_id": "1", "comment": "hello" });
+        let mut policy = McpPolicy::default();
+        assert!(policy_violation(&policy, "tapd_add_bug_comment", &args).is_none());
+
+        policy.writes_enabled = false;
+        assert!(policy_violation(&policy, "tapd_add_bug_comment", &args).is_some());
+        // Read tools stay available.
+        assert!(policy_violation(&policy, "tapd_get_bug", &args).is_none());
+    }
+
+    #[test]
+    fn project_allowlist_is_enforced() {
+        let policy = McpPolicy {
+            allowed_workspace_ids: vec!["45336192".to_string()],
+            ..McpPolicy::default()
+        };
+        assert!(policy_violation(
+            &policy,
+            "tapd_get_bug",
+            &json!({ "workspace_id": "45336192" })
+        )
+        .is_none());
+        assert!(policy_violation(
+            &policy,
+            "tapd_get_bug",
+            &json!({ "workspace_id": "999" })
+        )
+        .is_some());
+    }
+
+    #[test]
+    fn audit_summary_never_contains_comment_text() {
+        let summary = summarize_arguments(&json!({
+            "bug_id": "1",
+            "comment": "secret body",
+            "status": "resolved"
+        }));
+        assert_eq!(summary["bug_id"], "1");
+        assert_eq!(summary["status"], "resolved");
+        assert_eq!(summary["commentChars"], 11);
+        assert!(summary.get("comment").is_none());
     }
 }

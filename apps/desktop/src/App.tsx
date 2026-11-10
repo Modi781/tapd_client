@@ -4,10 +4,12 @@ import type { MouseEvent as ReactMouseEvent, ReactNode } from "react";
 import clsx from "clsx";
 import {
   AlertTriangle,
+  ArrowUpCircle,
   Bot,
   Bug,
   CheckCircle2,
   ChevronRight,
+  FolderGit2,
   Loader2,
   PanelLeftClose,
   PanelLeftOpen,
@@ -20,14 +22,12 @@ import {
 import {
   api,
   onSessionChanged,
-  onSessionUrl,
   setMediaEndpoint,
   type AppInfo,
   type BugDetail,
   type BugSummary,
   type ExportResult,
   type OpenMediaMode,
-  type SessionStatus,
   type WorkspaceContext,
 } from "./lib/api";
 import { agentApi } from "./lib/agent";
@@ -37,19 +37,27 @@ import {
   getRefreshing,
   subscribeRefresh,
 } from "./lib/refresh";
+import {
+  getUpdateSnapshot,
+  startUpdateStore,
+  subscribeUpdate,
+} from "./lib/update";
 import { AgentPage } from "./components/AgentPage";
 import { AccountPage } from "./components/AccountPage";
+import { Avatar } from "./components/Avatar";
 import { BugDetailDrawer } from "./components/BugDetailDrawer";
 import { FolderPicker } from "./components/FolderPicker";
 import { BugListView } from "./components/BugListView";
 import { LoginGate } from "./components/LoginGate";
 import { McpPage } from "./components/McpPage";
+import { Onboarding } from "./components/Onboarding";
+import { ProjectSettings } from "./components/ProjectSettings";
 import { SettingsPage } from "./components/SettingsPage";
 import { ScrollingName } from "./components/ScrollingName";
 import { SkeletonRows } from "./components/Skeleton";
 import { Button } from "./components/ui";
 
-type View = "bugs" | "agent" | "mcp" | "settings" | "account";
+type View = "bugs" | "projects" | "agent" | "mcp" | "settings" | "account";
 type Scope = "mine" | "all";
 type Toast = { kind: "ok" | "error"; text: string };
 
@@ -81,8 +89,18 @@ const LAYOUT_GUTTER = 32;
 const defaultSidebarWidth = (viewport: number): number =>
   Math.round(Math.min(Math.max(viewport * 0.15, 176), 208));
 
+const RAIL_ANIM: Record<string, string> = {
+  bugs: "rail-bug-jump",
+  projects: "rail-folder-bounce",
+  agent: "rail-bot-shake",
+  mcp: "rail-plug-rise",
+  settings: "rail-settings-spin",
+  account: "rail-avatar-pop",
+};
+
 const NAV: Array<{ id: View; label: string; icon: ReactNode }> = [
   { id: "bugs", label: "缺陷", icon: <Bug size={15} /> },
+  { id: "projects", label: "项目", icon: <FolderGit2 size={15} /> },
   { id: "agent", label: "Agent", icon: <Bot size={15} /> },
   { id: "mcp", label: "MCP", icon: <Plug size={15} /> },
   { id: "settings", label: "设置", icon: <SettingsIcon size={15} /> },
@@ -90,13 +108,14 @@ const NAV: Array<{ id: View; label: string; icon: ReactNode }> = [
 
 export default function App() {
   const [info, setInfo] = useState<AppInfo | null>(null);
-  const [status, setStatus] = useState<SessionStatus | null>(null);
   const [context, setContext] = useState<WorkspaceContext | null>(null);
   const [contextLoading, setContextLoading] = useState(false);
   const [contextError, setContextError] = useState<string | null>(null);
   const [workspaceId, setWorkspaceId] = useState("");
   const [scope, setScope] = useState<Scope>("mine");
   const [view, setView] = useState<View>("bugs");
+  const [railAnim, setRailAnim] = useState<{ id: string; token: number } | null>(null);
+  const railAnimTimer = useRef<number | null>(null);
   const [toast, setToast] = useState<Toast | null>(null);
   const [refreshToken, setRefreshToken] = useState(0);
   const [viewportWidth, setViewportWidth] = useState(() =>
@@ -128,6 +147,16 @@ export default function App() {
     getRefreshing,
     getRefreshing,
   );
+  /** Background update state (checked hourly by the Rust side). */
+  const updateState = useSyncExternalStore(
+    subscribeUpdate,
+    getUpdateSnapshot,
+    getUpdateSnapshot,
+  );
+
+  useEffect(() => {
+    startUpdateStore();
+  }, []);
 
   // Load hidden projects once from config.json. The UI is the source of truth
   // afterwards, so a background `app_info` refresh cannot revert a fresh toggle.
@@ -257,6 +286,25 @@ export default function App() {
     setToast({ kind, text });
   }, []);
 
+  /** Switch views and replay the destination's rail icon animation. */
+  const activateView = useCallback((id: View) => {
+    setView(id);
+    setRailAnim({ id, token: Date.now() });
+    if (railAnimTimer.current !== null) {
+      window.clearTimeout(railAnimTimer.current);
+    }
+    railAnimTimer.current = window.setTimeout(() => setRailAnim(null), 720);
+  }, []);
+
+  useEffect(
+    () => () => {
+      if (railAnimTimer.current !== null) {
+        window.clearTimeout(railAnimTimer.current);
+      }
+    },
+    [],
+  );
+
   /** Monotonic id so a slow detail response cannot replace a newer bug. */
   const detailSeq = useRef(0);
 
@@ -297,8 +345,12 @@ export default function App() {
           // Mount the pane at zero width, then grow it on the next frame so the
           // width transition runs from a painted starting value.
           setDetailRendered(true);
+          // Two frames: the first paints the zero-width pane, the second starts
+          // the width transition so the list and pane move together.
           window.requestAnimationFrame(() => {
-            if (seq === detailSeq.current) setDetailOpen(true);
+            window.requestAnimationFrame(() => {
+              if (seq === detailSeq.current) setDetailOpen(true);
+            });
           });
         });
     } else {
@@ -372,12 +424,8 @@ export default function App() {
 
   const refreshBase = useCallback(async () => {
     try {
-      const [nextInfo, nextStatus] = await Promise.all([
-        api.appInfo(),
-        api.sessionStatus(),
-      ]);
+      const nextInfo = await api.appInfo();
       setInfo(nextInfo);
-      setStatus(nextStatus);
       setMediaEndpoint(nextInfo);
     } catch (error) {
       showToast("error", String(error));
@@ -452,15 +500,20 @@ export default function App() {
     }
   }, []);
 
+  // Entering the account view refreshes the identity/session snapshot, so a
+  // changed company/name (or a newly cached avatar) shows up immediately.
+  useEffect(() => {
+    if (view !== "account") return;
+    void refreshBase();
+    void loadContext();
+  }, [view, refreshBase, loadContext]);
+
   useEffect(() => {
     void refreshBase();
     const unlisteners: Array<() => void> = [];
     void onSessionChanged(() => {
       void refreshBase();
       setRefreshToken((token) => token + 1);
-    }).then((unlisten) => unlisteners.push(unlisten));
-    void onSessionUrl((url) => {
-      setStatus((previous) => (previous ? { ...previous, url } : previous));
     }).then((unlisten) => unlisteners.push(unlisten));
 
     return () => unlisteners.forEach((unlisten) => unlisten());
@@ -591,8 +644,9 @@ export default function App() {
         const name =
           context?.workspaces.find((item) => item.id === target.workspaceId)?.name ?? null;
         const result = await api.exportBugMd(target.workspaceId, target.id, name);
+        // Success is reported by the inline export panel in the detail pane;
+        // a toast on top of it is just noise.
         setLastExport(result);
-        showToast("ok", `已导出 ${result.assetCount} 个资源：${result.markdownPath}`);
       } catch (error) {
         showToast("error", String(error));
       } finally {
@@ -849,29 +903,29 @@ export default function App() {
   const title =
     view === "bugs"
       ? workspace?.name ?? "缺陷"
-      : view === "agent"
-        ? "Agent"
-        : view === "mcp"
-          ? "MCP"
-          : view === "account"
-            ? "账户与会话"
-            : "设置";
+      : view === "projects"
+        ? "项目管理"
+        : view === "agent"
+          ? "Agent"
+          : view === "mcp"
+            ? "MCP"
+            : view === "account"
+              ? "账户与会话"
+              : "设置";
   const subtitle =
     view === "bugs"
       ? workspace
         ? `项目 ${workspace.id} · ${scope === "mine" ? "我负责的" : "全部缺陷"}`
         : "选择左侧项目开始"
-      : view === "agent"
-        ? "运行 opencode、审核权限与查看执行历史"
-        : view === "mcp"
-          ? "接入 AI 客户端与一键导入 opencode"
-          : view === "account"
-            ? "登录状态、当前用户与会话窗口"
-            : "项目、通知与 AI 配置";
-
-  const accountName = context?.user.nick || info.me || "TAPD";
-  const accountInitial =
-    Array.from(accountName.trim())[0]?.toUpperCase() ?? "T";
+      : view === "projects"
+        ? "显示、本地文件夹与 Agent 规则"
+        : view === "agent"
+          ? "运行 opencode、审核权限与查看执行历史"
+          : view === "mcp"
+            ? "接入 AI 客户端与一键导入 opencode"
+            : view === "account"
+              ? ""
+              : "通知与 AI 配置";
 
   return (
     <div
@@ -880,17 +934,51 @@ export default function App() {
         (resizingSidebar || resizingDetail) && "select-none",
       )}
     >
-      {/* macOS traffic lights live over this strip; whole strip drags the window. */}
+      {/* macOS traffic lights live over this strip; the strip itself drags the
+          window. The update button below has no drag attribute, so clicking it
+          still opens the panel instead of moving the window. */}
       <div
         className="relative flex h-11 shrink-0 items-center gap-2 px-4"
         data-tauri-drag-region
       >
-        {/* No window title: the strip only hosts the traffic lights + drag. */}
-        <span className="ml-[62px] flex-1" data-tauri-drag-region />
+        <span className="ml-[62px] h-full flex-1" data-tauri-drag-region />
         {refreshing ? (
           <div className="pointer-events-none absolute inset-x-0 flex items-center justify-center gap-1.5 text-[11px] text-slate-400">
             <Loader2 size={12} className="animate-spin" />
             更新中
+          </div>
+        ) : null}
+
+        {/* The update icon only exists while a newer release is known. */}
+        {updateState?.available ? (
+          <div className="group relative shrink-0">
+            <button
+              type="button"
+              onClick={() => activateView("account")}
+              title={`发现新版本 v${updateState.available.version}`}
+              className="grid h-7 w-7 place-items-center rounded-lg text-emerald-600 transition hover:bg-emerald-50"
+            >
+              <span className="relative">
+                <ArrowUpCircle size={16} />
+                <span className="absolute -right-1 -top-1 h-1.5 w-1.5 rounded-full bg-emerald-500 ring-2 ring-[#f4f4f2]" />
+              </span>
+            </button>
+
+            <div className="pointer-events-none invisible absolute right-0 top-9 z-50 w-80 translate-y-1 rounded-xl bg-slate-900/95 p-3 text-slate-200 opacity-0 shadow-2xl ring-1 ring-white/10 backdrop-blur-xl transition-all duration-150 group-hover:visible group-hover:translate-y-0 group-hover:opacity-100">
+              <div className="flex items-center gap-2 text-[11px]">
+                <ArrowUpCircle size={13} className="text-emerald-400" />
+                <span className="font-semibold text-slate-100">
+                  新版本 v{updateState.available.version}
+                </span>
+                <span className="ml-auto text-[10px] text-slate-400">更新日志</span>
+              </div>
+              <p className="mt-2 max-h-56 overflow-y-auto whitespace-pre-line text-[11px] leading-5 text-slate-300">
+                {updateState.available.notes}
+              </p>
+              <p className="mt-2 border-t border-white/10 pt-2 text-[10px] text-slate-400">
+                点击前往账户页更新
+              </p>
+            </div>
           </div>
         ) : null}
       </div>
@@ -905,7 +993,7 @@ export default function App() {
                 type="button"
                 title={item.label}
                 aria-label={item.label}
-                onClick={() => setView(item.id)}
+                onClick={() => activateView(item.id)}
                 className={clsx(
                   "grid h-9 w-9 place-items-center rounded-xl transition",
                   view === item.id
@@ -913,7 +1001,15 @@ export default function App() {
                     : "text-slate-500 hover:bg-black/[0.04] hover:text-slate-700",
                 )}
               >
-                {item.icon}
+                <span
+                  key={railAnim?.id === item.id ? railAnim.token : "idle"}
+                  className={clsx(
+                    "inline-flex items-center justify-center",
+                    railAnim?.id === item.id && RAIL_ANIM[item.id],
+                  )}
+                >
+                  {item.icon}
+                </span>
               </button>
             ))}
           </div>
@@ -932,10 +1028,22 @@ export default function App() {
               type="button"
               title="账户与会话"
               aria-label="账户与会话"
-              onClick={() => setView("account")}
-              className="relative grid h-8 w-8 place-items-center rounded-full bg-gradient-to-br from-sky-400 to-emerald-400 text-[11px] font-semibold text-white shadow-sm ring-2 ring-white transition hover:brightness-105"
+              onClick={() => activateView("account")}
+              className="relative h-8 w-8 rounded-full transition hover:brightness-105"
             >
-              {accountInitial}
+              <span
+                key={railAnim?.id === "account" ? railAnim.token : "idle"}
+                className={clsx(
+                  "inline-flex items-center justify-center",
+                  railAnim?.id === "account" && RAIL_ANIM.account,
+                )}
+              >
+                <Avatar
+                  src={info.meAvatar}
+                  name={context?.user.nick || info.me}
+                  className="h-8 w-8 text-[11px] shadow-sm ring-2 ring-white"
+                />
+              </span>
               <span className="absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 rounded-full border-2 border-[#f4f4f2] bg-emerald-500" />
             </button>
           </div>
@@ -943,7 +1051,7 @@ export default function App() {
             type="button"
             title="设置"
             aria-label="设置"
-            onClick={() => setView("settings")}
+            onClick={() => activateView("settings")}
             className={clsx(
               "grid h-9 w-9 place-items-center rounded-xl transition",
               view === "settings"
@@ -951,7 +1059,15 @@ export default function App() {
                 : "text-slate-500 hover:bg-black/[0.04] hover:text-slate-700",
             )}
           >
-            <SettingsIcon size={15} />
+            <span
+              key={railAnim?.id === "settings" ? railAnim.token : "idle"}
+              className={clsx(
+                "inline-flex items-center justify-center",
+                railAnim?.id === "settings" && RAIL_ANIM.settings,
+              )}
+            >
+              <SettingsIcon size={15} />
+            </span>
           </button>
         </div>
 
@@ -1007,7 +1123,7 @@ export default function App() {
 
             {context && visibleWorkspaces.length === 0 ? (
               <div className="rounded-lg border border-dashed border-slate-200 px-2.5 py-3 text-[11px] leading-5 text-slate-400">
-                项目已全部隐藏，可在设置 → 项目中恢复显示。
+                项目已全部隐藏，可在「项目」tab 中恢复显示。
               </div>
             ) : null}
 
@@ -1050,7 +1166,7 @@ export default function App() {
 
           <button
             type="button"
-            onClick={() => setView("account")}
+            onClick={() => activateView("account")}
             title="账户与会话"
             className={clsx(
               "group flex w-full items-center gap-2.5 border-t border-black/[0.06] px-3 py-2.5 text-left transition",
@@ -1059,8 +1175,12 @@ export default function App() {
                 : "hover:bg-black/[0.035]",
             )}
           >
-            <span className="relative grid h-7 w-7 shrink-0 place-items-center rounded-full bg-gradient-to-br from-sky-400 to-emerald-400 text-[10px] font-semibold text-white shadow-sm">
-              {accountInitial}
+            <span className="relative shrink-0">
+              <Avatar
+                src={info.meAvatar}
+                name={context?.user.nick || info.me}
+                className="h-7 w-7 text-[10px] shadow-sm"
+              />
               <span className="absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 rounded-full border-2 border-[#f4f4f2] bg-emerald-500" />
             </span>
             <span className="min-w-0 flex-1">
@@ -1119,7 +1239,9 @@ export default function App() {
               <h1 className="truncate text-[13px] font-semibold leading-5 text-slate-900">
                 {title}
               </h1>
-              <p className="truncate text-[11px] leading-4 text-slate-400">{subtitle}</p>
+              {subtitle ? (
+                <p className="truncate text-[11px] leading-4 text-slate-400">{subtitle}</p>
+              ) : null}
             </div>
 
           </header>
@@ -1162,6 +1284,17 @@ export default function App() {
                 />
               </div>
             )
+          ) : view === "projects" ? (
+            <div className="min-h-0 flex-1 overflow-y-auto p-5">
+              <div className="mx-auto max-w-4xl">
+                <ProjectSettings
+                  context={context}
+                  hiddenWorkspaceIds={hiddenWorkspaceIds}
+                  onSetWorkspaceVisible={setWorkspaceVisible}
+                  toast={showToast}
+                />
+              </div>
+            </div>
           ) : view === "agent" ? (
             <AgentPage
               focusTaskId={agentFocusTaskId}
@@ -1170,13 +1303,16 @@ export default function App() {
             />
           ) : view === "mcp" ? (
             <div className="min-h-0 flex-1 overflow-y-auto p-5">
-              <McpPage onCopy={copy} toast={showToast} />
+              <McpPage
+                workspaces={context?.workspaces ?? []}
+                onCopy={copy}
+                toast={showToast}
+              />
             </div>
           ) : view === "account" ? (
             <div className="min-h-0 flex-1 overflow-y-auto p-5">
               <AccountPage
                 info={info}
-                status={status}
                 context={context}
                 onShowLogin={() => {
                   void api
@@ -1185,18 +1321,25 @@ export default function App() {
                     .catch((error) => showToast("error", String(error)));
                 }}
                 onLogout={handleLogout}
-                onRefresh={() => void refreshBase()}
+                onRefresh={() => {
+                  void refreshBase();
+                  void loadContext();
+                }}
+                toast={showToast}
               />
             </div>
           ) : (
             <div className="min-h-0 flex-1 overflow-y-auto p-5">
               <SettingsPage
                 info={info}
-                context={context}
                 onOpenPath={openPath}
                 onCopy={(text) => void copy(text)}
-                hiddenWorkspaceIds={hiddenWorkspaceIds}
-                onSetWorkspaceVisible={setWorkspaceVisible}
+                onShowOnboarding={() => {
+                  void api
+                    .resetOnboarding()
+                    .then(() => refreshBase())
+                    .catch((error) => showToast("error", String(error)));
+                }}
                 toast={showToast}
               />
             </div>
@@ -1297,13 +1440,17 @@ export default function App() {
             type="button"
             onClick={() => {
               setProjectMenu(null);
-              setView("settings");
+              setView("projects");
             }}
             className="flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left transition hover:bg-slate-100"
           >
-            在设置中管理项目
+            管理项目
           </button>
         </div>
+      ) : null}
+
+      {!info.onboarded ? (
+        <Onboarding info={info} onDone={() => void refreshBase()} />
       ) : null}
 
       {toastNode}
