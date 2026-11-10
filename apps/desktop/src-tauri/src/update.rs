@@ -191,9 +191,9 @@ impl UpdateService {
             if should_emit {
                 inner.last_emit = Some(now);
             }
-            let percent = total.filter(|total| *total > 0).map(|total| {
-                ((received as f64 / total as f64) * 100.0).clamp(0.0, 100.0)
-            });
+            let percent = total
+                .filter(|total| *total > 0)
+                .map(|total| ((received as f64 / total as f64) * 100.0).clamp(0.0, 100.0));
             inner.progress = Some(UpdateProgress {
                 received,
                 total,
@@ -265,11 +265,7 @@ pub fn init(app: &AppHandle, state: SharedState) {
     });
 }
 
-async fn check(
-    app: &AppHandle,
-    state: &SharedState,
-    manual: bool,
-) -> Result<UpdateState, String> {
+async fn check(app: &AppHandle, state: &SharedState, manual: bool) -> Result<UpdateState, String> {
     let service = SERVICE
         .get()
         .ok_or_else(|| "update service not initialized".to_string())?;
@@ -492,4 +488,3 @@ pub fn update_open_manual() -> Result<(), String> {
         .map(|_| ())
         .map_err(|error| error.to_string())
 }
-

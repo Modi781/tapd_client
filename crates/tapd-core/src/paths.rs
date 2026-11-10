@@ -7,6 +7,10 @@ use serde::{Deserialize, Serialize};
 /// macOS layout:
 /// - data:    ~/Library/Application Support/com.tapdclient.desktop
 /// - exports: ~/Documents/TAPDClient/exports
+///
+/// Debug builds (all `pnpm dev` runs) use a sibling `_dev` data directory, so a
+/// development login/cache can never make an installed release build believe it
+/// is still signed in.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppPaths {
@@ -21,16 +25,20 @@ pub struct AppPaths {
 impl AppPaths {
     pub fn resolve() -> std::io::Result<Self> {
         let home = home_dir()?;
+        #[cfg(debug_assertions)]
+        let app_data_name = "com.tapdclient.desktop_dev";
+        #[cfg(not(debug_assertions))]
+        let app_data_name = "com.tapdclient.desktop";
 
         #[cfg(target_os = "macos")]
-        let data_dir = home.join("Library/Application Support/com.tapdclient.desktop");
+        let data_dir = home.join("Library/Application Support").join(app_data_name);
         #[cfg(target_os = "windows")]
         let data_dir = std::env::var_os("APPDATA")
             .map(PathBuf::from)
             .unwrap_or_else(|| home.join("AppData/Roaming"))
-            .join("com.tapdclient.desktop");
+            .join(app_data_name);
         #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
-        let data_dir = home.join(".local/share/com.tapdclient.desktop");
+        let data_dir = home.join(".local/share").join(app_data_name);
 
         let logs_dir = data_dir.join("logs");
         let captures_dir = data_dir.join("captures");

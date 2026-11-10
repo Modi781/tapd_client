@@ -1,4 +1,7 @@
-use std::time::Duration;
+use std::{
+    sync::atomic::{AtomicBool, Ordering},
+    time::Duration,
+};
 
 use serde::Serialize;
 use serde_json::Value;
@@ -317,14 +320,23 @@ pub async fn session_logout(
     app: AppHandle,
     state: State<'_, SharedState>,
 ) -> Result<(), String> {
-    state
-        .update_config(|config| {
-            config.logged_in = false;
-            config.me = None;
-            config.me_avatar = None;
-            config.last_session_url = None;
-        })
-        .map_err(|error| error.to_string())?;
+    logout_session(&app, state.inner(), "logout").await;
+    Ok(())
+}
+
+/// Clears the TAPD session in config, cache, cookies and the hidden webview.
+///
+/// Shared by the explicit "退出登录" action and automatic expiry detection, so
+/// both paths leave the app on the login screen with no stale identity left.
+pub(crate) async fn logout_session(app: &AppHandle, state: &SharedState, reason: &str) {
+    if let Err(error) = state.update_config(|config| {
+        config.logged_in = false;
+        config.me = None;
+        config.me_avatar = None;
+        config.last_session_url = None;
+    }) {
+        tracing::warn!(%error, reason, "failed to clear session config");
+    }
 
     // Drop cached user/project/bug data: it belongs to the session being ended.
     // Best effort — a broken cache must never block logging out.
@@ -335,6 +347,7 @@ pub async fn session_logout(
     // Keep the URL watcher from resurrecting the old session while TAPD boots.
     // The login page takes a few seconds to settle, so cover the whole window.
     session::begin_logout_guard(30_000);
+    let _ = app.emit("session://changed", ());
 
     if let Some(window) = app.get_webview_window(session::SESSION_LABEL) {
         // Clear page storage while the webview is still on the TAPD origin.
@@ -355,6 +368,7 @@ pub async fn session_logout(
 
         let window_for_reload = window.clone();
         let app_for_emit = app.clone();
+        let reason = reason.to_string();
         tauri::async_runtime::spawn(async move {
             // Give WKWebsiteDataStore time to actually remove the cookies
             // before loading TAPD again, otherwise the SPA signs straight back
@@ -372,13 +386,55 @@ pub async fn session_logout(
 
             tracing::info!(
                 cookies_removed = removed + removed_again,
+                reason,
                 "session cleared"
             );
         });
     }
+}
 
-    let _ = app.emit("session://changed", ());
-    Ok(())
+/// A TAPD response proves the session is gone: an explicit 401, a redirect
+/// that landed on the login page, or the login shell returned in place of an
+/// API body. Transient network errors never match.
+fn session_expired(http: &BridgeHttpResult) -> bool {
+    if http.status == 401 || session::looks_like_auth_page(&http.url) {
+        return true;
+    }
+
+    let content_type = http
+        .content_type
+        .as_deref()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if !content_type.contains("text/html") {
+        return false;
+    }
+
+    let head = http
+        .body
+        .chars()
+        .take(2400)
+        .collect::<String>()
+        .to_ascii_lowercase();
+    head.contains("wwlogin") || head.contains("<title>登录") || head.contains("<title>企业微信")
+}
+
+/// Guards against several in-flight requests all clearing the session at once.
+static EXPIRING: AtomicBool = AtomicBool::new(false);
+
+/// Signs out once when an authenticated TAPD call reports an expired session.
+pub(crate) async fn expire_session(app: &AppHandle) {
+    let Some(state) = app.try_state::<SharedState>() else {
+        return;
+    };
+    let logged_in = state.config.lock().expect("config lock").logged_in;
+    if !logged_in || EXPIRING.swap(true, Ordering::SeqCst) {
+        return;
+    }
+
+    tracing::warn!("TAPD session expired; signing out");
+    logout_session(app, state.inner(), "expired").await;
+    EXPIRING.store(false, Ordering::SeqCst);
 }
 
 /// Removes every TAPD cookie from a webview and returns how many were deleted.
@@ -867,6 +923,14 @@ pub(crate) async fn session_request_text(
     let value = session::eval_async_json(&window, &expression, timeout).await?;
     let http: BridgeHttpResult = serde_json::from_value(value)
         .map_err(|error| format!("unexpected bridge payload: {error}"))?;
+
+    // An expired TAPD session usually surfaces as a 401 or a redirect to the
+    // login page. Detect it on every authenticated call so cached data never
+    // makes the app look signed in after the cookie has gone stale.
+    if session_expired(&http) {
+        expire_session(app).await;
+        return Err("TAPD 登录状态已失效，请重新扫码登录".to_string());
+    }
 
     if !http.ok {
         let preview: String = http.body.chars().take(240).collect();

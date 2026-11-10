@@ -190,6 +190,7 @@ pub fn spawn_session_watcher(app: AppHandle, state: SharedState) {
             let auth_page = looks_like_auth_page(&url_string);
 
             let mut login_changed = false;
+            let mut expired = false;
             let mut open_login = false;
             let persisted = state.update_config(|config| {
                 config.last_session_url = Some(url_string.clone());
@@ -206,7 +207,10 @@ pub fn spawn_session_watcher(app: AppHandle, state: SharedState) {
                     // The login screen picks it up from the hidden webview; the
                     // window itself must never pop up on its own.
                     config.logged_in = false;
+                    config.me = None;
+                    config.me_avatar = None;
                     login_changed = true;
+                    expired = true;
                 }
 
                 // TAPD's marketing home never redirects to the login form on
@@ -223,6 +227,13 @@ pub fn spawn_session_watcher(app: AppHandle, state: SharedState) {
                 LOGIN_BOUNCE_UNTIL.store(now_millis() + 5000, Ordering::SeqCst);
                 if let Ok(login) = tauri::Url::parse(TAPD_LOGIN) {
                     let _ = window.navigate(login);
+                }
+            }
+
+            if expired {
+                // Cached projects/bugs belong to the session that just ended.
+                if let Err(error) = state.cache.clear() {
+                    tracing::warn!(%error, "failed to clear offline cache after session expiry");
                 }
             }
 
