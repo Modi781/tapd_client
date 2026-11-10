@@ -16,6 +16,9 @@ pub const SESSION_LABEL: &str = "tapd-session";
 /// from the still-loaded TAPD page (navigation happens asynchronously).
 static LOGOUT_GUARD_UNTIL: AtomicU64 = AtomicU64::new(0);
 
+/// Throttles navigating a logged-out webview away from TAPD's marketing home.
+static LOGIN_BOUNCE_UNTIL: AtomicU64 = AtomicU64::new(0);
+
 fn now_millis() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -33,6 +36,19 @@ fn logout_in_progress() -> bool {
     now_millis() < LOGOUT_GUARD_UNTIL.load(Ordering::SeqCst)
 }
 pub const TAPD_HOME: &str = "https://www.tapd.cn/";
+/// Server-rendered login page. TAPD's marketing home does not redirect logged
+/// out visitors here, so the hidden webview must open it directly.
+pub const TAPD_LOGIN: &str = "https://www.tapd.cn/cloud_logins/login?";
+
+/// True for the marketing home (`tapd.cn/`), which is not a login page.
+pub fn is_bare_tapd_home(raw: &str) -> bool {
+    let lower = raw.to_ascii_lowercase();
+    let Some((_, rest)) = lower.split_once("tapd.cn") else {
+        return false;
+    };
+    let path = rest.split(['?', '#']).next().unwrap_or("");
+    path.is_empty() || path == "/"
+}
 
 /// TAPD redirects into a workspace shell after a successful login.
 pub fn is_logged_in_url(raw: &str) -> bool {
@@ -87,8 +103,12 @@ pub fn ensure_session_window(
         return Ok(window);
     }
 
-    let _ = state;
-    let url = tauri::Url::parse(TAPD_HOME).map_err(|e| e.to_string())?;
+    let logged_in = {
+        let config = state.config.lock().expect("config lock");
+        config.logged_in
+    };
+    let target = if logged_in { TAPD_HOME } else { TAPD_LOGIN };
+    let url = tauri::Url::parse(target).map_err(|e| e.to_string())?;
 
     let window = WebviewWindowBuilder::new(app, SESSION_LABEL, WebviewUrl::External(url))
         .title("登录 TAPD")
@@ -170,8 +190,10 @@ pub fn spawn_session_watcher(app: AppHandle, state: SharedState) {
             let auth_page = looks_like_auth_page(&url_string);
 
             let mut login_changed = false;
+            let mut open_login = false;
             let snapshot = {
                 let mut config = state.config.lock().expect("config lock");
+                let url_changed = config.last_session_url.as_deref() != Some(url_string.as_str());
                 config.last_session_url = Some(url_string.clone());
 
                 // A logout just cleared cookies and is still navigating: don't
@@ -189,7 +211,13 @@ pub fn spawn_session_watcher(app: AppHandle, state: SharedState) {
                     login_changed = true;
                 }
 
-                if login_changed {
+                // TAPD's marketing home never redirects to the login form on
+                // its own, which would leave the hidden webview stuck there.
+                if !suppress_login && !config.logged_in && is_bare_tapd_home(&url_string) {
+                    open_login = true;
+                }
+
+                if login_changed || url_changed {
                     Some(config.clone())
                 } else {
                     None
@@ -199,6 +227,13 @@ pub fn spawn_session_watcher(app: AppHandle, state: SharedState) {
             if let Some(snapshot) = snapshot {
                 if let Err(error) = state.save_config(&snapshot) {
                     tracing::warn!(%error, "failed to persist session state");
+                }
+            }
+
+            if open_login && now_millis() > LOGIN_BOUNCE_UNTIL.load(Ordering::SeqCst) {
+                LOGIN_BOUNCE_UNTIL.store(now_millis() + 5000, Ordering::SeqCst);
+                if let Ok(login) = tauri::Url::parse(TAPD_LOGIN) {
+                    let _ = window.navigate(login);
                 }
             }
 

@@ -13,6 +13,7 @@ import {
   Video,
 } from "lucide-react";
 
+import appIcon from "../assets/app-icon.png";
 import { api, type AppInfo, type LoginQrState } from "../lib/api";
 import { CodeRain } from "./CodeRain";
 
@@ -223,8 +224,13 @@ export function LoginGate({ info, onRefresh, onToast }: Props) {
 
         <div className="relative z-10 px-10 pb-10">
           <div className="flex items-center gap-3">
-            <div className="grid h-11 w-11 place-items-center rounded-2xl bg-gradient-to-br from-sky-400 to-emerald-400 text-slate-900 shadow-lg shadow-sky-500/20">
-              <Bug size={22} strokeWidth={2.3} />
+            <div className="grid h-11 w-11 place-items-center rounded-2xl bg-white shadow-[0_10px_24px_-12px_rgba(2,132,199,0.55)] ring-1 ring-black/5">
+              <img
+                src={appIcon}
+                alt="TAPD 客户端"
+                draggable={false}
+                className="h-9 w-9 select-none object-contain"
+              />
             </div>
             <div>
               <div className="text-[17px] font-semibold tracking-tight text-slate-900">

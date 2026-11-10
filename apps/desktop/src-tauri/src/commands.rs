@@ -226,15 +226,38 @@ pub async fn session_refresh_qr(app: AppHandle) -> Result<(), String> {
     .map(|_| ())
 }
 
-/// Reloads the hidden webview, used when the login page is stuck.
+/// Clears any half-finished/expired TAPD session and opens a clean login page.
+///
+/// The login screen calls this on mount and from its refresh action: a stale
+/// `tapdsession` cookie otherwise makes TAPD skip the form and render an
+/// unrelated 404 shell, which looks like an endless spinner.
 #[tauri::command]
-pub fn session_reload_login(
+pub async fn session_reload_login(
     app: AppHandle,
     state: State<'_, SharedState>,
 ) -> Result<(), String> {
+    let logged_in = {
+        let config = state.config.lock().expect("config lock");
+        config.logged_in
+    };
+    if logged_in {
+        return Ok(());
+    }
+
     let window = session::ensure_session_window(&app, state.inner(), false)?;
-    let url = tauri::Url::parse(session::TAPD_HOME).map_err(|error| error.to_string())?;
-    window.navigate(url).map_err(|error| error.to_string())
+    let _ = window.eval(
+        "try { localStorage.clear(); sessionStorage.clear(); } catch (error) {}",
+    );
+    let _ = clear_tapd_cookies(&window);
+    let _ = window.clear_all_browsing_data();
+
+    // Wait for WKWebsiteDataStore to drop the cookies before loading the form,
+    // otherwise the old session cookie is sent again.
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    let url = tauri::Url::parse(session::TAPD_LOGIN).map_err(|error| error.to_string())?;
+    window.navigate(url).map_err(|error| error.to_string())?;
+    let _ = window.hide();
+    Ok(())
 }
 
 #[tauri::command]
@@ -315,8 +338,8 @@ pub async fn session_logout(
             let _ = window_for_reload.clear_all_browsing_data();
             let removed_again = clear_tapd_cookies(&window_for_reload);
 
-            if let Ok(home) = tauri::Url::parse(session::TAPD_HOME) {
-                let _ = window_for_reload.navigate(home);
+            if let Ok(login) = tauri::Url::parse(session::TAPD_LOGIN) {
+                let _ = window_for_reload.navigate(login);
             }
             // Stay hidden: the login screen shows the new QR code in place.
             let _ = window_for_reload.hide();

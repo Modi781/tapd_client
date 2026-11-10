@@ -302,7 +302,53 @@
     lastRefresh: 0,
     qrShownAt: 0,
     sawQr: false,
+    sawScan: false,
+    badLoginAt: 0,
   };
+
+  /// The WeCom panel offers an automatic "quick login" when the desktop app is
+  /// running. Disable it so the QR code is the only entry point and the login
+  /// always finishes in the hidden webview (the browser redirect).
+  function disableQuickLoginOnFrame(frame) {
+    if (!frame || !frame.getAttribute) return;
+    var src = frame.getAttribute("src") || "";
+    if (!src || src.indexOf("work.weixin.qq.com") === -1) return;
+    if (src.indexOf("disable_quick_login") !== -1) return;
+
+    var joiner = src.indexOf("?") === -1 ? "?" : "&";
+    frame.setAttribute("src", src + joiner + "disable_quick_login=true");
+  }
+
+  function patchWecomFrames() {
+    var frames = document.querySelectorAll('iframe[src*="work.weixin.qq.com"]');
+    for (var index = 0; index < frames.length; index += 1) {
+      disableQuickLoginOnFrame(frames[index]);
+    }
+  }
+
+  function observeWecomFrames() {
+    var root = document.documentElement || document;
+    if (!root) return;
+    var observer = new MutationObserver(function (mutations) {
+      for (var index = 0; index < mutations.length; index += 1) {
+        var added = mutations[index].addedNodes;
+        for (var nodeIndex = 0; nodeIndex < added.length; nodeIndex += 1) {
+          var node = added[nodeIndex];
+          if (!node || node.nodeType !== 1) continue;
+          if (node.tagName === "IFRAME") {
+            disableQuickLoginOnFrame(node);
+          } else if (node.querySelectorAll) {
+            var frames = node.querySelectorAll('iframe[src*="work.weixin.qq.com"]');
+            for (var frameIndex = 0; frameIndex < frames.length; frameIndex += 1) {
+              disableQuickLoginOnFrame(frames[frameIndex]);
+            }
+          }
+        }
+      }
+    });
+    observer.observe(root, { childList: true, subtree: true });
+    patchWecomFrames();
+  }
 
   function compactText(node) {
     return String((node && node.textContent) || "")
@@ -368,11 +414,32 @@
   function scanTopLoginPage() {
     if (!isTopFrame || !tapdHost) return;
     if (!isAuthPath(window.location.href)) return;
+    // Covers iframes whose src was assigned after insertion.
+    patchWecomFrames();
 
     var tab = document.querySelector(".login-tab-qy");
     if (!tab) {
       var form = document.querySelector("#login_cn_form, .login-form");
       if (!form) {
+        // `/login` is TAPD's SPA shell; with a half-finished session it renders
+        // "查找不到对应项目" instead of redirecting. Tell the UI to refresh,
+        // which clears the stale cookie and opens the real login form.
+        if (window.location.pathname === "/login") {
+          if (!loginBridge.badLoginAt) loginBridge.badLoginAt = Date.now();
+          if (Date.now() - loginBridge.badLoginAt > 2500) {
+            publishLogin({
+              phase: "error",
+              qrUrl: null,
+              name: null,
+              avatarUrl: null,
+              corp: null,
+              message: "登录页状态异常，请刷新二维码",
+              host: "tapd.cn",
+            });
+            return;
+          }
+        }
+
         // The WeCom/OAuth callback page is not the login form; a login is
         // already in flight and will land on the workspace shortly.
         publishLogin({
@@ -397,6 +464,8 @@
       });
       return;
     }
+
+    loginBridge.badLoginAt = 0;
 
     var container = document.querySelector("#ww-login-container");
     var hasPanel = !!(container && container.children.length > 0);
@@ -469,6 +538,7 @@
           state.phase = "expired";
           state.message = "二维码已过期";
         } else if (tip.indexOf("成功") !== -1 || tip.indexOf("确认") !== -1) {
+          loginBridge.sawScan = true;
           state.phase = "scanned";
           state.message = tip || "扫码成功，请在手机上确认";
         } else {
@@ -491,12 +561,22 @@
         state.corp = corp || null;
         state.avatarUrl = avatarEl ? absoluteAsset(avatarEl.src) : null;
 
-        if (!loginBridge.sawQr) {
-          // WeCom desktop is running and offered its own quick login before
-          // any QR was displayed. Force the QR view so the user scans.
+        // The desktop quick-login panel can appear either before a scan (the
+        // WeCom desktop account) or after one. Only the latter may continue:
+        // a real scan leaves the "扫码成功" tip behind, and a QR that has been
+        // on screen for a while means the user had time to scan.
+        var canContinue =
+          loginBridge.sawScan ||
+          (loginBridge.sawQr && Date.now() - loginBridge.qrShownAt > 10000);
+
+        if (!canContinue) {
+          // WeCom desktop offered its own quick login before any scan. Force
+          // the QR view so the only way in is scanning.
           state.phase = "loading";
           state.message = "正在加载二维码";
           state.qrUrl = null;
+          loginBridge.sawQr = false;
+          loginBridge.qrShownAt = 0;
           var switcher = quick.querySelector(".wwLogin_quick_switch");
           if (switcher && Date.now() - loginBridge.lastSwitch > 1600) {
             loginBridge.lastSwitch = Date.now();
@@ -513,7 +593,6 @@
           if (
             browserLink &&
             /浏览器/.test(compactText(browserLink)) &&
-            Date.now() - loginBridge.qrShownAt > 2500 &&
             Date.now() - loginBridge.lastLinkClick > 3500
           ) {
             loginBridge.lastLinkClick = Date.now();
@@ -575,6 +654,7 @@
   }
 
   if (isTopFrame) {
+    observeWecomFrames();
     window.addEventListener("message", function (event) {
       var data = event.data;
       if (data && data.__tapdcb === "login" && data.state) {
