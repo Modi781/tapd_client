@@ -5,4 +5,4 @@ target/
 *.log
 apps/desktop/src-tauri/gen/schemas/
 apps/desktop/src-tauri/target/
-binaries/
+apps/desktop/src-tauri/binaries/

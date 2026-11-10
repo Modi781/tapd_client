@@ -30,7 +30,9 @@ import {
   type SessionStatus,
   type WorkspaceContext,
 } from "./lib/api";
+import { agentApi } from "./lib/agent";
 import { BugDetailDrawer } from "./components/BugDetailDrawer";
+import { FolderPicker } from "./components/FolderPicker";
 import { BugListView } from "./components/BugListView";
 import { CapturesPage } from "./components/CapturesPage";
 import { LoginGate } from "./components/LoginGate";
@@ -42,10 +44,25 @@ type View = "bugs" | "captures" | "settings";
 type Scope = "mine" | "all";
 type Toast = { kind: "ok" | "error"; text: string };
 
+/** Minimal bug shape needed to enqueue an Agent task. */
+type AgentTarget = {
+  workspaceId: string;
+  id: string;
+  title: string;
+  severityLabel: string;
+  priorityLabel: string;
+  workspaceName?: string;
+};
+
 // Project sidebar sizing. Dragging below the minimum collapses it.
-const DEFAULT_SIDEBAR_WIDTH = 264;
 const MIN_SIDEBAR_WIDTH = 208;
 const MAX_SIDEBAR_WIDTH = 420;
+/** Content area that must stay usable; the sidebar yields space below this. */
+const MIN_CONTENT_WIDTH = 460;
+
+/** Default sidebar width for the current window: ~20%, clamped. */
+const defaultSidebarWidth = (viewport: number): number =>
+  Math.round(Math.min(Math.max(viewport * 0.2, MIN_SIDEBAR_WIDTH), 336));
 
 const NAV: Array<{ id: View; label: string; icon: ReactNode }> = [
   { id: "bugs", label: "缺陷", icon: <Bug size={15} /> },
@@ -64,9 +81,33 @@ export default function App() {
   const [view, setView] = useState<View>("bugs");
   const [toast, setToast] = useState<Toast | null>(null);
   const [refreshToken, setRefreshToken] = useState(0);
-  const [sidebarWidth, setSidebarWidth] = useState(DEFAULT_SIDEBAR_WIDTH);
+  const [viewportWidth, setViewportWidth] = useState(() =>
+    typeof window === "undefined" ? 1280 : window.innerWidth,
+  );
+  const [sidebarWidth, setSidebarWidth] = useState(() => defaultSidebarWidth(1280));
+  const [sidebarSized, setSidebarSized] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [resizingSidebar, setResizingSidebar] = useState(false);
+  /** Set when the user asks for an Agent fix without a configured folder. */
+  const [pendingAgent, setPendingAgent] = useState<AgentTarget | null>(null);
+
+  // The sidebar follows the window until the user drags it once.
+  useEffect(() => {
+    const onResize = () => setViewportWidth(window.innerWidth);
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
+
+  useEffect(() => {
+    if (sidebarSized) return;
+    setSidebarWidth(defaultSidebarWidth(viewportWidth));
+  }, [viewportWidth, sidebarSized]);
+
+  // Never let the sidebar eat the content area on a narrow window.
+  const effectiveSidebarWidth = Math.max(
+    180,
+    Math.min(sidebarCollapsed ? 0 : sidebarWidth, viewportWidth - MIN_CONTENT_WIDTH),
+  );
 
   const [detailOpen, setDetailOpen] = useState(false);
   const [detail, setDetail] = useState<BugDetail | null>(null);
@@ -236,14 +277,7 @@ export default function App() {
     }
   };
 
-  const enqueueAgent = async (target: {
-    workspaceId: string;
-    id: string;
-    title: string;
-    severityLabel: string;
-    priorityLabel: string;
-    workspaceName?: string;
-  }) => {
+  const doEnqueueAgent = async (target: AgentTarget) => {
     const workspaceName =
       target.workspaceName ||
       context?.workspaces.find((item) => item.id === target.workspaceId)?.name ||
@@ -269,6 +303,42 @@ export default function App() {
     } catch (error) {
       showToast("error", String(error));
     }
+  };
+
+  /** Asks for the project folder first when none is configured, then enqueues. */
+  const enqueueAgent = async (target: AgentTarget) => {
+    try {
+      const { config } = await agentApi.configGet();
+      const repoPath = (config.projects?.[target.workspaceId]?.repoPath ?? "").trim();
+      if (!repoPath) {
+        setPendingAgent(target);
+        return;
+      }
+    } catch (error) {
+      showToast("error", String(error));
+      return;
+    }
+    await doEnqueueAgent(target);
+  };
+
+  const applyAgentFolder = async (target: AgentTarget, path: string) => {
+    setPendingAgent(null);
+    try {
+      const { config } = await agentApi.configGet();
+      const projects = {
+        ...(config.projects ?? {}),
+        [target.workspaceId]: {
+          ...(config.projects?.[target.workspaceId] ?? { repoPath: "", rule: "" }),
+          repoPath: path,
+        },
+      };
+      await agentApi.configSet({ projects });
+      showToast("ok", `已设置项目目录：${path}`);
+    } catch (error) {
+      showToast("error", String(error));
+      return;
+    }
+    await doEnqueueAgent(target);
   };
 
   const handleAgentFix = (target: BugDetail) => void enqueueAgent(target);
@@ -320,7 +390,8 @@ export default function App() {
   const startSidebarResize = (event: ReactMouseEvent<HTMLButtonElement>) => {
     event.preventDefault();
     const startX = event.clientX;
-    const startWidth = sidebarCollapsed ? 0 : sidebarWidth;
+    const startWidth = sidebarCollapsed ? 0 : effectiveSidebarWidth;
+    setSidebarSized(true);
     if (sidebarCollapsed) {
       // Dragging out of the collapsed state starts from the minimum width.
       setSidebarCollapsed(false);
@@ -340,7 +411,8 @@ export default function App() {
       if (next < MIN_SIDEBAR_WIDTH) {
         stop();
         setSidebarCollapsed(true);
-        setSidebarWidth(DEFAULT_SIDEBAR_WIDTH);
+        setSidebarSized(false);
+        setSidebarWidth(defaultSidebarWidth(viewportWidth));
         return;
       }
       setSidebarWidth(next);
@@ -430,10 +502,8 @@ export default function App() {
         className="flex h-11 shrink-0 items-center gap-2 px-4"
         data-tauri-drag-region
       >
-        <span className="ml-[62px] text-[11px] font-medium uppercase tracking-[0.14em] text-slate-400">
-          TAPD Client
-        </span>
-        <span className="flex-1" data-tauri-drag-region />
+        {/* No window title: the strip only hosts the traffic lights + drag. */}
+        <span className="ml-[62px] flex-1" data-tauri-drag-region />
         {contextLoading ? <Spinner className="text-slate-300" /> : null}
       </div>
 
@@ -482,7 +552,7 @@ export default function App() {
             "relative flex shrink-0 flex-col overflow-hidden",
             !resizingSidebar && "transition-[width] duration-200 ease-out",
           )}
-          style={{ width: sidebarCollapsed ? 0 : sidebarWidth }}
+          style={{ width: sidebarCollapsed ? 0 : effectiveSidebarWidth }}
         >
           <div className="flex h-9 shrink-0 items-center gap-1 pr-1" data-tauri-drag-region>
             <span className="min-w-0 flex-1 truncate px-2 text-[13px] font-semibold text-slate-800">
@@ -493,15 +563,6 @@ export default function App() {
                 {context.workspaces.length}
               </span>
             ) : null}
-            <button
-              type="button"
-              aria-label="收起项目列表"
-              title="收起项目列表"
-              onClick={() => setSidebarCollapsed(true)}
-              className="grid h-7 w-7 place-items-center rounded-lg text-slate-400 transition hover:bg-black/[0.05] hover:text-slate-600"
-            >
-              <PanelLeftClose size={14} />
-            </button>
           </div>
 
           <div className="min-h-0 flex-1 space-y-0.5 overflow-y-auto px-2 pb-2">
@@ -688,6 +749,19 @@ export default function App() {
         onOpenPath={openPath}
         onOpenMedia={(url, mode, kind, target) => void openMedia(url, mode, kind, target)}
       />
+
+      {pendingAgent ? (
+        <FolderPicker
+          open
+          title="没有配置项目目录"
+          description={`${
+            pendingAgent.workspaceName || pendingAgent.workspaceId
+          } 还没有设置本地仓库目录。选择后会自动加入 Agent 队列。`}
+          confirmLabel="使用并继续"
+          onCancel={() => setPendingAgent(null)}
+          onSelect={(path) => void applyAgentFolder(pendingAgent, path)}
+        />
+      ) : null}
 
       {toastNode}
     </div>

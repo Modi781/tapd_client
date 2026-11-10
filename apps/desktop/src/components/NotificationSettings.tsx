@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import clsx from "clsx";
-import { AlertTriangle, Bell, Clock, RefreshCw, Save, Send } from "lucide-react";
+import { AlertTriangle, Bell, Clock, RefreshCw, Send } from "lucide-react";
 
 import type { SettingsSectionProps } from "../lib/feature";
 import {
@@ -18,9 +18,7 @@ export function NotificationSettings({ toast }: SettingsSectionProps) {
   );
   const [snapshot, setSnapshot] = useState<NotificationStateSnapshot | null>(null);
   const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
   const [simulating, setSimulating] = useState(false);
-  const [dirty, setDirty] = useState(false);
 
   const load = useCallback(
     async (silent = false) => {
@@ -28,7 +26,6 @@ export function NotificationSettings({ toast }: SettingsSectionProps) {
         const state = await notificationApi.state();
         setSettings(state.settings);
         setSnapshot(state);
-        if (!silent) setDirty(false);
       } catch (error) {
         if (!silent) toast("error", String(error));
       } finally {
@@ -42,32 +39,38 @@ export function NotificationSettings({ toast }: SettingsSectionProps) {
     void load();
   }, [load]);
 
-  const patch = (partial: Partial<NotificationSettingsValue>) => {
-    setSettings((previous) => ({ ...previous, ...partial }));
-    setDirty(true);
-  };
+  const settingsRef = useRef(settings);
+  useEffect(() => {
+    settingsRef.current = settings;
+  }, [settings]);
 
-  const patchQuietHours = (partial: Partial<NotificationSettingsValue["quietHours"]>) => {
-    setSettings((previous) => ({
-      ...previous,
-      quietHours: { ...previous.quietHours, ...partial },
-    }));
-    setDirty(true);
-  };
-
-  const save = async () => {
-    setSaving(true);
+  /** Applying a value persists it right away — there is no save button. */
+  const persist = async (nextValue: NotificationSettingsValue) => {
+    setSettings(nextValue);
     try {
-      const result = await notificationApi.settingsSet(settings);
+      const result = await notificationApi.settingsSet(nextValue);
       setSettings(result.settings);
-      setDirty(false);
-      toast("ok", "通知设置已保存");
       await load(true);
     } catch (error) {
       toast("error", String(error));
-    } finally {
-      setSaving(false);
     }
+  };
+
+  const patch = (partial: Partial<NotificationSettingsValue>) => {
+    void persist({ ...settingsRef.current, ...partial });
+  };
+
+  const patchQuietHours = (partial: Partial<NotificationSettingsValue["quietHours"]>) => {
+    const current = settingsRef.current;
+    void persist({
+      ...current,
+      quietHours: { ...current.quietHours, ...partial },
+    });
+  };
+
+  /** Text/number fields keep local state while typing and save on blur. */
+  const saveOnBlur = () => {
+    void persist(settingsRef.current);
   };
 
   const simulate = async () => {
@@ -102,7 +105,6 @@ export function NotificationSettings({ toast }: SettingsSectionProps) {
           ) : (
             <Badge tone="amber">已暂停</Badge>
           )}
-          {dirty ? <Badge tone="blue">未保存</Badge> : null}
         </div>
       </div>
 
@@ -176,8 +178,15 @@ export function NotificationSettings({ toast }: SettingsSectionProps) {
               step={10}
               value={settings.pollIntervalSecs}
               onChange={(event) =>
-                patch({ pollIntervalSecs: Number(event.target.value) || 60 })
+                setSettings((current) => ({
+                  ...current,
+                  pollIntervalSecs: Number(event.target.value) || 60,
+                }))
               }
+              onBlur={saveOnBlur}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") event.currentTarget.blur();
+              }}
               className="mt-1.5 w-full rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-700 focus:outline-none focus:ring-2 focus:ring-sky-200"
             />
             <span className="mt-1 block text-[10px] text-slate-400">允许 20–600 秒，默认 60。</span>
@@ -261,15 +270,6 @@ export function NotificationSettings({ toast }: SettingsSectionProps) {
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
-          <Button
-            size="sm"
-            variant="primary"
-            loading={saving}
-            onClick={() => void save()}
-            icon={<Save size={13} />}
-          >
-            保存设置
-          </Button>
           <Button
             size="sm"
             loading={simulating}

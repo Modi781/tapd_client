@@ -141,7 +141,10 @@ pub fn session_mark_logged_in(
 }
 
 #[tauri::command]
-pub fn session_logout(app: AppHandle, state: State<'_, SharedState>) -> Result<(), String> {
+pub async fn session_logout(
+    app: AppHandle,
+    state: State<'_, SharedState>,
+) -> Result<(), String> {
     let snapshot = {
         let mut config = state.config.lock().expect("config lock");
         config.logged_in = false;
@@ -151,14 +154,45 @@ pub fn session_logout(app: AppHandle, state: State<'_, SharedState>) -> Result<(
     };
     state.save_config(&snapshot).map_err(|error| error.to_string())?;
 
+    // Keep the URL watcher from resurrecting the old session while we navigate.
+    session::begin_logout_guard(6000);
+
     if let Some(window) = app.get_webview_window(session::SESSION_LABEL) {
-        // Drop cookies and local storage, then reload the login entry point.
-        let _ = window.clear_all_browsing_data();
-        if let Ok(url) = tauri::Url::parse(session::TAPD_HOME) {
-            let _ = window.navigate(url);
+        // Deleting cookies explicitly is more reliable than the bulk clear on
+        // macOS, where the removal is asynchronous.
+        let mut removed = 0usize;
+        if let Ok(cookies) = window.cookies() {
+            for cookie in cookies {
+                let domain = cookie.domain().unwrap_or_default().to_ascii_lowercase();
+                if domain == "tapd.cn" || domain.ends_with(".tapd.cn") {
+                    if window.delete_cookie(cookie.clone()).is_ok() {
+                        removed += 1;
+                    }
+                }
+            }
         }
-        let _ = window.show();
-        let _ = window.set_focus();
+        let _ = window.clear_all_browsing_data();
+
+        // Park the SPA first: navigating straight to tapd.cn would let the
+        // still-loaded page (or an in-flight request) restore the session.
+        if let Ok(blank) = tauri::Url::parse("about:blank") {
+            let _ = window.navigate(blank);
+        }
+
+        let window_for_reload = window.clone();
+        let app_for_emit = app.clone();
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(400)).await;
+            let _ = window_for_reload.clear_all_browsing_data();
+            if let Ok(home) = tauri::Url::parse(session::TAPD_HOME) {
+                let _ = window_for_reload.navigate(home);
+            }
+            let _ = window_for_reload.show();
+            let _ = window_for_reload.set_focus();
+            let _ = app_for_emit.emit("session://changed", ());
+        });
+
+        tracing::info!(cookies_removed = removed, "session cleared");
     }
 
     let _ = app.emit("session://changed", ());
@@ -653,6 +687,75 @@ fn run_open(args: &[&str]) -> Result<(), String> {
 
 /// Port and capability of the media proxy, so the UI can (re)build the URL even
 /// when `app_info` was read before the local server was ready.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DirEntryInfo {
+    name: String,
+    path: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DirListing {
+    /// Resolved directory (a dropped file resolves to its parent folder).
+    path: String,
+    parent: Option<String>,
+    entries: Vec<DirEntryInfo>,
+}
+
+/// Lists sub-directories for the folder picker. Accepts a file path (drag &
+/// drop) and resolves it to the containing folder.
+#[tauri::command]
+pub fn list_dirs(path: Option<String>) -> Result<DirListing, String> {
+    let home = std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("/"));
+    let requested = path
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .map(std::path::PathBuf::from)
+        .unwrap_or(home);
+
+    let mut base = if requested.is_file() {
+        requested
+            .parent()
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or(requested)
+    } else {
+        requested
+    };
+    base = base.canonicalize().unwrap_or(base);
+    if !base.is_dir() {
+        return Err(format!("目录不存在：{}", base.display()));
+    }
+
+    let mut entries: Vec<DirEntryInfo> = Vec::new();
+    let read = std::fs::read_dir(&base).map_err(|error| error.to_string())?;
+    for entry in read.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with('.') {
+            continue;
+        }
+        let is_dir = entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false);
+        if !is_dir {
+            continue;
+        }
+        entries.push(DirEntryInfo {
+            path: entry.path().to_string_lossy().to_string(),
+            name,
+        });
+    }
+    entries.sort_by(|left, right| left.name.to_lowercase().cmp(&right.name.to_lowercase()));
+
+    Ok(DirListing {
+        path: base.to_string_lossy().to_string(),
+        parent: base
+            .parent()
+            .map(|parent| parent.to_string_lossy().to_string()),
+        entries,
+    })
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MediaEndpoint {

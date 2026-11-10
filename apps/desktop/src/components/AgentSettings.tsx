@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import { listen } from "@tauri-apps/api/event";
 import {
@@ -6,7 +6,6 @@ import {
   FolderOpen,
   RefreshCw,
   RotateCcw,
-  Save,
   Square,
   Terminal,
 } from "lucide-react";
@@ -19,7 +18,7 @@ import {
   type AgentTask,
   type AgentTasksState,
 } from "../lib/agent";
-import { api, relativeTime, type Workspace } from "../lib/api";
+import { api, relativeTime } from "../lib/api";
 import type { SettingsSectionProps } from "../lib/feature";
 import { Badge, Button, Spinner } from "./ui";
 
@@ -34,14 +33,13 @@ const PROMPT_VARIABLES = [
   "{{bug_id}}",
   "{{severity}}",
   "{{priority}}",
+  "{{project_rule}}",
 ];
 
 export function AgentSettings({ toast }: SettingsSectionProps) {
   const [config, setConfig] = useState<AgentConfig | null>(null);
-  const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [tasksState, setTasksState] = useState<AgentTasksState | null>(null);
   const [version, setVersion] = useState<string | null>(null);
-  const [saving, setSaving] = useState(false);
   const [detecting, setDetecting] = useState(false);
   const [busyTask, setBusyTask] = useState<string | null>(null);
 
@@ -59,13 +57,6 @@ export function AgentSettings({ toast }: SettingsSectionProps) {
       .then(({ config: next }) => setConfig(next))
       .catch((error) => toast("error", String(error)));
 
-    void api
-      .workspaceContext()
-      .then((context) => setWorkspaces(context.workspaces))
-      .catch(() => {
-        /* not logged in yet: configured mappings still render below */
-      });
-
     void refreshTasks();
 
     let unlisten: (() => void) | undefined;
@@ -77,44 +68,27 @@ export function AgentSettings({ toast }: SettingsSectionProps) {
     return () => unlisten?.();
   }, [refreshTasks, toast]);
 
-  const mappingIds = useMemo(() => {
-    const ids = new Set(workspaces.map((workspace) => workspace.id));
-    Object.keys(config?.repoMappings ?? {}).forEach((id) => ids.add(id));
-    return Array.from(ids);
-  }, [workspaces, config?.repoMappings]);
-
   const patchConfig = (patch: Partial<AgentConfig>) => {
     setConfig((current) => (current ? { ...current, ...patch } : current));
   };
 
-  const setRepoMapping = (workspaceId: string, value: string) => {
-    setConfig((current) => {
-      if (!current) return current;
-      const mappings = { ...current.repoMappings };
-      if (value.trim()) mappings[workspaceId] = value;
-      else delete mappings[workspaceId];
-      return { ...current, repoMappings: mappings };
-    });
-  };
-
-  const handleSave = async () => {
-    if (!config) return;
-    setSaving(true);
+  /** Persists the whole config; called on blur / on toggle, there is no save button. */
+  const commit = async (patch?: Partial<AgentConfig>) => {
+    const base = config;
+    if (!base) return;
+    const next = { ...base, ...(patch ?? {}) };
+    setConfig(next);
     try {
-      const { config: next } = await agentApi.configSet({
-        binaryPath: config.binaryPath,
-        repoMappings: config.repoMappings,
-        promptTemplate: config.promptTemplate,
-        readyQuietMs: finiteOr(config.readyQuietMs, 900),
-        readyTimeoutMs: finiteOr(config.readyTimeoutMs, 15_000),
-        autoOpenConsole: config.autoOpenConsole,
+      const { config: saved } = await agentApi.configSet({
+        binaryPath: next.binaryPath,
+        promptTemplate: next.promptTemplate,
+        readyQuietMs: finiteOr(next.readyQuietMs, 900),
+        readyTimeoutMs: finiteOr(next.readyTimeoutMs, 15_000),
+        autoOpenConsole: next.autoOpenConsole,
       });
-      setConfig(next);
-      toast("ok", "Agent 配置已保存");
+      setConfig(saved);
     } catch (error) {
       toast("error", String(error));
-    } finally {
-      setSaving(false);
     }
   };
 
@@ -179,16 +153,6 @@ export function AgentSettings({ toast }: SettingsSectionProps) {
             >
               检测版本
             </Button>
-            <Button
-              size="sm"
-              variant="primary"
-              onClick={() => void handleSave()}
-              loading={saving}
-              disabled={!config}
-              icon={<Save size={13} />}
-            >
-              保存
-            </Button>
           </div>
         </div>
 
@@ -215,55 +179,13 @@ export function AgentSettings({ toast }: SettingsSectionProps) {
               <input
                 value={config.binaryPath}
                 onChange={(event) => patchConfig({ binaryPath: event.target.value })}
+                onBlur={() => void commit()}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") event.currentTarget.blur();
+                }}
                 placeholder="opencode"
                 className={`${INPUT_CLASS} mt-1.5 font-mono`}
               />
-            </div>
-
-            <div>
-              <div className="flex items-center justify-between">
-                <span className="text-[11px] font-medium text-slate-600">
-                  项目仓库映射
-                </span>
-                <span className="text-[10px] text-slate-400">
-                  每个 TAPD 项目对应的本地仓库绝对路径
-                </span>
-              </div>
-              <div className="mt-1.5 space-y-1.5">
-                {mappingIds.map((workspaceId) => {
-                  const workspace = workspaces.find((item) => item.id === workspaceId);
-                  return (
-                    <div
-                      key={workspaceId}
-                      className="flex items-center gap-2 rounded-lg border border-slate-100 bg-slate-50/60 p-2"
-                    >
-                      <span
-                        className="h-2 w-2 shrink-0 rounded-full"
-                        style={{ backgroundColor: workspace?.logoColor || "#0ea5e9" }}
-                      />
-                      <span className="w-36 shrink-0 truncate text-xs text-slate-700">
-                        {workspace?.name ?? workspaceId}
-                      </span>
-                      <span className="w-20 shrink-0 font-mono text-[10px] text-slate-400">
-                        {workspaceId}
-                      </span>
-                      <input
-                        value={config.repoMappings[workspaceId] ?? ""}
-                        onChange={(event) =>
-                          setRepoMapping(workspaceId, event.target.value)
-                        }
-                        placeholder="/Users/you/projects/repo"
-                        className={`${INPUT_CLASS} font-mono`}
-                      />
-                    </div>
-                  );
-                })}
-                {mappingIds.length === 0 ? (
-                  <div className="rounded-lg border border-dashed border-slate-200 p-3 text-[11px] text-slate-400">
-                    登录并加载项目后可在这里配置仓库路径。
-                  </div>
-                ) : null}
-              </div>
             </div>
 
             <div>
@@ -280,7 +202,8 @@ export function AgentSettings({ toast }: SettingsSectionProps) {
                 onChange={(event) =>
                   patchConfig({ promptTemplate: event.target.value })
                 }
-                rows={9}
+                onBlur={() => void commit()}
+                rows={11}
                 className={`${INPUT_CLASS} mt-1.5 resize-y leading-5`}
               />
               <div className="mt-1.5 flex flex-wrap gap-1">
@@ -293,6 +216,11 @@ export function AgentSettings({ toast }: SettingsSectionProps) {
                   </span>
                 ))}
               </div>
+              <p className="mt-1.5 text-[10px] leading-4 text-slate-400">
+                仓库文件夹和项目规则在「项目」卡片里配置；模板含{" "}
+                <code className="rounded bg-slate-100 px-1 font-mono">{"{{project_rule}}"}</code>{" "}
+                时按位置插入，否则追加到末尾。
+              </p>
             </div>
 
             <div className="grid gap-3 sm:grid-cols-3">
@@ -301,12 +229,14 @@ export function AgentSettings({ toast }: SettingsSectionProps) {
                 hint="输出静默达到该时长后注入任务"
                 value={config.readyQuietMs}
                 onChange={(value) => patchConfig({ readyQuietMs: value })}
+                onCommit={() => void commit()}
               />
               <NumberField
                 label="就绪超时（ms）"
                 hint="超时后强制注入并记录 warning"
                 value={config.readyTimeoutMs}
                 onChange={(value) => patchConfig({ readyTimeoutMs: value })}
+                onCommit={() => void commit()}
               />
               <div className="rounded-xl border border-slate-100 bg-slate-50/70 p-3">
                 <div className="text-[10px] uppercase tracking-wide text-slate-400">
@@ -317,7 +247,7 @@ export function AgentSettings({ toast }: SettingsSectionProps) {
                     type="checkbox"
                     checked={config.autoOpenConsole}
                     onChange={(event) =>
-                      patchConfig({ autoOpenConsole: event.target.checked })
+                      void commit({ autoOpenConsole: event.target.checked })
                     }
                     className="h-3.5 w-3.5 accent-sky-600"
                   />
@@ -410,6 +340,7 @@ function NumberField(props: {
   hint: string;
   value: number;
   onChange: (value: number) => void;
+  onCommit?: () => void;
 }) {
   return (
     <div className="rounded-xl border border-slate-100 bg-slate-50/70 p-3">
@@ -421,6 +352,10 @@ function NumberField(props: {
         min={0}
         value={Number.isFinite(props.value) ? props.value : ""}
         onChange={(event) => props.onChange(Number(event.target.value))}
+        onBlur={props.onCommit}
+        onKeyDown={(event) => {
+          if (event.key === "Enter") event.currentTarget.blur();
+        }}
         className={`${INPUT_CLASS} mt-1.5 font-mono`}
       />
       <div className="mt-1 text-[10px] leading-4 text-slate-400">{props.hint}</div>

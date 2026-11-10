@@ -219,6 +219,15 @@ export type McpConfigInfo = {
 
 export type OpenMediaMode = "file" | "browser" | "reveal" | "path";
 
+export type DirEntryInfo = { name: string; path: string };
+
+/** One folder level for the folder picker. */
+export type DirListing = {
+  path: string;
+  parent: string | null;
+  entries: DirEntryInfo[];
+};
+
 /** One selectable "open with" app. `icon` is a data URL when available. */
 export type OpenTarget = {
   id: string;
@@ -253,6 +262,7 @@ export const api = {
   clearCaptures: () => invoke<void>("capture_clear"),
   exportCaptures: () => invoke<string>("capture_export"),
   openPath: (path: string) => invoke<void>("open_path", { path }),
+  listDirs: (path?: string) => invoke<DirListing>("list_dirs", { path: path ?? null }),
   openMedia: (url: string, mode: OpenMediaMode, kind?: string, target?: string) =>
     invoke<string>("open_media", {
       url,
