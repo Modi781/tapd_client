@@ -630,4 +630,37 @@ mod tests {
         assert_eq!(status, "succeeded");
         assert_eq!(session, "ses_1");
     }
+
+    #[test]
+    fn upgrades_v1_cache_and_keeps_snapshots() {
+        let path = std::env::temp_dir().join(format!(
+            "tapd-cache-v1-{}.sqlite3",
+            uuid::Uuid::new_v4().simple()
+        ));
+        {
+            let conn = Connection::open(&path).expect("v1 db");
+            conn.execute_batch(
+                "CREATE TABLE snapshots (kind TEXT NOT NULL, key TEXT NOT NULL, payload TEXT NOT NULL, fetched_at INTEGER NOT NULL, PRIMARY KEY (kind, key));
+                 CREATE TABLE bugs (workspace_id TEXT NOT NULL, bug_id TEXT NOT NULL, title TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT '', modified TEXT NOT NULL DEFAULT '', raw TEXT NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY (workspace_id, bug_id));
+                 PRAGMA user_version = 1;",
+            )
+            .expect("v1 schema");
+        }
+
+        let cache = Cache::open(path);
+        let guard = cache.conn.lock().expect("cache lock");
+        let conn = guard.as_ref().expect("cache connection");
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .expect("version");
+        let table: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'agent_tasks'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("agent_tasks table");
+        assert_eq!(version, 2);
+        assert_eq!(table, 1);
+    }
 }
