@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import {
   ChevronLeft,
   ChevronRight,
@@ -32,6 +33,8 @@ type Props = {
 const MIN_ZOOM = 0.2;
 const MAX_ZOOM = 6;
 
+type Size = { width: number; height: number };
+
 /** Full-screen resource preview with zoom, prev/next and a thumbnail strip. */
 export function MediaPreview(props: Props) {
   const { items, index, onIndexChange, onClose, onOpenExternal } = props;
@@ -40,6 +43,11 @@ export function MediaPreview(props: Props) {
   const thumbRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const centeredOnce = useRef(false);
   const [zoom, setZoom] = useState(1);
+  // Measured once the overlay is mounted, so the media is contained by the real
+  // available box instead of a viewport guess (`100vh - <magic>` broke as soon
+  // as header/footer/paddings changed).
+  const [stage, setStage] = useState<Size>({ width: 0, height: 0 });
+  const [natural, setNatural] = useState<Size | null>(null);
 
   const current = items[index];
 
@@ -56,10 +64,49 @@ export function MediaPreview(props: Props) {
     [index, items.length, onIndexChange],
   );
 
-  // Reset zoom when switching resources.
+  const rememberSize = useCallback((next: Size | null) => {
+    setNatural(next && next.width > 0 && next.height > 0 ? next : null);
+  }, []);
+
+  // Reset fit state and scroll offsets when switching resources.
   useEffect(() => {
     setZoom(1);
+    setNatural(null);
+    const node = stageRef.current;
+    if (node) {
+      node.scrollTop = 0;
+      node.scrollLeft = 0;
+    }
   }, [index]);
+
+  // Track the usable stage box (viewport minus padding) so the media can be
+  // scaled to fit exactly, whatever the window size.
+  useLayoutEffect(() => {
+    const node = stageRef.current;
+    if (!node) return;
+
+    const measure = () => {
+      const style = window.getComputedStyle(node);
+      const width =
+        node.clientWidth -
+        (Number.parseFloat(style.paddingLeft) || 0) -
+        (Number.parseFloat(style.paddingRight) || 0);
+      const height =
+        node.clientHeight -
+        (Number.parseFloat(style.paddingTop) || 0) -
+        (Number.parseFloat(style.paddingBottom) || 0);
+      setStage((prev) =>
+        prev.width === width && prev.height === height
+          ? prev
+          : { width: Math.max(0, width), height: Math.max(0, height) },
+      );
+    };
+
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, []);
 
   // Keep the active thumbnail in the middle of the rail. The first centering is
   // instant (so the preview opens already centered), later ones slide.
@@ -119,27 +166,42 @@ export function MediaPreview(props: Props) {
     return () => window.removeEventListener("keydown", onKeyDown, true);
   }, [go, onClose, zoomBy]);
 
-  // Wheel zooms the image; registered natively so it can preventDefault.
+  // Wheel pans natively (so a zoomed-in image can be inspected); pinch/⌘-wheel
+  // zooms. Registered natively so the zoom case can preventDefault.
   useEffect(() => {
-    const stage = stageRef.current;
-    if (!stage) return;
+    const node = stageRef.current;
+    if (!node) return;
     const onWheel = (event: WheelEvent) => {
       if (!current || current.kind !== "image") return;
+      if (!event.metaKey && !event.ctrlKey) return;
       event.preventDefault();
       zoomBy(event.deltaY < 0 ? 1.1 : 0.9);
     };
-    stage.addEventListener("wheel", onWheel, { passive: false });
-    return () => stage.removeEventListener("wheel", onWheel);
+    node.addEventListener("wheel", onWheel, { passive: false });
+    return () => node.removeEventListener("wheel", onWheel);
   }, [current, zoomBy]);
 
   if (!current) return null;
 
   const source = mediaSrc(current.url);
 
-  return (
+  // Zoom is relative to "fits the stage": 100% always shows the whole resource.
+  const fit =
+    natural && stage.width > 0 && stage.height > 0
+      ? Math.min(stage.width / natural.width, stage.height / natural.height, 1)
+      : 1;
+  const effectiveZoom = current.kind === "image" ? zoom : 1;
+  const mediaSize = natural
+    ? {
+        width: Math.round(natural.width * fit * effectiveZoom),
+        height: Math.round(natural.height * fit * effectiveZoom),
+      }
+    : null;
+
+  return createPortal(
     <div className="fixed inset-0 z-[60] flex flex-col bg-slate-950/95 text-slate-100">
-      <header className="flex shrink-0 items-center gap-3 border-b border-white/10 px-4 py-2">
-        <div className="min-w-0">
+      <header className="relative flex shrink-0 items-center justify-center border-b border-white/10 px-4 py-2.5">
+        <div className="min-w-0 max-w-[min(60%,34rem)] text-center">
           <div className="truncate text-xs font-medium" title={current.label}>
             {current.label}
           </div>
@@ -150,7 +212,7 @@ export function MediaPreview(props: Props) {
           </div>
         </div>
 
-        <div className="ml-auto flex items-center gap-1">
+        <div className="absolute inset-y-0 right-3 flex items-center gap-1">
           {current.kind === "image" ? (
             <>
               <IconButton label="缩小" onClick={() => zoomBy(0.8)}>
@@ -185,8 +247,10 @@ export function MediaPreview(props: Props) {
         </div>
       </header>
 
-      <div ref={stageRef} className="relative min-h-0 flex-1 overflow-auto">
-        <div className="flex min-h-full min-w-full items-center justify-center p-6">
+      <div ref={stageRef} className="relative min-h-0 flex-1 overflow-auto p-6">
+        {/* `m-auto` centers without the usual flex-centering trap where the
+            overflowing start of a zoomed image becomes unreachable. */}
+        <div className="flex min-h-full min-w-full">
           {current.kind === "video" ? (
             source ? (
               <video
@@ -195,7 +259,17 @@ export function MediaPreview(props: Props) {
                 controls
                 autoPlay
                 playsInline
-                className="max-h-full max-w-full rounded-lg bg-black shadow-2xl"
+                onLoadedMetadata={(event) =>
+                  rememberSize({
+                    width: event.currentTarget.videoWidth,
+                    height: event.currentTarget.videoHeight,
+                  })
+                }
+                style={mediaSize ?? undefined}
+                className={clsx(
+                  "m-auto rounded-lg bg-black shadow-2xl",
+                  mediaSize ? null : "max-h-[calc(100vh-10rem)] max-w-full",
+                )}
               />
             ) : (
               <Hint text="预览服务尚未就绪，可用「在浏览器中打开」" />
@@ -206,9 +280,23 @@ export function MediaPreview(props: Props) {
               src={source}
               alt={current.label}
               draggable={false}
+              onLoad={(event) =>
+                rememberSize({
+                  width: event.currentTarget.naturalWidth,
+                  height: event.currentTarget.naturalHeight,
+                })
+              }
+              onError={() => rememberSize(null)}
               onDoubleClick={() => setZoom((value) => (value > 1 ? 1 : 2))}
-              style={{ transform: `scale(${zoom})` }}
-              className="max-h-[calc(100vh-13rem)] max-w-full origin-center select-none rounded-lg bg-white/5 shadow-2xl transition-transform duration-100"
+              style={
+                mediaSize
+                  ? { width: mediaSize.width, height: mediaSize.height }
+                  : undefined
+              }
+              className={clsx(
+                "m-auto select-none rounded-lg bg-white/5 shadow-2xl",
+                mediaSize ? null : "max-h-[calc(100vh-10rem)] max-w-full",
+              )}
             />
           ) : (
             <Hint text="预览服务尚未就绪，可用「在浏览器中打开」" />
@@ -237,12 +325,15 @@ export function MediaPreview(props: Props) {
         ) : null}
       </div>
 
-      <footer className="shrink-0 border-t border-white/10 bg-slate-950/80 px-3 py-2">
+      {/* Docked, opaque footer: it takes its own row, so it never covers the
+          resource being previewed. */}
+      <footer className="shrink-0 border-t border-white/10 bg-slate-950 px-3 py-2">
         {/* Centered rail: the active thumbnail sits in the middle and the
             previously active one slides left as you move on. */}
         <div
           ref={stripRef}
-          className="flex gap-2 overflow-x-auto px-[calc(50%-1.75rem)] pb-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+          style={{ scrollbarWidth: "none" }}
+          className="flex gap-2 overflow-x-auto px-[calc(50%-1.75rem)] pb-1 [&::-webkit-scrollbar]:hidden"
         >
           {items.map((item, itemIndex) => (
             <button
@@ -276,7 +367,8 @@ export function MediaPreview(props: Props) {
           ))}
         </div>
       </footer>
-    </div>
+    </div>,
+    document.body,
   );
 }
 
@@ -300,7 +392,7 @@ function IconButton(props: {
 
 function Hint(props: { text: string }) {
   return (
-    <div className="rounded-xl border border-dashed border-white/20 px-4 py-6 text-xs text-slate-400">
+    <div className="m-auto rounded-xl border border-dashed border-white/20 px-4 py-6 text-xs text-slate-400">
       {props.text}
     </div>
   );
