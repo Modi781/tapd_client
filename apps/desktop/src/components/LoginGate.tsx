@@ -248,7 +248,7 @@ export function LoginGate({ info, onRefresh, onToast }: Props) {
                 欢迎来到 TAPD 客户端
               </div>
               <div className="mt-0.5 text-ui-sm text-slate-500">
-                一站式查看项目、缺陷与 AI Agent 工作流
+                一站式 AI Agent 工作流
               </div>
             </div>
           </div>
@@ -262,9 +262,6 @@ export function LoginGate({ info, onRefresh, onToast }: Props) {
             <h1 className="text-[26px] font-normal tracking-tight text-slate-900">
               TAPD 桌面端
             </h1>
-            <p className="mt-2 text-ui-base text-slate-500">
-              使用企业微信扫码，登录态只保存在本机
-            </p>
           </header>
 
           <div className="relative mt-6 flex justify-center">
@@ -397,9 +394,6 @@ export function LoginGate({ info, onRefresh, onToast }: Props) {
             V{info?.version ?? "0.1.0"}
             <span className="h-px w-8 bg-slate-200" />
           </div>
-          <p className="mt-2 text-center text-ui-xs leading-5 text-slate-400">
-            Cookie 仅保存在本机隐藏 WebView 中，不会上传到任何服务器
-          </p>
         </div>
       </section>
     </div>
