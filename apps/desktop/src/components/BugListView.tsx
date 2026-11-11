@@ -564,7 +564,7 @@ function BugListViewImpl(props: Props) {
                 <th className="sticky top-0 z-20 w-[136px] bg-slate-50 px-4 py-2.5 font-medium shadow-[0_-2px_0_0_var(--color-slate-50)]">
                   创建时间
                 </th>
-                <th className="sticky top-0 right-0 z-30 w-[96px] border-l border-slate-200/70 bg-slate-50 px-2 py-2.5 text-right font-medium shadow-[0_-2px_0_0_var(--color-slate-50)]">
+                <th className="sticky top-0 right-0 z-30 w-[104px] border-l border-slate-200/70 bg-slate-50 px-2 py-2.5 text-right font-medium shadow-[0_-2px_0_0_var(--color-slate-50)]">
                   操作
                 </th>
               </tr>
@@ -797,33 +797,35 @@ function AgentRowAction(props: {
   onCompose?: () => void;
 }) {
   return (
-    <div className="flex items-center justify-end">
-      <button
-        type="button"
-        title="用 Agent 修复"
-        onClick={(event) => {
-          event.stopPropagation();
-          props.onFix();
-        }}
-        className="inline-flex h-6 items-center gap-1 rounded-l-md border border-slate-200 bg-white px-2 text-[11px] font-medium text-slate-600 transition hover:border-sky-300 hover:bg-sky-50 hover:text-sky-700"
-      >
-        <Sparkles size={12} />
-        修复
-      </button>
-      {props.onCompose ? (
+    <div className="flex items-center justify-end whitespace-nowrap">
+      <div className="inline-flex shrink-0 overflow-hidden rounded-lg border border-slate-200 bg-white">
         <button
           type="button"
-          title="添加补充说明或资源后启动"
-          aria-label="添加补充说明或资源后启动"
+          title="用 Agent 修复"
+          aria-label="用 Agent 修复"
           onClick={(event) => {
             event.stopPropagation();
-            props.onCompose?.();
+            props.onFix();
           }}
-          className="grid h-6 w-6 place-items-center rounded-r-md border border-l-0 border-slate-200 bg-white text-slate-400 transition hover:border-sky-300 hover:bg-sky-50 hover:text-sky-700"
+          className="grid h-7 w-9 place-items-center text-slate-500 transition hover:bg-sky-50 hover:text-sky-700"
         >
-          <ChevronDown size={12} />
+          <Sparkles size={13} />
         </button>
-      ) : null}
+        {props.onCompose ? (
+          <button
+            type="button"
+            title="添加补充说明或资源后启动"
+            aria-label="添加补充说明或资源后启动"
+            onClick={(event) => {
+              event.stopPropagation();
+              props.onCompose?.();
+            }}
+            className="grid h-7 w-7 place-items-center border-l border-slate-200 text-slate-400 transition hover:bg-sky-50 hover:text-sky-700"
+          >
+            <ChevronDown size={13} />
+          </button>
+        ) : null}
+      </div>
     </div>
   );
 }
