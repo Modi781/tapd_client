@@ -70,12 +70,12 @@ export function FolderPicker(props: {
 
   return (
     <div className="fixed inset-0 z-[70] flex items-center justify-center bg-slate-900/30 p-6 backdrop-blur-[2px]">
-      <div className="flex h-[520px] w-[560px] max-w-full flex-col overflow-hidden rounded-2xl bg-white shadow-2xl ring-1 ring-black/10">
+      <div className="flex h-[520px] w-[560px] max-w-full flex-col overflow-hidden rounded-2xl bg-surface  border border-black/10">
         <div className="flex items-start justify-between gap-3 border-b border-slate-100 px-4 py-3">
           <div className="min-w-0">
-            <h2 className="text-sm font-semibold text-slate-900">{title}</h2>
+            <h2 className="text-ui-base font-normal text-slate-900">{title}</h2>
             {description ? (
-              <p className="mt-0.5 text-[11px] leading-5 text-slate-500">{description}</p>
+              <p className="mt-0.5 text-ui-sm leading-5 text-slate-500">{description}</p>
             ) : null}
           </div>
           <button
@@ -106,7 +106,7 @@ export function FolderPicker(props: {
               if (event.key === "Enter") void load(pathInput);
             }}
             spellCheck={false}
-            className="min-w-0 flex-1 rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-1.5 font-mono text-[11px] text-slate-600 outline-none transition focus:border-sky-300 focus:bg-white focus:ring-2 focus:ring-sky-100"
+            className="min-w-0 flex-1 rounded-lg border border-border bg-slate-50 px-2.5 py-1.5 font-mono text-ui-sm text-slate-600 transition focus:border-sky-300 focus:bg-surface focus:outline-2 focus:outline-sky-200"
           />
           <Button size="sm" variant="secondary" onClick={() => void load(pathInput)}>
             前往
@@ -115,12 +115,12 @@ export function FolderPicker(props: {
 
         <div className="min-h-0 flex-1 overflow-y-auto p-2">
           {loading ? (
-            <div className="flex h-24 items-center justify-center gap-2 text-xs text-slate-400">
+            <div className="flex h-24 items-center justify-center gap-2 text-ui-caption text-slate-400">
               <Loader2 size={14} className="animate-spin" />
               读取目录…
             </div>
           ) : error ? (
-            <div className="m-2 rounded-xl border border-rose-200 bg-rose-50 p-3 text-[11px] leading-5 text-rose-700">
+            <div className="m-2 rounded-xl border border-rose-200 bg-rose-50 p-3 text-ui-sm leading-5 text-rose-700">
               {error}
             </div>
           ) : (
@@ -130,7 +130,7 @@ export function FolderPicker(props: {
                   <button
                     type="button"
                     onClick={() => void load(entry.path)}
-                    className="flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-xs text-slate-700 transition hover:bg-slate-50"
+                    className="flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-ui-caption text-slate-700 transition hover:bg-slate-50"
                   >
                     <Folder size={14} className="shrink-0 text-sky-500" />
                     <span className="min-w-0 flex-1 truncate">{entry.name}</span>
@@ -138,7 +138,7 @@ export function FolderPicker(props: {
                 </li>
               ))}
               {listing && listing.entries.length === 0 ? (
-                <li className="px-3 py-6 text-center text-[11px] text-slate-400">
+                <li className="px-3 py-6 text-center text-ui-sm text-slate-400">
                   这里没有子文件夹
                 </li>
               ) : null}
@@ -147,7 +147,7 @@ export function FolderPicker(props: {
         </div>
 
         <div className="flex items-center gap-2 border-t border-slate-100 px-3 py-2.5">
-          <div className="flex min-w-0 flex-1 items-center gap-1.5 text-[11px] text-slate-400">
+          <div className="flex min-w-0 flex-1 items-center gap-1.5 text-ui-sm text-slate-400">
             <FolderOpen size={13} className="shrink-0 text-slate-400" />
             <span className="truncate font-mono" title={listing?.path}>
               {listing?.path ?? "—"}

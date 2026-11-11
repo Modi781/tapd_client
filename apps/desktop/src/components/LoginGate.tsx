@@ -182,7 +182,7 @@ export function LoginGate({ info, onRefresh, onToast }: Props) {
   const copy = phaseCopy(state, refreshing);
 
   return (
-    <div className="relative flex h-full overflow-hidden bg-white text-slate-900">
+    <div data-theme="light" className="relative flex h-full overflow-hidden bg-surface text-slate-900">
       {/* macOS traffic lights live over this strip; the whole strip drags. */}
       <div data-tauri-drag-region className="absolute inset-x-0 top-0 z-30 h-11" />
 
@@ -198,7 +198,7 @@ export function LoginGate({ info, onRefresh, onToast }: Props) {
           {FLOATING_CHIPS.map((chip) => (
             <div
               key={chip.position}
-              className={`login-float absolute grid h-12 w-12 place-items-center rounded-2xl bg-white/95 shadow-[0_14px_34px_-16px_rgba(15,23,42,0.4)] ring-1 ring-black/5 ${chip.position}`}
+              className={`login-float absolute grid h-12 w-12 place-items-center rounded-2xl bg-white/95  border border-black/5 ${chip.position}`}
               style={
                 {
                   animationDelay: chip.delay,
@@ -214,18 +214,18 @@ export function LoginGate({ info, onRefresh, onToast }: Props) {
         <div className="relative z-10 flex flex-1 items-center justify-center px-10 pt-16">
           <div className="relative -translate-y-2">
             <div className="login-breathe absolute -inset-20 rounded-full bg-sky-100/50 blur-2xl" />
-            <div className="relative -rotate-3 rounded-[26px] bg-[#0b1220] px-7 py-4 shadow-[0_24px_50px_-24px_rgba(2,6,23,0.65)]">
+            <div className="relative -rotate-3 rounded-[26px] bg-[#0b1220] px-7 py-4 ">
               <span className="absolute -left-4 top-2 font-serif text-4xl leading-none text-[#0b1220]">
                 “
               </span>
-              <span className="relative text-[22px] font-semibold tracking-tight text-white">
+              <span className="relative text-[22px] font-normal tracking-tight text-white">
                 Hello!
               </span>
               <span className="absolute -bottom-3 -right-4 font-serif text-4xl leading-none text-[#0b1220]">
                 ”
               </span>
             </div>
-            <div className="mt-8 flex items-center justify-center gap-2 text-[11px] text-slate-400">
+            <div className="mt-8 flex items-center justify-center gap-2 text-ui-sm text-slate-400">
               <span className="h-1 w-1 rounded-full bg-slate-300" />
               让缺陷、需求与研发进度保持同步
               <span className="h-1 w-1 rounded-full bg-slate-300" />
@@ -235,7 +235,7 @@ export function LoginGate({ info, onRefresh, onToast }: Props) {
 
         <div className="relative z-10 px-10 pb-10">
           <div className="flex items-center gap-3">
-            <div className="grid h-11 w-11 place-items-center rounded-2xl bg-white shadow-[0_10px_24px_-12px_rgba(2,132,199,0.55)] ring-1 ring-black/5">
+            <div className="grid h-11 w-11 place-items-center rounded-2xl bg-white  border border-black/5">
               <img
                 src={appIcon}
                 alt="TAPD 客户端"
@@ -244,10 +244,10 @@ export function LoginGate({ info, onRefresh, onToast }: Props) {
               />
             </div>
             <div>
-              <div className="text-[17px] font-semibold tracking-tight text-slate-900">
+              <div className="text-[17px] font-normal tracking-tight text-slate-900">
                 欢迎来到 TAPD 客户端
               </div>
-              <div className="mt-0.5 text-[11px] text-slate-500">
+              <div className="mt-0.5 text-ui-sm text-slate-500">
                 一站式查看项目、缺陷与 AI Agent 工作流
               </div>
             </div>
@@ -259,10 +259,10 @@ export function LoginGate({ info, onRefresh, onToast }: Props) {
       <section className="relative flex min-w-0 flex-1 overflow-y-auto px-6 pb-6 pt-12">
         <div className="m-auto w-full max-w-[394px]">
           <header className="text-center">
-            <h1 className="text-[26px] font-semibold tracking-tight text-slate-900">
+            <h1 className="text-[26px] font-normal tracking-tight text-slate-900">
               TAPD 桌面端
             </h1>
-            <p className="mt-2 text-[13px] text-slate-500">
+            <p className="mt-2 text-ui-base text-slate-500">
               使用企业微信扫码，登录态只保存在本机
             </p>
           </header>
@@ -270,9 +270,9 @@ export function LoginGate({ info, onRefresh, onToast }: Props) {
           <div className="relative mt-6 flex justify-center">
             <div className="absolute -inset-5 rounded-[36px] bg-gradient-to-br from-sky-100/80 via-white to-emerald-50/80 blur-xl" />
 
-            <div className="relative rounded-[28px] bg-gradient-to-br from-sky-200/80 via-white to-emerald-100/80 p-[1.5px] shadow-[0_28px_70px_-34px_rgba(2,132,199,0.6)]">
+            <div className="relative rounded-[28px] bg-gradient-to-br from-sky-200/80 via-white to-emerald-100/80 p-[1.5px] ">
               <div className="rounded-[26.5px] bg-white p-3">
-                <div className="relative aspect-square w-[clamp(190px,30vh,248px)] overflow-hidden rounded-[18px] bg-[#06111c] ring-1 ring-slate-900/5">
+                <div className="relative aspect-square w-[clamp(190px,30vh,248px)] overflow-hidden rounded-[18px] bg-[#06111c] border border-slate-900/5">
                   {showQr ? (
                     <img
                       key={state.qrUrl ?? "qr"}
@@ -291,25 +291,25 @@ export function LoginGate({ info, onRefresh, onToast }: Props) {
                             alt={displayName ?? "扫码用户"}
                             draggable={false}
                             onError={() => setAvatarBroken(true)}
-                            className="relative h-[68px] w-[68px] rounded-full object-cover shadow-lg ring-4 ring-white"
+                            className="relative h-[68px] w-[68px] rounded-full object-cover  border-2 border-white"
                           />
                         ) : (
-                          <div className="relative grid h-[68px] w-[68px] place-items-center rounded-full bg-sky-50 text-sky-500 ring-4 ring-white shadow">
+                          <div className="relative grid h-[68px] w-[68px] place-items-center rounded-full bg-sky-50 text-sky-500 border-2 border-white">
                             <CheckCircle2 size={30} />
                           </div>
                         )}
                       </div>
                       <div>
-                        <div className="truncate text-[15px] font-semibold text-slate-900">
+                        <div className="truncate text-ui-lg font-normal text-slate-900">
                           {displayName || "扫码成功"}
                         </div>
                         {state.corp ? (
-                          <div className="mt-0.5 truncate text-[11px] text-slate-400">
+                          <div className="mt-0.5 truncate text-ui-sm text-slate-400">
                             {state.corp}
                           </div>
                         ) : null}
                       </div>
-                      <div className="flex items-center gap-1.5 text-[11px] font-medium text-sky-600">
+                      <div className="flex items-center gap-1.5 text-ui-sm font-normal text-sky-600">
                         <Loader2 size={13} className="animate-spin" />
                         正在完成登录…
                       </div>
@@ -320,11 +320,11 @@ export function LoginGate({ info, onRefresh, onToast }: Props) {
                       <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_50%_38%,transparent_18%,rgba(2,8,16,0.62)_100%)]" />
                       <div className="pointer-events-none absolute inset-0 grid place-items-center px-5">
                         <div className="rounded-2xl border border-sky-300/15 bg-black/30 px-4 py-3 text-center backdrop-blur-sm">
-                          <div className="flex items-center justify-center gap-1.5 text-[11.5px] font-medium text-sky-100">
+                          <div className="flex items-center justify-center gap-1.5 text-[11.5px] font-normal text-sky-100">
                             <Loader2 size={12} className="animate-spin" />
                             {copy.title}
                           </div>
-                          <div className="mt-1 font-mono text-[9px] uppercase tracking-[0.16em] text-sky-200/45">
+                          <div className="mt-1 font-mono text-ui-2xs uppercase tracking-[0.16em] text-sky-200/45">
                             securing session
                           </div>
                         </div>
@@ -335,14 +335,14 @@ export function LoginGate({ info, onRefresh, onToast }: Props) {
               </div>
             </div>
 
-            <div className="absolute -bottom-3 right-4 flex items-center gap-1 rounded-full border border-slate-200 bg-white px-2.5 py-1 text-[10px] font-medium text-slate-500 shadow-sm">
+            <div className="absolute -bottom-3 right-4 flex items-center gap-1 rounded-full border border-border bg-white px-2.5 py-1 text-ui-xs font-normal text-slate-500 ">
               <QrCode size={11} className="text-sky-500" />
               企业微信
             </div>
           </div>
 
           <div className="mt-5 text-center">
-            <div className="flex items-center justify-center gap-1.5 text-[13.5px] font-medium text-slate-700">
+            <div className="flex items-center justify-center gap-1.5 text-[13.5px] font-normal text-slate-700">
               {state.phase === "error" ? (
                 <ShieldCheck size={14} className="text-rose-400" />
               ) : state.phase === "scanned" ? (
@@ -352,10 +352,10 @@ export function LoginGate({ info, onRefresh, onToast }: Props) {
               )}
               {copy.title}
             </div>
-            <div className="mt-1 text-[11px] text-slate-400">{copy.hint}</div>
+            <div className="mt-1 text-ui-sm text-slate-400">{copy.hint}</div>
           </div>
 
-          <div className="mt-4 rounded-2xl bg-slate-50/90 px-5 py-3.5 ring-1 ring-slate-100">
+          <div className="mt-4 rounded-2xl bg-slate-50/90 px-5 py-3.5 border border-slate-100">
             <ol className="space-y-1.5 text-[12.5px] leading-6 text-slate-600">
               <li className="flex gap-2">
                 <span className="w-3 shrink-0 text-slate-400">1.</span>
@@ -372,12 +372,12 @@ export function LoginGate({ info, onRefresh, onToast }: Props) {
             </ol>
           </div>
 
-          <div className="mt-4 flex items-center justify-center gap-4 text-[11px]">
+          <div className="mt-4 flex items-center justify-center gap-4 text-ui-sm">
             <button
               type="button"
               onClick={() => void refresh()}
               disabled={refreshing}
-              className="inline-flex items-center gap-1 font-medium text-sky-600 transition hover:text-sky-700 disabled:opacity-50"
+              className="inline-flex items-center gap-1 font-normal text-sky-600 transition hover:text-sky-700 disabled:opacity-50"
             >
               <RefreshCw size={12} className={refreshing ? "animate-spin" : undefined} />
               刷新二维码
@@ -392,12 +392,12 @@ export function LoginGate({ info, onRefresh, onToast }: Props) {
             </button>
           </div>
 
-          <div className="mt-6 flex items-center justify-center gap-2 text-[10px] text-slate-300">
+          <div className="mt-6 flex items-center justify-center gap-2 text-ui-xs text-slate-300">
             <span className="h-px w-8 bg-slate-200" />
             V{info?.version ?? "0.1.0"}
             <span className="h-px w-8 bg-slate-200" />
           </div>
-          <p className="mt-2 text-center text-[10px] leading-5 text-slate-400">
+          <p className="mt-2 text-center text-ui-xs leading-5 text-slate-400">
             Cookie 仅保存在本机隐藏 WebView 中，不会上传到任何服务器
           </p>
         </div>

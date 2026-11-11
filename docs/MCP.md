@@ -67,7 +67,7 @@ opencode mcp list
 
 ## 4. 工具
 
-共 12 个工具：7 个查询/导出/状态查询 + 2 个修复后回写（评论、状态）+ 2 个桌面胶囊通知（唤起、等待回执）+ 1 个 Agent 改动审核（暂停并等待用户确认提交）。
+共 14 个工具：7 个查询/导出/提示词 + 2 个修复后回写（评论、状态）+ 2 个桌面胶囊通知（唤起、等待回执）+ 2 个 Agent 改动审核/任务回报 + 1 个接入前自检（whoami）。
 
 | 工具 | 作用 | 关键参数 |
 | --- | --- | --- |
@@ -77,12 +77,14 @@ opencode mcp list
 | `tapd_list_my_bugs` | 我的未解决缺陷 | `workspace_id`、`limit`、`page` |
 | `tapd_get_bug` | 完整详情（含 `embeddedMedia` 内嵌图片/视频、`changes` 变更记录） | `bug_id`（必填）、`workspace_id` |
 | `tapd_export_bug_md` | 导出 MD 包 | `bug_id`（必填）、`workspace_id`、`workspace_name` |
+| `tapd_get_bug_prompt` | 按缺陷 id 生成修复提示词（自动导出/复用 MD 包） | `bug_id`（必填）、`workspace_id`、`root`、`kind`、`template`、`instructions`、`refresh` |
 | `tapd_get_bug_transitions` | 当前状态与允许的下一步 | `bug_id`（必填）、`workspace_id` |
 | `tapd_add_bug_comment` | 追加评论（纯文本自动转富文本） | `bug_id`、`comment`（必填） |
 | `tapd_update_bug_status` | 更新状态，可同时评论 | `bug_id`、`status`（key 或中文名）、`comment`、`fields` |
 | `tapd_notify_user` | 在顶部胶囊唤起通知，并等待用户点击后回传结果 | `title`（必填）、`tone`、`body`、`fields`、`progress`、`blocks`、`actions`、`tag`、`waitSeconds` |
 | `tapd_wait_notification` | 继续等待之前通知的用户决定 | `id`（必填）、`waitSeconds` |
 | `tapd_request_review` | 复杂改动暂停，等待用户审核后再提交（仅 Agent 任务） | `taskId`（必填）、`summary`（必填）、`files`、`risk` |
+| `agent_task_report` | 非 ACP 运行时的任务生命周期回报（仅 Agent 任务） | `taskId`、`status`（均必填）、`message`、`files`、`risk` |
 
 约定：
 
@@ -90,14 +92,17 @@ opencode mcp list
 - `only_unresolved` 默认 `true`，仅在未显式传 `statuses` 时生效（`new` / `in_progress` / `reopened`）。
 - `limit` 默认 20，最大 50；服务端最小页长 20，返回结果会在本地裁剪到 `limit`。
 - `workspace_id` 省略时使用客户端上次选择的项目。
+- `root` 是本地仓库/工作目录绝对路径：客户端会用项目设置里的「本地文件夹」做匹配（完全相同 > 根目录在仓库内 > 仓库在根目录内），命中后等同于传了 `workspace_id`。sidecar 默认把自身进程 cwd 作为软提示填入；显式传 `root` 但匹配不到时会直接报错，cwd 提示匹配不到则回退到上次选择的项目。可用 `tapd_whoami` 查看 `localProjects` 与 `matchedWorkspaceId`。
 - 时间参数格式：`YYYY-MM-DD HH:MM:SS`。
 
 示例调用（MCP 客户端内部）：
 
 ```json
 {"tool": "tapd_list_bugs", "arguments": {"workspace_id": "45336192", "owner": "me", "limit": 10}}
+{"tool": "tapd_list_bugs", "arguments": {"root": "/Users/you/code/app", "owner": "me", "limit": 10}}
 {"tool": "tapd_get_bug", "arguments": {"workspace_id": "45336192", "bug_id": "1145336192001010606"}}
 {"tool": "tapd_export_bug_md", "arguments": {"workspace_id": "45336192", "bug_id": "1145336192001010582"}}
+{"tool": "tapd_get_bug_prompt", "arguments": {"bug_id": "1145336192001010582"}}
 {"tool": "tapd_get_bug_transitions", "arguments": {"bug_id": "1145336192001010582"}}
 {"tool": "tapd_add_bug_comment", "arguments": {"bug_id": "1145336192001010582", "comment": "根因：草稿状态未写入 store。\n方案：补持久化并加回归测试。\n影响范围：会话详情草稿。"}}
 {"tool": "tapd_update_bug_status", "arguments": {"bug_id": "1145336192001010582", "status": "已解决", "comment": "已修复并验证。"}}
@@ -151,6 +156,39 @@ AI 通知只存在于内存，不写入 SQLite，也不会跨重启保留；设�
 - `tapd_update_bug_status` 的 `comment` 会先追加评论，再进行状态流转；状态流转失败时评论仍保留，便于追溯。
 - 如果需要填流转必填字段，可传 `fields` 数组，原样透传给 TAPD（通常留空）。
 
+### 4.3 修复提示词（tapd_get_bug_prompt）
+
+按缺陷 id 返回一份可以直接交给 AI 的修复提示词，结构对齐桌面端 Agent 收到的那份：
+
+- `kind`（默认 `mcp`）：`mcp` 用内置模板，去掉只属于桌面 Agent 的 `tapd_request_review` 审核队列；`agent` 返回「设置 → Agent 修复」里的全局模板原文。
+- `template`：完全自定义模板，优先级最高；支持 `{{title}}`、`{{md_path}}`、`{{repo_path}}`、`{{workspace_name}}`、`{{bug_id}}`、`{{severity}}`、`{{priority}}`、`{{project_rule}}`、`{{user_prompt}}`、`{{attachments}}`、`{{task_id}}`。
+- `instructions`：补充说明，渲染到 `{{user_prompt}}`；模板没有该占位符时自动追加为「用户补充说明」。
+- MD 包：默认复用已有导出，没有才导出；`refresh: true` 强制重新导出。导出失败不会让工具失败，`mdPath` 为 `null`、原因写进 `warnings`，提示词里会提示改用 `tapd_export_bug_md`。
+- `repo_path` 取该项目「本地文件夹」，否则用调用方 `root`，都没有时写「（当前工作目录）」。
+- 外部客户端没有活动 Agent 任务，`{{task_id}}` 为空，`tapd_request_review` / `agent_task_report` 不可用；模板含 `{{task_id}}` 时返回的 `notes` 会说明这一点。
+
+返回：
+
+```json
+{
+  "prompt": "请修复 TAPD 缺陷：…\n缺陷详情文件：/…/bug.md\n…",
+  "kind": "mcp",
+  "bugId": "1145336192001010582",
+  "workspaceId": "45336192",
+  "workspaceName": "UU",
+  "repoPath": "/Users/you/code/app",
+  "mdPath": "/Users/you/Documents/TAPDClient/exports/UU-45336192/…/bug.md",
+  "dir": "/Users/you/Documents/TAPDClient/exports/UU-45336192/…",
+  "assetCount": 2,
+  "exported": true,
+  "reused": false,
+  "warnings": [],
+  "notes": []
+}
+```
+
+典型用法：AI 在自己的仓库里先用 `tapd_list_bugs`（按 cwd 自动匹配项目）找到缺陷，再调用 `tapd_get_bug_prompt` 把返回的 `prompt` 当作本轮任务说明。
+
 ## 5. 策略与审计
 
 MCP tab 的「MCP 策略」与「调用审计」是客户端的第二层权限边界：sidecar 只负责转发，所有策略都在 App 内执行，AI 无法绕过。
@@ -162,13 +200,13 @@ MCP tab 的「MCP 策略」与「调用审计」是客户端的第二层权限�
 | 允许写操作 | 开 | 关闭后 `tapd_add_bug_comment` / `tapd_update_bug_status` 直接拒绝，查询与导出不受影响 |
 | 允许访问的项目 | 全部 | 选择项目后，工具只能访问这些 workspace；未显式传 `workspace_id` 时也只会在白名单内回退 |
 | 允许的目标状态 | 不限制 | 逗号分隔的状态 key 或中文名；为空时完全交给 TAPD 工作流 |
-| 记录调用审计 | 开 | 关闭后只写应用日志，不落 `mcp-audit.json` |
+| 记录调用审计 | 开 | 关闭后只写应用日志，不落 `mcp_audit` 表 |
 
 策略只会收窄范围，不会扩大 TAPD 账号本身的权限。
 
 ### 5.2 审计
 
-- 文件：`~/Library/Application Support/com.tapdclient.desktop/mcp-audit.json`，最多保留 500 条。
+- 存储：`~/Library/Application Support/com.tapdclient.desktop/cache.sqlite3` 的 `mcp_audit` 表，最多保留 500 条；每次写入只插入一行并裁剪最旧行。
 - 字段：时间、工具、客户端、决策（允许 / 拒绝 / 失败）、耗时、项目 ID、缺陷 ID、错误摘要、参数摘要。
 - 不保存：评论正文、请求/响应正文、Cookie、token。参数摘要只记录 id、status、limit 等标量与评论长度。
 - MCP tab 支持按「全部 / 被拒绝 / 失败」筛选，导出为 `~/Documents/TAPDClient/exports/mcp-audit-<时间>.json`，也可清空。
@@ -206,7 +244,7 @@ MCP tab 的「MCP 策略」与「调用审计」是客户端的第二层权限�
 - `tapd_notify_user` / `tapd_wait_notification` 只操作本地胶囊窗口，不读写 TAPD；「允许 AI / MCP 唤起通知」关闭时调用会直接失败。
 - `tapd_request_review` 只接受当前正在运行的 Agent 任务 id；外部 AI 没有活动任务时会被拒绝，不能暂停桌面队列。
 - 写操作使用当前 TAPD 会话 Cookie + `dsc-token`，受 TAPD 工作流与权限约束；非法流转会被拒绝并把允许的下一步返回给 AI。
-- 所有工具调用（含写操作）记录在客户端日志（数据目录 `logs/`）与 MCP 审计（`mcp-audit.json`）；审计包含工具名、客户端、策略决策、耗时、项目/缺陷与错误摘要，不保存评论正文。
+- 所有工具调用（含写操作）记录在客户端日志（数据目录 `logs/`）与 MCP 审计（`cache.sqlite3` 的 `mcp_audit` 表）；审计包含工具名、客户端、策略决策、耗时、项目/缺陷与错误摘要，不保存评论正文。
 
 ## 8. 常见问题
 

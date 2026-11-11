@@ -1,6 +1,6 @@
 import { ExternalLink, LogOut, RefreshCw } from "lucide-react";
 
-import type { AppInfo, WorkspaceContext } from "../lib/api";
+import { avatarSrc, type AppInfo, type WorkspaceContext } from "../lib/api";
 import { Avatar } from "./Avatar";
 import { UpdatePanel } from "./UpdatePanel";
 import { Badge, Button } from "./ui";
@@ -29,29 +29,29 @@ export function AccountPage({
 
   return (
     <div className="mx-auto max-w-3xl space-y-4">
-      <section className="relative overflow-hidden rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+      <section className="relative overflow-hidden rounded-2xl border border-border bg-surface p-6 ">
         <div className="pointer-events-none absolute -right-20 -top-24 h-56 w-56 rounded-full bg-sky-100/70 blur-3xl" />
         <div className="pointer-events-none absolute -bottom-28 left-1/3 h-48 w-48 rounded-full bg-emerald-100/60 blur-3xl" />
 
         <div className="relative flex flex-wrap items-center gap-4">
           <Avatar
-            src={info?.meAvatar}
+            src={avatarSrc(info?.meAvatar)}
             name={nick}
             rounded="rounded-2xl"
-            className="h-16 w-16 text-xl shadow-lg shadow-sky-500/20 ring-4 ring-white"
+            className="h-16 w-16 text-xl   border-2 border-white"
           />
 
           <div className="min-w-0 flex-1">
             <div className="flex flex-wrap items-center gap-2">
-              <h2 className="truncate text-lg font-semibold tracking-tight text-slate-900">
+              <h2 className="truncate text-lg font-normal tracking-tight text-slate-900">
                 {nick}
               </h2>
               <Badge tone={info?.loggedIn ? "green" : "amber"} dot>
                 {info?.loggedIn ? "已登录" : "未登录"}
               </Badge>
             </div>
-            <p className="mt-0.5 truncate text-xs text-slate-500">{company}</p>
-            <p className="mt-0.5 truncate font-mono text-[10px] text-slate-400">
+            <p className="mt-0.5 truncate text-ui-caption text-slate-500">{company}</p>
+            <p className="mt-0.5 truncate font-mono text-ui-xs text-slate-400">
               ID {userId}
             </p>
           </div>

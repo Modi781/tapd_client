@@ -1,5 +1,26 @@
 # 更新日志
 
+## 未发布
+
+### 账户
+
+- 当前用户头像改为每次读取身份信息时从 TAPD 的 `img_src` 重新同步，启动、进入账户页和手动刷新都会更新，不再依赖企业微信扫码面板的缓存。
+- TAPD 域名下的头像统一走本地媒体代理（带会话 Cookie），`viper.tapd.cn` 等子域也能正常显示。
+
+### MCP
+
+- 新增 `tapd_get_bug_prompt`：按缺陷 id 返回可直接使用的修复提示词，复用 Agent 的 `{{变量}}` 渲染、项目规则与已导出的 `bug.md`；默认 MCP 模板去掉外部客户端无法使用的审核队列，`kind: "agent"` 返回设置里的全局模板，`template` 可完全自定义。
+- 所有带项目的工具支持 `root` 参数：按项目设置里的「本地文件夹」自动匹配 TAPD 项目，sidecar 默认把自身 cwd 作为软提示填入；`tapd_whoami` 返回 `localProjects` 与 `matchedWorkspaceId`。
+- 提示词工具默认复用已有导出，`refresh: true` 强制重新导出；导出失败只记入 `warnings`，仍返回提示词。
+- MCP 工具数 13 → 14，并修正 UI 工具列表漏掉的 `agent_task_report`。
+
+### 存储
+
+- Agent 任务保存到 `cache.sqlite3`：完整任务在 `agent_tasks.payload`，状态变化只增量 upsert 变化的行；队列暂停标记存 `agent_queue_state`。
+- MCP 审计保存到 `mcp_audit` 表：每次调用只插入一行并裁剪到最近 500 条；导出与诊断包仍生成 JSON。
+- `agent-logs/` 与 `agent-events/` 保留最近 200 个任务的产物，更早的自动清理。
+- 任务历史改为服务端分页（每页 50 条，按项目/状态/关键词筛选）；实时状态只推送非终态任务，历史增长后不再全量传输。
+
 # TAPD Client v1.0.0
 
 发布日期：2026-11-10

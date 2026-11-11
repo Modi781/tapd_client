@@ -6,7 +6,7 @@
 
 use std::time::Duration;
 
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use tapd_core::{paths::AppPaths, runtime::RuntimeInfo};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Stdout};
 
@@ -44,6 +44,12 @@ async fn main() {
             std::process::exit(1);
         }
     };
+
+    // Clients spawn the sidecar inside the project they are working on; forward
+    // that directory so the app can match a TAPD project by repo path.
+    let cwd = std::env::current_dir()
+        .ok()
+        .map(|path| path.to_string_lossy().to_string());
 
     let mut client_name = "unknown".to_string();
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
@@ -108,10 +114,10 @@ async fn main() {
                     .and_then(Value::as_str)
                     .unwrap_or_default()
                     .to_string();
-                let arguments = message
-                    .pointer("/params/arguments")
-                    .cloned()
-                    .unwrap_or(Value::Null);
+                let arguments = inject_root(
+                    message.pointer("/params/arguments").unwrap_or(&Value::Null),
+                    cwd.as_deref(),
+                );
 
                 match call_tool(&paths, &client, &client_name, &name, &arguments).await {
                     Ok(data) => {
@@ -269,6 +275,32 @@ fn launch_app() {
     }
 }
 
+/// Adds the sidecar's working directory as a soft `root` hint. Explicit
+/// arguments always win, and `rootSource` tells the app the hint came from the
+/// process cwd (so an unmatched cwd falls back instead of failing).
+fn inject_root(arguments: &Value, cwd: Option<&str>) -> Value {
+    let Some(cwd) = cwd else {
+        return arguments.clone();
+    };
+    let mut map: Map<String, Value> = match arguments {
+        Value::Object(map) => map.clone(),
+        Value::Null => Map::new(),
+        _ => return arguments.clone(),
+    };
+
+    const ROOT_KEYS: [&str; 4] = ["root", "cwd", "repo_path", "repoPath"];
+    if ROOT_KEYS
+        .iter()
+        .any(|key| map.get(*key).is_some_and(|value| !value.is_null()))
+    {
+        return Value::Object(map);
+    }
+
+    map.insert("root".to_string(), Value::String(cwd.to_string()));
+    map.insert("rootSource".to_string(), Value::String("cwd".to_string()));
+    Value::Object(map)
+}
+
 fn pretty(value: &Value) -> String {
     serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
 }
@@ -295,12 +327,19 @@ async fn send(stdout: &mut Stdout, value: Value) {
     let _ = stdout.flush().await;
 }
 
+fn root_property() -> Value {
+    json!({
+        "type": "string",
+        "description": "本地仓库/工作目录绝对路径；用于按项目设置里的「本地文件夹」自动匹配 TAPD 项目。省略时由客户端 cwd 自动填入"
+    })
+}
+
 fn tool_definitions() -> Value {
     json!([
         {
             "name": "tapd_whoami",
-            "description": "返回当前登录的 TAPD 用户、默认项目和项目数量。",
-            "inputSchema": {"type": "object", "properties": {}, "additionalProperties": false}
+            "description": "返回当前登录的 TAPD 用户、默认项目和项目数量；传 root 时一并返回按本地目录匹配到的项目。",
+            "inputSchema": {"type": "object", "properties": {"root": root_property()}, "additionalProperties": false}
         },
         {
             "name": "tapd_list_projects",
@@ -314,6 +353,7 @@ fn tool_definitions() -> Value {
                 "type": "object",
                 "properties": {
                     "workspace_id": {"type": "string", "description": "项目 ID；省略时使用客户端上次选择的项目"},
+                    "root": root_property(),
                     "owner": {"type": "string", "description": "处理人：me（默认）、all，或精确的 TAPD 昵称"},
                     "statuses": {"type": "array", "items": {"type": "string"}, "description": "状态 key，如 new、in_progress、resolved、reopened"},
                     "priorities": {"type": "array", "items": {"type": "string"}, "description": "优先级：urgent、high、medium、low、insignificant"},
@@ -335,6 +375,7 @@ fn tool_definitions() -> Value {
                 "type": "object",
                 "properties": {
                     "workspace_id": {"type": "string"},
+                    "root": root_property(),
                     "limit": {"type": "integer", "minimum": 1, "maximum": 50, "default": 20},
                     "page": {"type": "integer", "minimum": 1, "default": 1}
                 },
@@ -348,6 +389,7 @@ fn tool_definitions() -> Value {
                 "type": "object",
                 "properties": {
                     "workspace_id": {"type": "string", "description": "项目 ID；省略时使用上次选择的项目"},
+                    "root": root_property(),
                     "bug_id": {"type": "string", "description": "缺陷长 ID（列表返回的 id）"}
                 },
                 "required": ["bug_id"],
@@ -361,8 +403,35 @@ fn tool_definitions() -> Value {
                 "type": "object",
                 "properties": {
                     "workspace_id": {"type": "string", "description": "项目 ID；省略时使用上次选择的项目"},
+                    "root": root_property(),
                     "bug_id": {"type": "string", "description": "缺陷长 ID"},
                     "workspace_name": {"type": "string", "description": "项目名称，仅用于目录命名"}
+                },
+                "required": ["bug_id"],
+                "additionalProperties": false
+            }
+        },
+        {
+            "name": "tapd_get_bug_prompt",
+            "description": "按缺陷 id 生成一份可直接使用的修复提示词：复用客户端 Agent 的 {{变量}} 渲染，包含项目规则、本地仓库与已导出的 bug.md 路径。默认使用面向外部 AI 的 MCP 模板；kind=agent 返回「设置 → Agent 修复」中的全局模板原文；也可用 template 传自定义模板。返回 prompt 以及 mdPath / repoPath 等结构化字段。",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "workspace_id": {"type": "string", "description": "项目 ID；省略时按 root 匹配或使用上次选择的项目"},
+                    "root": root_property(),
+                    "bug_id": {"type": "string", "description": "缺陷长 ID"},
+                    "kind": {
+                        "type": "string",
+                        "enum": ["mcp", "agent"],
+                        "default": "mcp",
+                        "description": "mcp：内置模板（无审核队列，适合外部客户端）；agent：客户端「设置 → Agent 修复」里的全局模板原文"
+                    },
+                    "template": {
+                        "type": "string",
+                        "description": "自定义模板，优先级最高。支持 {{title}} {{md_path}} {{repo_path}} {{workspace_name}} {{bug_id}} {{severity}} {{priority}} {{project_rule}} {{user_prompt}} {{attachments}} {{task_id}}"
+                    },
+                    "instructions": {"type": "string", "description": "补充说明，渲染到 {{user_prompt}}"},
+                    "refresh": {"type": "boolean", "default": false, "description": "强制重新导出 MD 包（默认复用已有导出）"}
                 },
                 "required": ["bug_id"],
                 "additionalProperties": false
@@ -375,6 +444,7 @@ fn tool_definitions() -> Value {
                 "type": "object",
                 "properties": {
                     "workspace_id": {"type": "string", "description": "项目 ID；省略时使用上次选择的项目"},
+                    "root": root_property(),
                     "bug_id": {"type": "string", "description": "缺陷长 ID"}
                 },
                 "required": ["bug_id"],
@@ -388,6 +458,7 @@ fn tool_definitions() -> Value {
                 "type": "object",
                 "properties": {
                     "workspace_id": {"type": "string"},
+                    "root": root_property(),
                     "bug_id": {"type": "string", "description": "缺陷长 ID"},
                     "comment": {"type": "string", "description": "评论正文，可包含换行"}
                 },
@@ -402,6 +473,7 @@ fn tool_definitions() -> Value {
                 "type": "object",
                 "properties": {
                     "workspace_id": {"type": "string"},
+                    "root": root_property(),
                     "bug_id": {"type": "string", "description": "缺陷长 ID"},
                     "status": {"type": "string", "description": "目标状态 key 或中文名，如 resolved / 已解决 / verified / 已验证"},
                     "comment": {"type": "string", "description": "可选；状态变更前追加的评论"},
@@ -575,4 +647,41 @@ fn tool_definitions() -> Value {
             }
         }
     ])
+}
+
+#[cfg(test)]
+mod root_tests {
+    use super::inject_root;
+    use serde_json::json;
+
+    #[test]
+    fn injects_cwd_as_soft_root() {
+        let arguments = json!({ "bug_id": "1" });
+        let injected = inject_root(&arguments, Some("/repo/app"));
+        assert_eq!(injected["root"], "/repo/app");
+        assert_eq!(injected["rootSource"], "cwd");
+        assert_eq!(injected["bug_id"], "1");
+    }
+
+    #[test]
+    fn explicit_root_wins() {
+        let arguments = json!({ "root": "/other/repo" });
+        let injected = inject_root(&arguments, Some("/repo/app"));
+        assert_eq!(injected["root"], "/other/repo");
+        assert!(injected.get("rootSource").is_none());
+    }
+
+    #[test]
+    fn empty_arguments_become_a_root_hint() {
+        let injected = inject_root(&serde_json::Value::Null, Some("/repo/app"));
+        assert_eq!(injected["root"], "/repo/app");
+    }
+
+    #[test]
+    fn missing_cwd_or_scalar_arguments_are_untouched() {
+        let arguments = json!({ "bug_id": "1" });
+        assert_eq!(inject_root(&arguments, None), arguments);
+        let scalar = json!("bad");
+        assert_eq!(inject_root(&scalar, Some("/repo")), scalar);
+    }
 }

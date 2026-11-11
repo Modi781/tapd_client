@@ -35,7 +35,7 @@ export function Avatar({ src, name, className, rounded = "rounded-full" }: Props
   return (
     <span
       className={clsx(
-        "grid shrink-0 place-items-center bg-gradient-to-br from-sky-400 to-emerald-400 font-semibold text-white",
+        "grid shrink-0 place-items-center bg-gradient-to-br from-sky-400 to-emerald-400 font-normal text-white",
         rounded,
         className,
       )}

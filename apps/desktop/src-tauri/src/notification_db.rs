@@ -15,8 +15,8 @@ use crate::notification::{
     NotificationStore, SeenBug,
 };
 
-/// Loads the whole store. `None` = no settings row yet (fresh install / JSON
-/// migration still pending) or SQLite is disabled.
+/// Loads the whole store. `None` = no settings row yet (fresh install) or
+/// SQLite is disabled.
 pub fn load(cache: &Cache) -> Option<NotificationStore> {
     cache.with_conn(load_conn).flatten()
 }
@@ -169,9 +169,8 @@ fn load_conn(conn: &Connection) -> Option<NotificationStore> {
     })
 }
 
-/// Full rewrite, used only on startup (legacy import / migration). Poll loops
-/// must use [`write_poll`] instead. Returns whether the data reached SQLite so
-/// the caller can keep the legacy JSON file around when it did not.
+/// Full rewrite, used only on startup (settings migration). Poll loops must
+/// use [`write_poll`] instead. Returns whether the data reached SQLite.
 pub fn save_store(cache: &Cache, store: &NotificationStore) -> bool {
     let result = cache.with_conn(|conn| -> rusqlite::Result<()> {
         let tx = conn.unchecked_transaction()?;

@@ -92,7 +92,7 @@ impl Cache {
         }
 
         if version < 2 {
-            // Relational mirror of agent tasks: bug <-> task <-> session/log.
+            // Agent task store: bug <-> task <-> session/log relationships.
             conn.execute_batch(
                 r#"
                 CREATE TABLE IF NOT EXISTS agent_tasks (
@@ -210,6 +210,49 @@ impl Cache {
             .map_err(|error| error.to_string())?;
             conn.pragma_update(None, "user_version", 4)
                 .map_err(|error| error.to_string())?;
+        }
+
+        if version < 5 {
+            // Agent tasks and the MCP audit log are now first-class SQLite
+            // state. The full task JSON lives in `payload` so AgentTask can
+            // evolve without another schema change; scalar columns stay
+            // indexed for history queries.
+            conn.execute_batch(
+                r#"
+                BEGIN;
+                ALTER TABLE agent_tasks ADD COLUMN payload TEXT NOT NULL DEFAULT '';
+                ALTER TABLE agent_tasks ADD COLUMN severity TEXT NOT NULL DEFAULT '';
+                ALTER TABLE agent_tasks ADD COLUMN priority TEXT NOT NULL DEFAULT '';
+                ALTER TABLE agent_tasks ADD COLUMN runtime_id TEXT NOT NULL DEFAULT '';
+                ALTER TABLE agent_tasks ADD COLUMN transport TEXT NOT NULL DEFAULT '';
+
+                CREATE TABLE IF NOT EXISTS agent_queue_state (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    paused INTEGER NOT NULL DEFAULT 0
+                );
+
+                CREATE TABLE IF NOT EXISTS mcp_audit (
+                    id TEXT PRIMARY KEY,
+                    ts TEXT NOT NULL,
+                    tool TEXT NOT NULL,
+                    client TEXT NOT NULL,
+                    decision TEXT NOT NULL,
+                    ok INTEGER NOT NULL,
+                    duration_ms INTEGER NOT NULL,
+                    workspace_id TEXT,
+                    bug_id TEXT,
+                    error TEXT,
+                    summary TEXT NOT NULL,
+                    created_at INTEGER NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_mcp_audit_created
+                    ON mcp_audit (created_at);
+                PRAGMA user_version = 5;
+                COMMIT;
+                "#,
+            )
+            .map_err(|error| error.to_string())?;
         }
 
         Ok(())
@@ -343,65 +386,141 @@ impl Cache {
         }
     }
 
-    /// Mirrors the agent task list into SQLite so bug/task/session/log
-    /// relationships survive independently of `agent-tasks.json`.
-    pub fn replace_agent_tasks(&self, tasks: &[crate::agent::AgentTask]) {
+    /// Loads the persisted agent task list and the queue-paused flag.
+    /// `None` means SQLite is disabled (the caller degrades to an empty
+    /// in-memory queue).
+    pub fn load_agent_tasks(&self) -> Option<(Vec<crate::agent::AgentTask>, bool)> {
+        self.with_conn(|conn| {
+            let mut statement = conn
+                .prepare("SELECT payload FROM agent_tasks WHERE payload <> '' ORDER BY rowid ASC")
+                .ok()?;
+            let rows = statement
+                .query_map([], |row| row.get::<_, String>(0))
+                .ok()?;
+            let mut tasks = Vec::new();
+            for payload in rows.flatten() {
+                match serde_json::from_str(&payload) {
+                    Ok(task) => tasks.push(task),
+                    Err(error) => tracing::warn!(%error, "failed to decode persisted agent task"),
+                }
+            }
+            let paused = conn
+                .query_row(
+                    "SELECT paused FROM agent_queue_state WHERE id = 1",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .optional()
+                .ok()
+                .flatten()
+                .unwrap_or(0)
+                != 0;
+            Some((tasks, paused))
+        })
+        .flatten()
+    }
+
+    /// Persists the given (already dirty) tasks plus the queue flag and removes
+    /// `removed` rows in one transaction. Returns `false` when SQLite is
+    /// unavailable or the write failed.
+    pub fn save_agent_tasks(
+        &self,
+        tasks: &[crate::agent::AgentTask],
+        paused: bool,
+        removed: &[String],
+    ) -> bool {
         let guard = self.conn.lock().expect("cache lock");
         let Some(conn) = guard.as_ref() else {
-            return;
+            return false;
         };
         let updated_at = unix_now();
-        for task in tasks {
-            let status = match serde_json::to_value(&task.status) {
-                Ok(Value::String(value)) => value,
-                _ => continue,
-            };
-            if let Err(error) = conn.execute(
-                "INSERT INTO agent_tasks (
-                    id, workspace_id, workspace_name, bug_id, title, status,
-                    session_id, repo_path, log_path, md_path, source, created_at,
-                    started_at, finished_at, exit_code, error, updated_at
-                 ) VALUES (
-                    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17
-                 )
-                 ON CONFLICT(id) DO UPDATE SET
-                    workspace_id = excluded.workspace_id,
-                    workspace_name = excluded.workspace_name,
-                    bug_id = excluded.bug_id,
-                    title = excluded.title,
-                    status = excluded.status,
-                    session_id = excluded.session_id,
-                    repo_path = excluded.repo_path,
-                    log_path = excluded.log_path,
-                    md_path = excluded.md_path,
-                    source = excluded.source,
-                    created_at = excluded.created_at,
-                    started_at = excluded.started_at,
-                    finished_at = excluded.finished_at,
-                    exit_code = excluded.exit_code,
-                    error = excluded.error,
-                    updated_at = excluded.updated_at",
-                params![
-                    task.id,
-                    task.workspace_id,
-                    task.workspace_name,
-                    task.bug_id,
-                    task.title,
-                    status,
-                    task.session_id,
-                    task.repo_path,
-                    task.log_path,
-                    task.md_path,
-                    task.source,
-                    task.created_at,
-                    task.started_at,
-                    task.finished_at,
-                    task.exit_code,
-                    task.error,
-                    updated_at
-                ],
-            ) {
-                tracing::warn!(%error, task_id = %task.id, "failed to mirror agent task");
+        let result = (|| -> rusqlite::Result<()> {
+            let tx = conn.unchecked_transaction()?;
+            for task in tasks {
+                let payload = match serde_json::to_string(task) {
+                    Ok(payload) => payload,
+                    Err(error) => {
+                        tracing::warn!(%error, task_id = %task.id, "failed to serialize agent task");
+                        continue;
+                    }
+                };
+                let status = match serde_json::to_value(task.status) {
+                    Ok(Value::String(value)) => value,
+                    _ => continue,
+                };
+                tx.execute(
+                    "INSERT INTO agent_tasks (
+                        id, workspace_id, workspace_name, bug_id, title, severity,
+                        priority, status, session_id, repo_path, log_path, md_path,
+                        source, created_at, started_at, finished_at, exit_code, error,
+                        runtime_id, transport, payload, updated_at
+                     ) VALUES (
+                        ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
+                        ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22
+                     )
+                     ON CONFLICT(id) DO UPDATE SET
+                        workspace_id = excluded.workspace_id,
+                        workspace_name = excluded.workspace_name,
+                        bug_id = excluded.bug_id,
+                        title = excluded.title,
+                        severity = excluded.severity,
+                        priority = excluded.priority,
+                        status = excluded.status,
+                        session_id = excluded.session_id,
+                        repo_path = excluded.repo_path,
+                        log_path = excluded.log_path,
+                        md_path = excluded.md_path,
+                        source = excluded.source,
+                        created_at = excluded.created_at,
+                        started_at = excluded.started_at,
+                        finished_at = excluded.finished_at,
+                        exit_code = excluded.exit_code,
+                        error = excluded.error,
+                        runtime_id = excluded.runtime_id,
+                        transport = excluded.transport,
+                        payload = excluded.payload,
+                        updated_at = excluded.updated_at",
+                    params![
+                        task.id,
+                        task.workspace_id,
+                        task.workspace_name,
+                        task.bug_id,
+                        task.title,
+                        task.severity,
+                        task.priority,
+                        status,
+                        task.session_id,
+                        task.repo_path,
+                        task.log_path,
+                        task.md_path,
+                        task.source,
+                        task.created_at,
+                        task.started_at,
+                        task.finished_at,
+                        task.exit_code,
+                        task.error,
+                        task.runtime_id,
+                        task.transport,
+                        payload,
+                        updated_at
+                    ],
+                )?;
+            }
+            for id in removed {
+                tx.execute("DELETE FROM agent_tasks WHERE id = ?1", params![id])?;
+            }
+            tx.execute(
+                "INSERT INTO agent_queue_state (id, paused) VALUES (1, ?1)
+                 ON CONFLICT(id) DO UPDATE SET paused = excluded.paused",
+                params![if paused { 1i64 } else { 0i64 }],
+            )?;
+            tx.commit()
+        })();
+        match result {
+            Ok(()) => true,
+            Err(error) => {
+                tracing::warn!(%error, "failed to persist agent tasks");
+                false
             }
         }
     }
@@ -715,7 +834,7 @@ mod tests {
     }
 
     #[test]
-    fn mirrors_agent_task_relations() {
+    fn persists_and_loads_agent_tasks() {
         let cache = temp_cache();
         let task = crate::agent::AgentTask {
             id: "task-1".to_string(),
@@ -747,19 +866,36 @@ mod tests {
             baseline_dirty: Vec::new(),
             baseline_head: None,
         };
-        cache.replace_agent_tasks(&[task]);
+        assert!(cache.save_agent_tasks(std::slice::from_ref(&task), true, &[]));
 
-        let guard = cache.conn.lock().expect("cache lock");
-        let conn = guard.as_ref().expect("cache connection");
-        let (status, session): (String, String) = conn
-            .query_row(
-                "SELECT status, session_id FROM agent_tasks WHERE id = 'task-1'",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .expect("mirrored row");
-        assert_eq!(status, "succeeded");
-        assert_eq!(session, "ses_1");
+        let (tasks, paused) = cache.load_agent_tasks().expect("sqlite");
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].id, "task-1");
+        assert_eq!(tasks[0].prompt, "prompt");
+        assert_eq!(tasks[0].severity, "严重");
+        assert_eq!(tasks[0].status, crate::agent::TaskStatus::Succeeded);
+        assert!(paused);
+
+        {
+            let guard = cache.conn.lock().expect("cache lock");
+            let conn = guard.as_ref().expect("cache connection");
+            let (status, session, payload): (String, String, String) = conn
+                .query_row(
+                    "SELECT status, session_id, payload FROM agent_tasks WHERE id = 'task-1'",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .expect("persisted row");
+            assert_eq!(status, "succeeded");
+            assert_eq!(session, "ses_1");
+            assert!(payload.contains("\"prompt\":\"prompt\""));
+        }
+
+        // Removed ids are deleted and the queue flag is updated.
+        assert!(cache.save_agent_tasks(&[], false, &["task-1".to_string()]));
+        let (tasks, paused) = cache.load_agent_tasks().expect("sqlite");
+        assert!(tasks.is_empty());
+        assert!(!paused);
     }
 
     #[test]
@@ -799,8 +935,81 @@ mod tests {
                 |row| row.get(0),
             )
             .expect("notification_settings table");
-        assert_eq!(version, 4);
+        let audit_table: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'mcp_audit'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("mcp_audit table");
+        let queue_table: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                  WHERE type = 'table' AND name = 'agent_queue_state'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("agent_queue_state table");
+        assert_eq!(version, 5);
         assert_eq!(table, 1);
         assert_eq!(notification_table, 1);
+        assert_eq!(audit_table, 1);
+        assert_eq!(queue_table, 1);
+    }
+
+    #[test]
+    fn v4_task_rows_are_ignored_after_upgrade() {
+        let path = std::env::temp_dir().join(format!(
+            "tapd-cache-v4-{}.sqlite3",
+            uuid::Uuid::new_v4().simple()
+        ));
+        {
+            let conn = Connection::open(&path).expect("v4 db");
+            conn.execute_batch(
+                "CREATE TABLE agent_tasks (
+                    id TEXT PRIMARY KEY,
+                    workspace_id TEXT NOT NULL,
+                    workspace_name TEXT NOT NULL DEFAULT '',
+                    bug_id TEXT NOT NULL,
+                    title TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL,
+                    session_id TEXT,
+                    repo_path TEXT NOT NULL DEFAULT '',
+                    log_path TEXT NOT NULL DEFAULT '',
+                    md_path TEXT NOT NULL DEFAULT '',
+                    source TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL DEFAULT '',
+                    started_at TEXT,
+                    finished_at TEXT,
+                    exit_code INTEGER,
+                    error TEXT,
+                    updated_at INTEGER NOT NULL
+                );
+                INSERT INTO agent_tasks (id, workspace_id, bug_id, status, updated_at)
+                    VALUES ('old-task', 'ws', 'bug', 'succeeded', 1);
+                PRAGMA user_version = 4;",
+            )
+            .expect("v4 schema");
+        }
+
+        let cache = Cache::open(path);
+        let (tasks, paused) = cache.load_agent_tasks().expect("sqlite");
+        assert!(tasks.is_empty(), "old mirror rows must not be imported");
+        assert!(!paused);
+
+        let guard = cache.conn.lock().expect("cache lock");
+        let conn = guard.as_ref().expect("cache connection");
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .expect("version");
+        let payload: String = conn
+            .query_row(
+                "SELECT payload FROM agent_tasks WHERE id = 'old-task'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("old row");
+        assert_eq!(version, 5);
+        assert!(payload.is_empty());
     }
 }

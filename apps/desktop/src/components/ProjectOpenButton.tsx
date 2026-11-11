@@ -108,7 +108,7 @@ export function ProjectOpenButton({ workspaceId, onError }: Props) {
 
   return (
     <div ref={rootRef} className="relative shrink-0">
-      <div className="inline-flex items-stretch overflow-hidden rounded-lg border border-slate-200 bg-white text-[11px] text-slate-600 shadow-sm">
+      <div className="inline-flex items-stretch overflow-hidden rounded-lg border border-border bg-surface text-ui-sm text-slate-600">
         <button
           type="button"
           onClick={() => void open()}
@@ -128,15 +128,15 @@ export function ProjectOpenButton({ workspaceId, onError }: Props) {
           aria-label="选择打开项目的应用"
           aria-expanded={menuOpen}
           onClick={() => setMenuOpen((current) => !current)}
-          className="border-l border-slate-200 px-1 transition hover:bg-slate-50"
+          className="border-l border-border px-1 transition hover:bg-slate-50"
         >
           <ChevronDown size={11} />
         </button>
       </div>
 
       {menuOpen ? (
-        <div className="absolute right-0 z-30 mt-1 w-52 overflow-hidden rounded-lg border border-slate-200 bg-white py-1 shadow-lg">
-          <p className="px-3 py-1 text-[10px] text-slate-400">用以下应用打开</p>
+        <div className="absolute right-0 z-50 mt-1 w-52 overflow-hidden rounded-lg border border-border bg-surface py-1 ">
+          <p className="px-3 py-1 text-ui-xs text-slate-400">用以下应用打开</p>
           {(targets?.targets ?? []).map((target) => {
             const active = target.id === targets?.selected;
             return (
@@ -145,7 +145,7 @@ export function ProjectOpenButton({ workspaceId, onError }: Props) {
                 type="button"
                 onClick={() => select(target.id)}
                 className={clsx(
-                  "flex w-full items-center gap-2 px-3 py-1.5 text-left text-[11px] transition hover:bg-slate-50",
+                  "flex w-full items-center gap-2 px-3 py-1.5 text-left text-ui-sm transition hover:bg-slate-50",
                   active ? "text-slate-800" : "text-slate-600",
                 )}
               >
@@ -156,7 +156,7 @@ export function ProjectOpenButton({ workspaceId, onError }: Props) {
             );
           })}
           {targets && targets.targets.length === 0 ? (
-            <p className="px-3 py-2 text-[11px] text-slate-400">没有可用的应用</p>
+            <p className="px-3 py-2 text-ui-sm text-slate-400">没有可用的应用</p>
           ) : null}
         </div>
       ) : null}

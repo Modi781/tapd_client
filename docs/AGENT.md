@@ -53,11 +53,11 @@
 
 ## 4. 任务、历史与恢复
 
-- 文件：`agent-tasks.json`（任务）、`agent-logs/`（TUI 与服务日志）、`agent-events/`（server 事件 JSONL，用于版本适配排障）。
-- SQLite：`cache.sqlite3` 的 `agent_tasks` 表镜像任务关系（workspace / bug / session / log / 状态 / 时间），独立于 JSON 持久化。
+- SQLite：`cache.sqlite3` 是唯一任务存储。`agent_tasks.payload` 保存完整任务 JSON，标量列（workspace / bug / session / log / 状态 / 时间）用于查询；`agent_queue_state` 保存 `queue_paused`。状态变化只 upsert 变化的行。
+- 日志：`agent-logs/`（TUI / 服务 / ACP 日志）、`agent-events/`（server 事件 JSONL，用于版本适配排障）；保留最近 200 个任务的产物，更早的自动清理。
 - 状态：`queued | preparing | running | waiting_review | awaiting_approval | succeeded | failed | canceled`
-- `agent-tasks.json` 同时保存 `queue_paused`：用户停止审核后即使重启客户端，队列也不会自动执行。
-- 「历史」子页只展示终态任务，按项目 / 终态 / 关键词筛选；查看错误、prompt、退出码、会话 ID，可「查看日志」「终端恢复」「重试」。「打开缺陷」只在右侧详情面板展开/切换该缺陷，不跳转项目缺陷列表。
+- `queue_paused` 保存在 `agent_queue_state`：用户停止审核后即使重启客户端，队列也不会自动执行。
+- 「历史」子页只展示终态任务，按项目 / 终态 / 关键词在服务端筛选并分页加载（每页 50 条）；查看错误、prompt、退出码、会话 ID，可「查看日志」「终端恢复」「重试」。「打开缺陷」只在右侧详情面板展开/切换该缺陷，不跳转项目缺陷列表。
 - 客户端重启时，遗留的 `preparing/running/waiting_review` 会标记为 failed（“客户端重启”）；`awaiting_approval` 保留，继续出现在待审核页；`queued` 任务在队列未暂停时继续执行。
 - 取消会先尝试 `POST /session/{id}/abort`，再 kill TUI + server 进程组；开放的其他子进程仍可能残留。
 
@@ -76,6 +76,9 @@ MCP 提供：
 - `tapd_add_bug_comment`：追加「原因 / 方案 / 影响范围」评论。
 - `tapd_update_bug_status`：把状态更新到目标（支持中文名或 key）；若不能直接到达，会先自动接受再流转。
 - `tapd_request_review`：暂停复杂改动并进入待审核（仅 Agent 任务使用）。
+- `tapd_get_bug_prompt`：按缺陷 id 返回同一套模板渲染的修复提示词；外部客户端默认用不含审核队列的 MCP 模板，`kind: "agent"` 返回这里配置的全局模板原文。
+
+上面配置的「本地文件夹」也会被 MCP 复用：外部 AI 传 `root`（或 sidecar 自动填入自己的 cwd）时，客户端按仓库目录反查 TAPD 项目。
 
 写操作受 TAPD 工作流约束；非法流转会返回允许的下一步，agent 可据此调整。所有写操作都记录在客户端日志与 MCP 审计。
 

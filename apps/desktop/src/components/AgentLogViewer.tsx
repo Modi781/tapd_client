@@ -4,6 +4,7 @@ import { Copy, ExternalLink, FolderOpen, ScrollText, X } from "lucide-react";
 
 import { agentApi, type AgentTask, type AgentTaskStatus } from "../lib/agent";
 import { stripAnsi } from "../lib/ansi";
+import { bugTitle } from "../lib/bug";
 import { AgentTerminal } from "./AgentTerminal";
 
 /** Statuses where the PTY is still alive and accepts keystrokes. */
@@ -86,16 +87,16 @@ export function AgentLogViewer({ task, onClose, toast }: Props) {
         if (event.target === event.currentTarget) onClose();
       }}
     >
-      <div className="flex h-[min(86vh,860px)] w-[min(1180px,94vw)] flex-col overflow-hidden rounded-2xl bg-white shadow-2xl ring-1 ring-black/10">
+      <div className="flex h-[min(86vh,860px)] w-[min(1180px,94vw)] flex-col overflow-hidden rounded-2xl bg-surface  border border-black/10">
         <header className="flex shrink-0 items-start gap-3 border-b border-slate-100 px-4 py-3">
           <span className="mt-0.5 grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-zinc-900 text-sky-300">
             <ScrollText size={15} />
           </span>
           <div className="min-w-0 flex-1">
-            <h2 className="truncate text-[13px] font-semibold text-slate-900">
-              {task.title || "Agent 终端"}
+            <h2 className="truncate text-ui-base font-normal text-slate-900">
+              {bugTitle(task.title) || "Agent 终端"}
             </h2>
-            <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-[10px] text-slate-400">
+            <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-ui-xs text-slate-400">
               <span>
                 {task.workspaceName || task.workspaceId} · #{task.bugId.slice(-7)}
               </span>
@@ -127,11 +128,11 @@ export function AgentLogViewer({ task, onClose, toast }: Props) {
           />
         </div>
 
-        <footer className="flex shrink-0 flex-wrap items-center gap-2 border-t border-slate-100 bg-white px-4 py-2.5">
+        <footer className="flex shrink-0 flex-wrap items-center gap-2 border-t border-slate-100 bg-surface px-4 py-2.5">
           <button
             type="button"
             onClick={() => void copyLog()}
-            className="inline-flex items-center gap-1 rounded-md border border-slate-200 px-2 py-1 text-[11px] text-slate-600 transition hover:border-slate-300"
+            className="inline-flex items-center gap-1 rounded-md border border-border px-2 py-1 text-ui-sm text-slate-600 transition hover:border-slate-300"
           >
             <Copy size={11} />
             {copied ? "已复制" : "复制文本"}
@@ -139,12 +140,12 @@ export function AgentLogViewer({ task, onClose, toast }: Props) {
           <button
             type="button"
             onClick={openFile}
-            className="inline-flex items-center gap-1 rounded-md border border-slate-200 px-2 py-1 text-[11px] text-slate-600 transition hover:border-slate-300"
+            className="inline-flex items-center gap-1 rounded-md border border-border px-2 py-1 text-ui-sm text-slate-600 transition hover:border-slate-300"
           >
             <FolderOpen size={11} />
             打开日志文件
           </button>
-          <span className="ml-auto text-[10px] text-slate-400">
+          <span className="ml-auto text-ui-xs text-slate-400">
             {interactive
               ? "实时终端：可直接输入，窗口大小会同步给 Agent"
               : "已结束的任务只回放输出，不能输入"}
@@ -153,7 +154,7 @@ export function AgentLogViewer({ task, onClose, toast }: Props) {
             <button
               type="button"
               onClick={() => void resume()}
-              className="inline-flex items-center gap-1 rounded-md border border-slate-200 px-2 py-1 text-[11px] text-slate-600 transition hover:border-slate-300"
+              className="inline-flex items-center gap-1 rounded-md border border-border px-2 py-1 text-ui-sm text-slate-600 transition hover:border-slate-300"
             >
               <ExternalLink size={11} />
               终端恢复

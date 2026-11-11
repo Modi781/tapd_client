@@ -6,13 +6,13 @@ type ButtonVariant = "primary" | "secondary" | "ghost" | "danger";
 
 const BUTTON_VARIANTS: Record<ButtonVariant, string> = {
   primary:
-    "bg-slate-900 text-white shadow-sm hover:bg-slate-800 disabled:bg-slate-300",
+    "bg-primary text-primary-foreground  hover:bg-primary-hover disabled:bg-slate-200 disabled:text-slate-400",
   secondary:
-    "border border-slate-200 bg-white text-slate-700 hover:border-slate-300 hover:text-slate-900 disabled:text-slate-400",
+    "border border-border bg-surface text-slate-700 hover:border-slate-300 hover:text-slate-900 disabled:text-slate-400",
   ghost:
     "text-slate-500 hover:bg-slate-100 hover:text-slate-800 disabled:opacity-40",
   danger:
-    "border border-rose-200 bg-white text-rose-600 hover:bg-rose-50 disabled:opacity-40",
+    "border border-rose-200 bg-surface text-rose-600 hover:bg-rose-50 disabled:opacity-40",
 };
 
 export function Button(
@@ -40,8 +40,8 @@ export function Button(
       {...rest}
       disabled={disabled || loading}
       className={clsx(
-        "inline-flex shrink-0 items-center justify-center gap-1.5 rounded-lg font-medium transition focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-200 disabled:cursor-not-allowed",
-        size === "sm" ? "px-2.5 py-1.5 text-xs" : "px-3.5 py-2 text-sm",
+        "inline-flex shrink-0 items-center justify-center gap-1.5 rounded-lg font-normal transition focus-visible:outline-2 focus-visible:outline-sky-200 disabled:cursor-not-allowed",
+        size === "sm" ? "px-2.5 py-1.5 text-ui-caption" : "px-3.5 py-2 text-ui-base",
         BUTTON_VARIANTS[variant],
         className,
       )}
@@ -84,7 +84,7 @@ export function Badge(props: {
   return (
     <span
       className={clsx(
-        "inline-flex items-center gap-1.5 whitespace-nowrap rounded-md px-2 py-0.5 text-[11px] font-medium",
+        "inline-flex items-center gap-1.5 whitespace-nowrap rounded-md px-2 py-0.5 text-ui-sm font-normal",
         BADGE_TONES[tone],
         className,
       )}
@@ -106,13 +106,15 @@ export function EmptyState(props: {
   action?: ReactNode;
 }) {
   return (
-    <div className="grid min-h-[280px] place-items-center p-8 text-center">
+    <div
+      className="grid min-h-[280px] place-items-center p-8 text-center"
+      title={props.description}
+    >
       <div className="max-w-md">
         <div className="mx-auto grid h-12 w-12 place-items-center rounded-2xl bg-slate-100 text-slate-400">
           {props.icon}
         </div>
-        <h3 className="mt-3 text-sm font-semibold text-slate-800">{props.title}</h3>
-        <p className="mt-1 text-xs leading-5 text-slate-500">{props.description}</p>
+        <h3 className="mt-3 text-ui-base text-slate-800">{props.title}</h3>
         {props.action ? <div className="mt-4">{props.action}</div> : null}
       </div>
     </div>

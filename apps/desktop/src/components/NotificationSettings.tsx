@@ -3,6 +3,7 @@ import clsx from "clsx";
 import { AlertTriangle, Bell, Bot, Clock, RefreshCw, Send } from "lucide-react";
 
 import type { SettingsSectionProps } from "../lib/feature";
+import { bugTitle } from "../lib/bug";
 import {
   AI_TONE_LABELS,
   DEFAULT_NOTIFICATION_SETTINGS,
@@ -129,16 +130,13 @@ export function NotificationSettings({ toast }: SettingsSectionProps) {
     .slice(0, 4);
 
   return (
-    <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+    <section className="rounded-2xl border border-border bg-surface p-5 ">
       <div className="flex items-start justify-between gap-3">
         <div>
-          <h2 className="flex items-center gap-2 text-sm font-semibold text-slate-900">
+          <h2 className="flex items-center gap-2 text-ui-base font-normal text-slate-900">
             <Bell size={15} className="text-slate-400" />
             新缺陷通知
           </h2>
-          <p className="mt-1 text-xs leading-5 text-slate-500">
-            后台按轮询间隔检测新分配、转派与重新打开的缺陷，用自绘卡片提示，不依赖系统通知。
-          </p>
         </div>
         <div className="flex shrink-0 items-center gap-2">
           {loading ? (
@@ -154,9 +152,11 @@ export function NotificationSettings({ toast }: SettingsSectionProps) {
       <div className="mt-4 space-y-3">
         <div className="flex items-center justify-between rounded-xl border border-slate-100 bg-slate-50/70 px-3 py-2.5">
           <div>
-            <div className="text-xs font-medium text-slate-800">启用新缺陷通知</div>
-            <div className="mt-0.5 text-[11px] text-slate-500">
-              关闭后停止轮询与弹窗，已有待处理通知仍保留。
+            <div
+              className="text-ui-caption text-slate-800"
+              title="关闭后停止轮询与弹窗，已有待处理通知仍保留。"
+            >
+              启用新缺陷通知
             </div>
           </div>
           <Toggle
@@ -167,7 +167,7 @@ export function NotificationSettings({ toast }: SettingsSectionProps) {
         </div>
 
         <div>
-          <div className="text-[11px] font-medium text-slate-600">通知范围</div>
+          <div className="text-ui-sm font-normal text-slate-600">通知范围</div>
           <div className="mt-1.5 grid gap-2 sm:grid-cols-2">
             <ScopeOption
               active={settings.scope === "mine"}
@@ -185,7 +185,7 @@ export function NotificationSettings({ toast }: SettingsSectionProps) {
         </div>
 
         <div>
-          <div className="text-[11px] font-medium text-slate-600">通知类型</div>
+          <div className="text-ui-sm font-normal text-slate-600">通知类型</div>
           <div className="mt-1.5 divide-y divide-slate-100 rounded-xl border border-slate-100">
             <SwitchRow
               label="纯新建"
@@ -211,13 +211,14 @@ export function NotificationSettings({ toast }: SettingsSectionProps) {
         <div className="rounded-xl border border-slate-100 px-3 py-2.5">
           <div className="flex items-center justify-between gap-3">
             <div>
-              <div className="flex items-center gap-1.5 text-xs font-medium text-slate-800">
+              <div
+                className="flex items-center gap-1.5 text-ui-caption text-slate-800"
+                title="opencode、Claude Code 等可调用 tapd_notify_user，在胶囊里提示成功、失败或等待确认。"
+              >
                 <Bot size={12} className="text-slate-400" />
                 允许 AI / MCP 唤起通知
               </div>
-              <p className="mt-1 text-[11px] leading-4 text-slate-500">
-                opencode、Claude Code 等可调用 tapd_notify_user，在胶囊里提示成功、失败或等待确认。
-              </p>
+
             </div>
             <Toggle
               checked={settings.aiEnabled}
@@ -228,8 +229,12 @@ export function NotificationSettings({ toast }: SettingsSectionProps) {
 
           <div className="mt-3 rounded-lg border border-slate-100 bg-slate-50/70 p-2.5">
             <div className="flex items-center justify-between">
-              <div className="text-[11px] font-medium text-slate-700">调试通知</div>
-              <span className="text-[10px] text-slate-400">卡片会出现在屏幕顶部</span>
+              <div
+                className="text-ui-sm text-slate-700"
+                title="卡片会出现在屏幕顶部"
+              >
+                调试通知
+              </div>
             </div>
 
             <div className="mt-2 flex flex-wrap items-center gap-1.5">
@@ -239,10 +244,10 @@ export function NotificationSettings({ toast }: SettingsSectionProps) {
                   type="button"
                   onClick={() => setDebugTone(tone)}
                   className={clsx(
-                    "rounded-full border px-2 py-0.5 text-[10px] transition",
+                    "rounded-full border px-2 py-0.5 text-ui-xs transition",
                     AI_TONE_CHIP[tone],
                     debugTone === tone
-                      ? "ring-1 ring-slate-400"
+                      ? "border-slate-400"
                       : "opacity-70 hover:opacity-100",
                   )}
                 >
@@ -255,18 +260,18 @@ export function NotificationSettings({ toast }: SettingsSectionProps) {
               value={debugTitle}
               onChange={(event) => setDebugTitle(event.target.value)}
               placeholder="标题"
-              className="mt-2 w-full rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-700 focus:outline-none focus:ring-2 focus:ring-sky-200"
+              className="mt-2 w-full rounded-lg border border-border bg-surface px-2.5 py-1.5 text-ui-caption text-slate-700 focus:outline-2 focus:outline-sky-200"
             />
             <textarea
               value={debugBody}
               onChange={(event) => setDebugBody(event.target.value)}
               rows={2}
               placeholder="正文（可换行）"
-              className="mt-1.5 w-full resize-none rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-700 focus:outline-none focus:ring-2 focus:ring-sky-200"
+              className="mt-1.5 w-full resize-none rounded-lg border border-border bg-surface px-2.5 py-1.5 text-ui-caption text-slate-700 focus:outline-2 focus:outline-sky-200"
             />
 
             <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
-              <label className="flex items-center gap-1.5 text-[10px] text-slate-500">
+              <label className="flex items-center gap-1.5 text-ui-xs text-slate-500">
                 <input
                   type="checkbox"
                   checked={debugActions}
@@ -286,14 +291,14 @@ export function NotificationSettings({ toast }: SettingsSectionProps) {
             </div>
 
             {aiItems.length > 0 ? (
-              <div className="mt-2 space-y-0.5 border-t border-slate-200/70 pt-1.5">
+              <div className="mt-2 space-y-0.5 border-t border-border/70 pt-1.5">
                 {aiItems.map((item) => (
                   <div
                     key={item.id}
-                    className="flex items-center gap-2 text-[10px] text-slate-500"
+                    className="flex items-center gap-2 text-ui-xs text-slate-500"
                   >
-                    <span className="min-w-0 flex-1 truncate" title={item.title}>
-                      {item.title}
+                    <span className="min-w-0 flex-1 truncate" title={bugTitle(item.title)}>
+                      {bugTitle(item.title)}
                     </span>
                     <span className="shrink-0 text-slate-400">{aiResultLabel(item)}</span>
                   </div>
@@ -304,8 +309,11 @@ export function NotificationSettings({ toast }: SettingsSectionProps) {
         </div>
 
         <div className="grid gap-3 sm:grid-cols-2">
-          <label className="rounded-xl border border-slate-100 bg-slate-50/70 px-3 py-2.5">
-            <span className="flex items-center gap-1.5 text-[11px] font-medium text-slate-600">
+          <label
+            className="rounded-xl border border-slate-100 bg-slate-50/70 px-3 py-2.5"
+            title="允许 20–600 秒，默认 30。"
+          >
+            <span className="flex items-center gap-1.5 text-ui-sm text-slate-600">
               <RefreshCw size={11} className="text-slate-400" />
               轮询间隔（秒）
             </span>
@@ -325,17 +333,20 @@ export function NotificationSettings({ toast }: SettingsSectionProps) {
               onKeyDown={(event) => {
                 if (event.key === "Enter") event.currentTarget.blur();
               }}
-              className="mt-1.5 w-full rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-700 focus:outline-none focus:ring-2 focus:ring-sky-200"
+              className="mt-1.5 w-full rounded-lg border border-border bg-surface px-2.5 py-1.5 text-ui-caption text-slate-700 focus:outline-2 focus:outline-sky-200"
             />
-            <span className="mt-1 block text-[10px] text-slate-400">允许 20–600 秒，默认 30。</span>
+
           </label>
 
-          <label className="rounded-xl border border-slate-100 bg-slate-50/70 px-3 py-2.5">
-            <span className="text-[11px] font-medium text-slate-600">同时展示数量</span>
+          <label
+            className="rounded-xl border border-slate-100 bg-slate-50/70 px-3 py-2.5"
+            title="超出部分保持待处理，处理一条后自动补位。"
+          >
+            <span className="text-ui-sm text-slate-600">同时展示数量</span>
             <select
               value={settings.maxVisible}
               onChange={(event) => patch({ maxVisible: Number(event.target.value) })}
-              className="mt-1.5 w-full rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-700 focus:outline-none focus:ring-2 focus:ring-sky-200"
+              className="mt-1.5 w-full rounded-lg border border-border bg-surface px-2.5 py-1.5 text-ui-caption text-slate-700 focus:outline-2 focus:outline-sky-200"
             >
               {[1, 2, 3, 4, 5].map((value) => (
                 <option key={value} value={value}>
@@ -343,15 +354,16 @@ export function NotificationSettings({ toast }: SettingsSectionProps) {
                 </option>
               ))}
             </select>
-            <span className="mt-1 block text-[10px] text-slate-400">
-              超出部分保持待处理，处理一条后自动补位。
-            </span>
+
           </label>
         </div>
 
         <div className="rounded-xl border border-slate-100 px-3 py-2.5">
           <div className="flex items-center justify-between">
-            <div className="flex items-center gap-1.5 text-xs font-medium text-slate-800">
+            <div
+              className="flex items-center gap-1.5 text-ui-caption text-slate-800"
+              title="时段内只累计待处理通知，不弹窗；时段结束后自动显示未处理通知。"
+            >
               <Clock size={12} className="text-slate-400" />
               免打扰
             </div>
@@ -361,31 +373,29 @@ export function NotificationSettings({ toast }: SettingsSectionProps) {
               label="启用免打扰"
             />
           </div>
-          <p className="mt-1 text-[11px] text-slate-500">
-            时段内只累计待处理通知，不弹窗；时段结束后自动显示未处理通知。
-          </p>
+
           <div className="mt-2 flex items-center gap-2">
             <input
               type="time"
               value={settings.quietHours.start}
               disabled={!settings.quietHours.enabled}
               onChange={(event) => patchQuietHours({ start: event.target.value })}
-              className="rounded-lg border border-slate-200 px-2 py-1.5 text-xs text-slate-700 disabled:bg-slate-50 disabled:text-slate-400 focus:outline-none focus:ring-2 focus:ring-sky-200"
+              className="rounded-lg border border-border px-2 py-1.5 text-ui-caption text-slate-700 disabled:bg-slate-50 disabled:text-slate-400 focus:outline-2 focus:outline-sky-200"
             />
-            <span className="text-[11px] text-slate-400">至</span>
+            <span className="text-ui-sm text-slate-400">至</span>
             <input
               type="time"
               value={settings.quietHours.end}
               disabled={!settings.quietHours.enabled}
               onChange={(event) => patchQuietHours({ end: event.target.value })}
-              className="rounded-lg border border-slate-200 px-2 py-1.5 text-xs text-slate-700 disabled:bg-slate-50 disabled:text-slate-400 focus:outline-none focus:ring-2 focus:ring-sky-200"
+              className="rounded-lg border border-border px-2 py-1.5 text-ui-caption text-slate-700 disabled:bg-slate-50 disabled:text-slate-400 focus:outline-2 focus:outline-sky-200"
             />
-            <span className="text-[10px] text-slate-400">支持跨午夜（如 22:00–09:00）</span>
+
           </div>
         </div>
 
         <div className="rounded-xl border border-slate-100 bg-slate-50/70 px-3 py-2.5">
-          <div className="grid gap-1 text-[11px] text-slate-500 sm:grid-cols-2">
+          <div className="grid gap-1 text-ui-sm text-slate-500 sm:grid-cols-2">
             <div>
               上次轮询：
               <span className="ml-1 font-mono text-slate-700">
@@ -400,7 +410,7 @@ export function NotificationSettings({ toast }: SettingsSectionProps) {
             </div>
           </div>
           {snapshot?.lastError ? (
-            <div className="mt-1.5 flex items-start gap-1.5 rounded-lg bg-rose-50 px-2 py-1.5 text-[10px] leading-4 text-rose-700">
+            <div className="mt-1.5 flex items-start gap-1.5 rounded-lg bg-rose-50 px-2 py-1.5 text-ui-xs leading-4 text-rose-700">
               <AlertTriangle size={11} className="mt-0.5 shrink-0" />
               <span className="break-all">{snapshot.lastError}</span>
             </div>
@@ -459,11 +469,12 @@ function ScopeOption(props: {
     <button
       type="button"
       onClick={props.onClick}
+      title={props.description}
       className={clsx(
         "rounded-xl border px-3 py-2 text-left transition",
         props.active
-          ? "border-sky-300 bg-sky-50/60 shadow-sm"
-          : "border-slate-200 bg-white hover:border-slate-300",
+          ? "border-sky-300 bg-sky-50/60 "
+          : "border-border bg-surface hover:border-slate-300",
       )}
     >
       <div className="flex items-center gap-2">
@@ -475,9 +486,8 @@ function ScopeOption(props: {
         >
           {props.active ? <span className="h-1.5 w-1.5 rounded-full bg-sky-500" /> : null}
         </span>
-        <span className="text-xs font-medium text-slate-800">{props.title}</span>
+        <span className="text-ui-caption font-normal text-slate-800">{props.title}</span>
       </div>
-      <p className="mt-1 pl-5 text-[10px] leading-4 text-slate-500">{props.description}</p>
     </button>
   );
 }
@@ -490,9 +500,8 @@ function SwitchRow(props: {
 }) {
   return (
     <div className="flex items-center justify-between gap-3 px-3 py-2">
-      <div>
-        <div className="text-xs text-slate-700">{props.label}</div>
-        <div className="text-[10px] text-slate-400">{props.description}</div>
+      <div className="text-ui-caption text-slate-700" title={props.description}>
+        {props.label}
       </div>
       <Toggle checked={props.checked} onChange={props.onChange} label={props.label} />
     </div>
@@ -512,13 +521,13 @@ function Toggle(props: {
       aria-label={props.label}
       onClick={() => props.onChange(!props.checked)}
       className={clsx(
-        "relative h-5 w-9 shrink-0 rounded-full transition focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-200",
+        "relative h-5 w-9 shrink-0 rounded-full transition focus-visible:outline-2 focus-visible:outline-sky-200",
         props.checked ? "bg-sky-500" : "bg-slate-300",
       )}
     >
       <span
         className={clsx(
-          "absolute left-0.5 top-0.5 h-4 w-4 rounded-full bg-white shadow transition",
+          "absolute left-0.5 top-0.5 h-4 w-4 rounded-full bg-surface transition",
           props.checked ? "translate-x-4" : "translate-x-0",
         )}
       />

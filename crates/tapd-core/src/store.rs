@@ -1,4 +1,5 @@
-//! Tiny JSON persistence helpers shared by the notification and agent stores.
+//! Tiny JSON persistence helpers for small config-style state (for example the
+//! agent settings). Growing state belongs in SQLite.
 
 use std::io::{self, Write};
 use std::path::Path;

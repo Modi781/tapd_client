@@ -6,9 +6,37 @@
   --color-ink-700: #16283f;
   --color-brand-400: #38bdf8;
   --color-brand-500: #0ea5e9;
-  --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC",
-    "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
-  --font-mono: "SF Mono", ui-monospace, Menlo, monospace;
+  --font-sans: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+    "SF Pro Text", "PingFang SC", "Hiragino Sans GB", "Noto Sans SC",
+    "Segoe UI", sans-serif, "Apple Color Emoji", "Segoe UI Emoji";
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+    "Liberation Mono", "Courier New", monospace;
+
+  /* Semantic surfaces: utilities use these variables, so one theme block
+     recolours the whole app without sprinkling `dark:` through every view. */
+  --color-surface: #ffffff;
+  --color-canvas: #f4f4f2;
+  --color-border: #0f172a14;
+  --color-overlay: #0f172a12;
+  --color-overlay-soft: #0f172a0a;
+  --color-selected: #ffffff;
+  --color-primary: #0f172a;
+  --color-primary-hover: #1e293b;
+  --color-primary-foreground: #ffffff;
+
+  /* UI scale: every label is derived from one base size. */
+  --text-ui-2xs: calc(var(--ui-font-size) - 4px);
+  --text-ui-2xs--line-height: 1.35;
+  --text-ui-xs: calc(var(--ui-font-size) - 3px);
+  --text-ui-xs--line-height: 1.4;
+  --text-ui-sm: calc(var(--ui-font-size) - 2px);
+  --text-ui-sm--line-height: 1.45;
+  --text-ui-caption: calc(var(--ui-font-size) - 1px);
+  --text-ui-caption--line-height: 1.45;
+  --text-ui-base: var(--ui-font-size);
+  --text-ui-base--line-height: 1.5;
+  --text-ui-lg: calc(var(--ui-font-size) + 2px);
+  --text-ui-lg--line-height: 1.4;
 }
 
 html,
@@ -21,8 +49,8 @@ body {
   margin: 0;
   font-family: var(--font-sans);
   -webkit-font-smoothing: antialiased;
-  background: #f4f6f9;
-  color: #0f172a;
+  background: var(--color-canvas);
+  color: var(--color-slate-900);
   overflow: hidden;
 }
 
@@ -30,10 +58,18 @@ body {
   background: rgb(14 165 233 / 0.25);
 }
 
+/* Style contract: borders carry structure, never shadows. This also keeps
+   third-party widgets (Markdown editor, native-looking controls) flat. */
+*,
+*::before,
+*::after {
+  box-shadow: none !important;
+}
+
 /* Thin scrollbars for dense enterprise views. */
 * {
   scrollbar-width: thin;
-  scrollbar-color: #cbd5e1 transparent;
+  scrollbar-color: var(--scrollbar-thumb) transparent;
 }
 
 *::-webkit-scrollbar {
@@ -42,7 +78,7 @@ body {
 }
 
 *::-webkit-scrollbar-thumb {
-  background: #cbd5e1;
+  background: var(--scrollbar-thumb);
   border-radius: 999px;
 }
 
@@ -267,7 +303,6 @@ body {
 .agent-compose-editor .w-md-editor {
   border: 1px solid #e2e8f0;
   border-radius: 12px;
-  box-shadow: none;
   background: #fff;
   font-family: var(--font-sans);
   font-size: 12px;
@@ -275,7 +310,8 @@ body {
 
 .agent-compose-editor .w-md-editor:focus-within {
   border-color: #38bdf8;
-  box-shadow: 0 0 0 2px rgb(224 242 254);
+  outline: 2px solid rgb(224 242 254);
+  outline-offset: -1px;
 }
 
 .agent-compose-editor .w-md-editor-toolbar {
@@ -305,7 +341,7 @@ body {
 }
 
 .agent-compose-editor .w-md-editor-preview {
-  box-shadow: inset 1px 0 0 0 #f1f5f9;
+  border-left: 1px solid #f1f5f9;
   padding: 10px 14px;
 }
 
@@ -315,4 +351,273 @@ body {
   line-height: 1.7;
   color: #334155;
   background: transparent;
+}
+
+/* -------------------------------------------------------------------------
+   Appearance: light / dark tokens.
+   Utilities such as `bg-surface` and `text-slate-500` resolve through these
+   variables, so the whole app follows one theme without per-view variants.
+   ------------------------------------------------------------------------- */
+:root,
+[data-theme="light"] {
+  color-scheme: light;
+  --ui-font-size: 14px;
+  --scrollbar-thumb: #cbd5e1;
+
+  --color-surface: #ffffff;
+  --color-canvas: #f4f4f2;
+  --color-border: #0f172a14;
+  --color-overlay: #0f172a12;
+  --color-overlay-soft: #0f172a0a;
+  --color-selected: #ffffff;
+  --color-primary: #0f172a;
+  --color-primary-hover: #1e293b;
+  --color-primary-foreground: #ffffff;
+
+  --color-slate-50: #f8fafc;
+  --color-slate-100: #f1f5f9;
+  --color-slate-200: #e2e8f0;
+  --color-slate-300: #cbd5e1;
+  --color-slate-400: #94a3b8;
+  --color-slate-500: #64748b;
+  --color-slate-600: #475569;
+  --color-slate-700: #334155;
+  --color-slate-800: #1e293b;
+  --color-slate-900: #0f172a;
+  --color-slate-950: #020617;
+
+  --color-sky-50: #f0f9ff;
+  --color-sky-100: #e0f2fe;
+  --color-sky-200: #bae6fd;
+  --color-sky-300: #7dd3fc;
+  --color-sky-400: #38bdf8;
+  --color-sky-500: #0ea5e9;
+  --color-sky-600: #0284c7;
+  --color-sky-700: #0369a1;
+  --color-sky-800: #075985;
+  --color-sky-900: #0c4a6e;
+  --color-sky-950: #082f49;
+
+  --color-rose-50: #fff1f2;
+  --color-rose-100: #ffe4e6;
+  --color-rose-200: #fecdd3;
+  --color-rose-300: #fda4af;
+  --color-rose-400: #fb7185;
+  --color-rose-500: #f43f5e;
+  --color-rose-600: #e11d48;
+  --color-rose-700: #be123c;
+  --color-rose-800: #9f1239;
+  --color-rose-900: #881337;
+  --color-rose-950: #4c0519;
+
+  --color-amber-50: #fffbeb;
+  --color-amber-100: #fef3c7;
+  --color-amber-200: #fde68a;
+  --color-amber-300: #fcd34d;
+  --color-amber-400: #fbbf24;
+  --color-amber-500: #f59e0b;
+  --color-amber-600: #d97706;
+  --color-amber-700: #b45309;
+  --color-amber-800: #92400e;
+  --color-amber-900: #78350f;
+  --color-amber-950: #451a03;
+
+  --color-emerald-50: #ecfdf5;
+  --color-emerald-100: #d1fae5;
+  --color-emerald-200: #a7f3d0;
+  --color-emerald-300: #6ee7b7;
+  --color-emerald-400: #34d399;
+  --color-emerald-500: #10b981;
+  --color-emerald-600: #059669;
+  --color-emerald-700: #047857;
+  --color-emerald-800: #065f46;
+  --color-emerald-900: #064e3b;
+  --color-emerald-950: #022c22;
+
+  --color-violet-50: #f5f3ff;
+  --color-violet-100: #ede9fe;
+  --color-violet-200: #ddd6fe;
+  --color-violet-300: #c4b5fd;
+  --color-violet-400: #a78bfa;
+  --color-violet-500: #8b5cf6;
+  --color-violet-600: #7c3aed;
+  --color-violet-700: #6d28d9;
+  --color-violet-800: #5b21b6;
+  --color-violet-900: #4c1d95;
+  --color-violet-950: #2e1065;
+
+  --color-cyan-50: #ecfeff;
+  --color-cyan-100: #cffafe;
+  --color-cyan-200: #a5f3fc;
+  --color-cyan-300: #67e8f9;
+  --color-cyan-400: #22d3ee;
+  --color-cyan-500: #06b6d4;
+  --color-cyan-600: #0891b2;
+  --color-cyan-700: #0e7490;
+  --color-cyan-800: #155e75;
+  --color-cyan-900: #164e63;
+  --color-cyan-950: #083344;
+}
+
+[data-theme="dark"] {
+  color-scheme: dark;
+  --scrollbar-thumb: #3f4652;
+
+  --color-surface: #17191e;
+  --color-canvas: #0e1014;
+  --color-border: #ffffff14;
+  --color-overlay: #ffffff17;
+  --color-overlay-soft: #ffffff0f;
+  --color-selected: #262b33;
+  --color-primary: #f2f5fa;
+  --color-primary-hover: #e2e8f0;
+  --color-primary-foreground: #0f172a;
+
+  --color-slate-50: #181b21;
+  --color-slate-100: #1e2229;
+  --color-slate-200: #2a2f38;
+  --color-slate-300: #4f5866;
+  --color-slate-400: #8b93a1;
+  --color-slate-500: #a2aab8;
+  --color-slate-600: #c0c7d2;
+  --color-slate-700: #d4d9e2;
+  --color-slate-800: #e4e8ef;
+  --color-slate-900: #f2f5fa;
+  --color-slate-950: #020617;
+
+  --color-sky-50: #0c2634;
+  --color-sky-100: #0f3346;
+  --color-sky-200: #164a63;
+  --color-sky-300: #7dd3fc;
+  --color-sky-400: #38bdf8;
+  --color-sky-500: #0ea5e9;
+  --color-sky-600: #7dd3fc;
+  --color-sky-700: #bae6fd;
+  --color-sky-800: #cfeafe;
+  --color-sky-900: #e6f5ff;
+  --color-sky-950: #f2faff;
+
+  --color-rose-50: #2a1519;
+  --color-rose-100: #3a1a20;
+  --color-rose-200: #55232c;
+  --color-rose-300: #fda4af;
+  --color-rose-400: #fb7185;
+  --color-rose-500: #f43f5e;
+  --color-rose-600: #fda4af;
+  --color-rose-700: #fecdd3;
+  --color-rose-800: #ffe4e6;
+  --color-rose-900: #fff1f2;
+  --color-rose-950: #fff5f6;
+
+  --color-amber-50: #2a2110;
+  --color-amber-100: #392c13;
+  --color-amber-200: #54401b;
+  --color-amber-300: #fcd34d;
+  --color-amber-400: #fbbf24;
+  --color-amber-500: #f59e0b;
+  --color-amber-600: #fcd34d;
+  --color-amber-700: #fde68a;
+  --color-amber-800: #fef3c7;
+  --color-amber-900: #fffbeb;
+  --color-amber-950: #fffdf5;
+
+  --color-emerald-50: #0c241c;
+  --color-emerald-100: #0f3226;
+  --color-emerald-200: #174a37;
+  --color-emerald-300: #6ee7b7;
+  --color-emerald-400: #34d399;
+  --color-emerald-500: #10b981;
+  --color-emerald-600: #6ee7b7;
+  --color-emerald-700: #a7f3d0;
+  --color-emerald-800: #d1fae5;
+  --color-emerald-900: #ecfdf5;
+  --color-emerald-950: #f3fdf9;
+
+  --color-violet-50: #1d1730;
+  --color-violet-100: #281f42;
+  --color-violet-200: #3a2d5e;
+  --color-violet-300: #c4b5fd;
+  --color-violet-400: #a78bfa;
+  --color-violet-500: #8b5cf6;
+  --color-violet-600: #c4b5fd;
+  --color-violet-700: #ddd6fe;
+  --color-violet-800: #ede9fe;
+  --color-violet-900: #f5f3ff;
+  --color-violet-950: #fbfaff;
+
+  --color-cyan-50: #0b2429;
+  --color-cyan-100: #0e3238;
+  --color-cyan-200: #164a54;
+  --color-cyan-300: #67e8f9;
+  --color-cyan-400: #22d3ee;
+  --color-cyan-500: #06b6d4;
+  --color-cyan-600: #67e8f9;
+  --color-cyan-700: #a5f3fc;
+  --color-cyan-800: #cffafe;
+  --color-cyan-900: #ecfeff;
+  --color-cyan-950: #f5feff;
+}
+
+/* Always-dark panels (media viewer, code blocks, overlays) opt out of the
+   inversion so their light text keeps its contrast in both themes. */
+.theme-static-dark {
+  --color-slate-50: #f8fafc;
+  --color-slate-100: #f1f5f9;
+  --color-slate-200: #e2e8f0;
+  --color-slate-300: #cbd5e1;
+  --color-slate-400: #94a3b8;
+  --color-slate-500: #64748b;
+  --color-slate-600: #475569;
+  --color-slate-700: #334155;
+  --color-slate-800: #1e293b;
+  --color-slate-900: #0f172a;
+  --color-slate-950: #020617;
+}
+
+/* Markdown editor follows the app theme. Its own dark palette handles most
+   internals; these overrides keep borders and toolbar consistent with ours. */
+[data-theme="dark"] .agent-compose-editor .w-md-editor {
+  background: var(--color-surface);
+  border-color: var(--color-slate-200);
+  color: var(--color-slate-700);
+}
+
+[data-theme="dark"] .agent-compose-editor .w-md-editor-toolbar {
+  background: var(--color-slate-50);
+  border-bottom-color: var(--color-slate-200);
+}
+
+[data-theme="dark"] .agent-compose-editor .w-md-editor-toolbar li > button {
+  color: var(--color-slate-400);
+}
+
+[data-theme="dark"] .agent-compose-editor .w-md-editor-toolbar li > button:hover {
+  background: var(--color-slate-100);
+  color: var(--color-slate-800);
+}
+
+[data-theme="dark"] .agent-compose-editor .w-md-editor-text-input,
+[data-theme="dark"] .agent-compose-editor .w-md-editor-text-pre > code,
+[data-theme="dark"] .agent-compose-editor .w-md-editor-text {
+  color: var(--color-slate-700) !important;
+}
+
+[data-theme="dark"] .agent-compose-editor .w-md-editor:focus-within {
+  outline-color: rgb(56 189 248 / 0.35);
+}
+
+[data-theme="dark"] .agent-compose-editor .w-md-editor-preview {
+  border-left-color: var(--color-slate-200);
+}
+
+[data-theme="dark"] .agent-compose-editor .wmde-markdown {
+  background: transparent;
+  color: var(--color-slate-600);
+}
+
+[data-theme="dark"] .agent-compose-editor .wmde-markdown h1,
+[data-theme="dark"] .agent-compose-editor .wmde-markdown h2,
+[data-theme="dark"] .agent-compose-editor .wmde-markdown h3,
+[data-theme="dark"] .agent-compose-editor .wmde-markdown strong {
+  color: var(--color-slate-800);
 }

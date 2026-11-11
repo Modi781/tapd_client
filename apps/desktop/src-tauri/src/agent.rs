@@ -22,15 +22,15 @@
 //!   hanging the queue.
 
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     io::{Read, Write},
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc::RecvTimeoutError,
         Arc, Mutex,
     },
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use portable_pty::{native_pty_system, Child, ChildKiller, CommandBuilder, MasterPty, PtySize};
@@ -49,11 +49,14 @@ use crate::{
 pub const MAIN_LABEL: &str = "main";
 
 const CONFIG_FILE: &str = "agent.json";
-const TASKS_FILE: &str = "agent-tasks.json";
 const LOG_DIR: &str = "agent-logs";
 const EVENTS_DIR: &str = "agent-events";
 /// Pasted screenshots/videos; only their paths are handed to the agent.
 const RESOURCE_DIR: &str = "agent-resources";
+/// Keep per-task logs/events for the newest N tasks; older artifacts are
+/// pruned so the data directory cannot grow without bound.
+const ARTIFACT_TASK_LIMIT: usize = 200;
+const ARTIFACT_PRUNE_INTERVAL_SECS: u64 = 6 * 60 * 60;
 
 const DEFAULT_BINARY: &str = "opencode";
 const DEFAULT_RUNTIME_ID: &str = "opencode";
@@ -496,14 +499,6 @@ pub struct TaskApproval {
     pub stash: Option<String>,
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", default)]
-struct TaskFile {
-    tasks: Vec<AgentTask>,
-    /// Set when the user stops a review: the queue must not auto-advance.
-    queue_paused: bool,
-}
-
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct EnqueueRequest {
@@ -530,6 +525,8 @@ struct EnqueueRequest {
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentTasksState {
+    /// Live tasks only (`queued` .. `awaiting_approval`). Terminal history is
+    /// fetched page by page through `agent_tasks_history`.
     tasks: Vec<AgentTask>,
     active_task_id: Option<String>,
     /// Kept for compatibility: number of `queued` tasks.
@@ -542,6 +539,37 @@ pub struct AgentTasksState {
     /// True after the user stopped a review; the worker stays idle until
     /// `agent_queue_resume`.
     queue_paused: bool,
+}
+
+/// Paginated terminal-task history. Filters and paging run in Rust so the
+/// frontend never receives the full history.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+struct HistoryQuery {
+    workspace_id: Option<String>,
+    status: Option<String>,
+    keyword: Option<String>,
+    /// Focused task id; used by the island/enqueue flow to locate one row.
+    task_id: Option<String>,
+    offset: Option<usize>,
+    limit: Option<usize>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AgentTasksPage {
+    tasks: Vec<AgentTask>,
+    total: usize,
+    has_more: bool,
+    /// Workspaces present in history, for the filter dropdown.
+    workspaces: Vec<AgentWorkspaceRef>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AgentWorkspaceRef {
+    id: String,
+    name: String,
 }
 
 /// Lightweight state for the island capsule / tray badge.
@@ -1132,8 +1160,8 @@ fn last_recorded_outcome(events_dir: &Path, task_id: &str) -> Option<RecordedOut
 ///
 /// A task that already recorded a turn outcome before the exit keeps that
 /// outcome; everything else is reported as interrupted.
-fn recover_incomplete(tasks: &mut [AgentTask], events_dir: &Path, now: &str) -> usize {
-    let mut recovered = 0usize;
+fn recover_incomplete(tasks: &mut [AgentTask], events_dir: &Path, now: &str) -> Vec<AgentTask> {
+    let mut recovered = Vec::new();
     for task in tasks.iter_mut() {
         if !task.status.is_active() {
             continue;
@@ -1157,7 +1185,7 @@ fn recover_incomplete(tasks: &mut [AgentTask], events_dir: &Path, now: &str) -> 
         }
         task.finished_at = Some(now.to_string());
         task.review = None;
-        recovered += 1;
+        recovered.push(task.clone());
     }
     recovered
 }
@@ -1391,9 +1419,21 @@ pub struct AgentCore {
     /// Terminal size the UI asked for. The console can be opened before the
     /// PTY exists, so the size is remembered and applied when it starts.
     sizes: Mutex<HashMap<String, (u16, u16)>>,
-    /// Set when the user stops a review. Persisted in `agent-tasks.json` so a
+    /// Set when the user stops a review. Persisted in `agent_queue_state` so a
     /// restart does not silently resume a queue the user halted.
     paused: AtomicBool,
+    /// Snapshots of tasks changed since the last write. Cloning at the
+    /// mutation point keeps persistence O(changed) even with a large history.
+    pending_tasks: Mutex<HashMap<String, AgentTask>>,
+    /// Task ids removed from memory that must be deleted from SQLite. A
+    /// removal must also drop any pending snapshot for the id.
+    removed_tasks: Mutex<HashSet<String>>,
+    /// Serializes writers so an older snapshot can never overwrite a newer one.
+    persist_lock: Mutex<()>,
+    /// The queue-paused flag needs a write.
+    paused_dirty: AtomicBool,
+    /// Unix seconds of the last artifact scan (pruning is throttled).
+    last_prune_secs: AtomicU64,
     wake: tokio::sync::Notify,
 }
 
@@ -1410,16 +1450,17 @@ impl AgentCore {
             cancels: Mutex::new(HashMap::new()),
             sizes: Mutex::new(HashMap::new()),
             paused: AtomicBool::new(false),
+            pending_tasks: Mutex::new(HashMap::new()),
+            removed_tasks: Mutex::new(HashSet::new()),
+            persist_lock: Mutex::new(()),
+            paused_dirty: AtomicBool::new(false),
+            last_prune_secs: AtomicU64::new(0),
             wake: tokio::sync::Notify::new(),
         }
     }
 
     fn config_path(&self) -> PathBuf {
         self.state.paths.data_dir.join(CONFIG_FILE)
-    }
-
-    fn tasks_path(&self) -> PathBuf {
-        self.state.paths.data_dir.join(TASKS_FILE)
     }
 
     fn logs_dir(&self) -> PathBuf {
@@ -1439,14 +1480,20 @@ impl AgentCore {
         }
         *self.config.lock().expect("agent config lock") = loaded;
 
-        let task_file = read_json::<TaskFile>(&self.tasks_path()).unwrap_or_default();
-        let mut tasks = task_file.tasks;
-        self.paused.store(task_file.queue_paused, Ordering::SeqCst);
+        // SQLite is the only task store.
+        let (mut tasks, paused) = self.state.cache.load_agent_tasks().unwrap_or_default();
+        self.paused.store(paused, Ordering::SeqCst);
+        self.paused_dirty.store(false, Ordering::SeqCst);
+
         let recovered = recover_incomplete(&mut tasks, &self.events_dir(), &now());
-        if recovered > 0 {
-            tracing::warn!(recovered, "recovered interrupted agent tasks");
+        if !recovered.is_empty() {
+            tracing::warn!(
+                recovered = recovered.len(),
+                "recovered interrupted agent tasks"
+            );
         }
         *self.tasks.lock().expect("agent tasks lock") = tasks;
+        self.mark_tasks_dirty(recovered);
 
         let _ = std::fs::create_dir_all(self.logs_dir());
         let _ = std::fs::create_dir_all(self.events_dir());
@@ -1457,31 +1504,154 @@ impl AgentCore {
         self.config.lock().expect("agent config lock").clone()
     }
 
-    fn persist_tasks(&self) {
-        let file = TaskFile {
-            tasks: self.tasks.lock().expect("agent tasks lock").clone(),
-            queue_paused: self.paused.load(Ordering::SeqCst),
-        };
-        if let Err(error) = write_json_atomic(&self.tasks_path(), &file) {
-            tracing::warn!(%error, "failed to persist agent tasks");
+    fn mark_task_dirty(&self, task: AgentTask) {
+        self.pending_tasks
+            .lock()
+            .expect("agent pending lock")
+            .insert(task.id.clone(), task);
+    }
+
+    fn mark_tasks_dirty<I>(&self, tasks: I)
+    where
+        I: IntoIterator<Item = AgentTask>,
+    {
+        let mut pending = self.pending_tasks.lock().expect("agent pending lock");
+        for task in tasks {
+            pending.insert(task.id.clone(), task);
         }
-        // Relational mirror (task <-> bug/session/log) for history queries.
-        self.state.cache.replace_agent_tasks(&file.tasks);
+    }
+
+    /// Updates the queue flag and marks it for persistence when it changes.
+    fn set_paused(&self, paused: bool) {
+        if self.paused.swap(paused, Ordering::SeqCst) != paused {
+            self.paused_dirty.store(true, Ordering::SeqCst);
+        }
+    }
+
+    fn persist_tasks(&self) {
+        // One writer at a time: a drained older snapshot must not be written
+        // after a newer one.
+        let _writer = self.persist_lock.lock().expect("agent persist lock");
+
+        // Drain the pending snapshots first: only tasks touched since the last
+        // write are serialized, so persistence is O(changed).
+        let tasks: Vec<AgentTask> = {
+            let mut pending = self.pending_tasks.lock().expect("agent pending lock");
+            if pending.is_empty() {
+                Vec::new()
+            } else {
+                pending.drain().map(|(_, task)| task).collect()
+            }
+        };
+        let removed: Vec<String> = {
+            let mut removed = self.removed_tasks.lock().expect("agent removed lock");
+            if removed.is_empty() {
+                Vec::new()
+            } else {
+                removed.drain().collect()
+            }
+        };
+        let paused_dirty = self.paused_dirty.swap(false, Ordering::SeqCst);
+        if tasks.is_empty() && removed.is_empty() && !paused_dirty {
+            return;
+        }
+
+        let paused = self.paused.load(Ordering::SeqCst);
+        let persisted = self.state.cache.save_agent_tasks(&tasks, paused, &removed);
+        if !persisted {
+            // SQLite is unavailable. Re-read the latest in-memory state (a
+            // mutation may have landed while the write was failing) so the
+            // retry never resurrects an older snapshot.
+            let failed: HashSet<&str> = tasks.iter().map(|task| task.id.as_str()).collect();
+            let latest: Vec<AgentTask> = {
+                let current = self.tasks.lock().expect("agent tasks lock");
+                current
+                    .iter()
+                    .filter(|task| failed.contains(task.id.as_str()))
+                    .cloned()
+                    .collect()
+            };
+            let found: HashSet<&str> = latest.iter().map(|task| task.id.as_str()).collect();
+            let missing: Vec<String> = failed
+                .into_iter()
+                .filter(|id| !found.contains(id))
+                .map(str::to_string)
+                .collect();
+
+            self.mark_tasks_dirty(latest);
+            if !missing.is_empty() {
+                self.removed_tasks
+                    .lock()
+                    .expect("agent removed lock")
+                    .extend(missing);
+            }
+            if !removed.is_empty() {
+                self.removed_tasks
+                    .lock()
+                    .expect("agent removed lock")
+                    .extend(removed);
+            }
+            if paused_dirty {
+                self.paused_dirty.store(true, Ordering::SeqCst);
+            }
+            return;
+        }
+
+        self.maybe_prune_artifacts();
+    }
+
+    /// Prunes per-task logs/events at most once per `ARTIFACT_PRUNE_INTERVAL_SECS`.
+    fn maybe_prune_artifacts(&self) {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_secs())
+            .unwrap_or(0);
+        let last = self.last_prune_secs.load(Ordering::Relaxed);
+        if now.saturating_sub(last) < ARTIFACT_PRUNE_INTERVAL_SECS {
+            return;
+        }
+        self.last_prune_secs.store(now, Ordering::Relaxed);
+
+        let keep: HashSet<String> = {
+            let tasks = self.tasks.lock().expect("agent tasks lock");
+            tasks
+                .iter()
+                .rev()
+                .take(ARTIFACT_TASK_LIMIT)
+                .map(|task| task.id.clone())
+                .collect()
+        };
+        if keep.is_empty() {
+            return;
+        }
+        prune_agent_artifacts(&self.logs_dir(), &self.events_dir(), &keep);
     }
 
     fn tasks_state(&self) -> AgentTasksState {
-        let tasks = self.tasks.lock().expect("agent tasks lock").clone();
-        let counts = task_counts(&tasks);
+        let tasks = self.tasks.lock().expect("agent tasks lock");
+        let counts = task_counts(tasks.as_slice());
+        let live: Vec<AgentTask> = tasks
+            .iter()
+            .filter(|task| !task.status.is_terminal())
+            .cloned()
+            .collect();
         AgentTasksState {
-            active_task_id: active_task_id(&tasks),
+            active_task_id: active_task_id(tasks.as_slice()),
             queue_length: counts.queued,
             queued_count: counts.queued,
             active_count: counts.active,
             waiting_review_count: counts.waiting_review,
             awaiting_approval_count: counts.awaiting_approval,
             queue_paused: self.paused.load(Ordering::SeqCst),
-            tasks,
+            tasks: live,
         }
+    }
+
+    /// One page of terminal tasks, newest first. Filtering and paging happen
+    /// here so the frontend never receives the whole history.
+    fn history_page(&self, query: HistoryQuery) -> AgentTasksPage {
+        let tasks = self.tasks.lock().expect("agent tasks lock");
+        build_history_page(&tasks, query)
     }
 
     fn summary(&self) -> AgentSummary {
@@ -1496,20 +1666,22 @@ impl AgentCore {
     }
 
     /// Runs `mutate` under the tasks lock and only persists/broadcasts when it
-    /// reports a change.
+    /// reports changed task snapshots.
     fn mutate_tasks<F>(&self, mutate: F) -> bool
     where
-        F: FnOnce(&mut Vec<AgentTask>) -> bool,
+        F: FnOnce(&mut Vec<AgentTask>) -> Vec<AgentTask>,
     {
         let changed = {
             let mut tasks = self.tasks.lock().expect("agent tasks lock");
             mutate(&mut tasks)
         };
-        if changed {
-            self.persist_tasks();
-            self.emit_state();
+        if changed.is_empty() {
+            return false;
         }
-        changed
+        self.mark_tasks_dirty(changed);
+        self.persist_tasks();
+        self.emit_state();
+        true
     }
 
     fn update_task<F>(&self, task_id: &str, mutate: F) -> Option<AgentTask>
@@ -1522,6 +1694,7 @@ impl AgentCore {
             mutate(task);
             task.clone()
         };
+        self.mark_task_dirty(snapshot.clone());
         self.persist_tasks();
         self.emit_state();
         Some(snapshot)
@@ -1684,6 +1857,7 @@ impl AgentCore {
             }
             tasks.push(task.clone());
         }
+        self.mark_task_dirty(task.clone());
         self.persist_tasks();
         self.emit_state();
         self.wake.notify_one();
@@ -1767,6 +1941,7 @@ impl AgentCore {
         }
 
         self.stop_runtime(task_id);
+        self.mark_task_dirty(snapshot.clone());
         self.persist_tasks();
         self.emit_state();
         Ok(snapshot)
@@ -1850,13 +2025,13 @@ impl AgentCore {
         // Persist the relation on the task so history can reopen the session.
         let recorded = self.mutate_tasks(|tasks| {
             let Some(task) = tasks.iter_mut().find(|task| task.id == task_id) else {
-                return false;
+                return Vec::new();
             };
             if task.session_id.as_deref() == Some(session_id) {
-                return false;
+                return Vec::new();
             }
             task.session_id = Some(session_id.to_string());
-            true
+            vec![task.clone()]
         });
         if recorded {
             tracing::debug!(task_id, session_id, "agent session id recorded");
@@ -1906,31 +2081,35 @@ impl AgentCore {
 
         self.mutate_tasks(|tasks| {
             let Some(task) = tasks.iter_mut().find(|task| task.id == task_id) else {
-                return false;
+                return Vec::new();
             };
             if task.status.is_terminal() || task.status == TaskStatus::AwaitingApproval {
-                return false;
+                return Vec::new();
             }
             // A permission prompt keeps the turn alive; an idle event that
             // races with it must not silently complete the task.
             if task.status == TaskStatus::WaitingReview {
-                return false;
+                return Vec::new();
             }
             if !review_files.is_empty() {
-                return set_awaiting_approval(
+                return if set_awaiting_approval(
                     task,
                     "Agent 已完成修改但未提交，等待确认后提交。".to_string(),
                     review_files,
                     Some("存在未提交的改动".to_string()),
                     &at,
-                );
+                ) {
+                    vec![task.clone()]
+                } else {
+                    Vec::new()
+                };
             }
             task.status = TaskStatus::Succeeded;
             task.finished_at = Some(at);
             task.exit_code = Some(0);
             task.error = None;
             task.review = None;
-            true
+            vec![task.clone()]
         })
     }
 
@@ -1938,56 +2117,56 @@ impl AgentCore {
     fn fail_from_event(&self, task_id: &str, message: String) -> bool {
         self.mutate_tasks(|tasks| {
             let Some(task) = tasks.iter_mut().find(|task| task.id == task_id) else {
-                return false;
+                return Vec::new();
             };
             if task.status.is_terminal() || task.status == TaskStatus::AwaitingApproval {
-                return false;
+                return Vec::new();
             }
             task.status = TaskStatus::Failed;
             task.finished_at = Some(now());
             task.error = Some(message);
             task.review = None;
-            true
+            vec![task.clone()]
         })
     }
 
     fn set_review(&self, task_id: &str, review: PermissionReview) {
         self.mutate_tasks(|tasks| {
             let Some(task) = tasks.iter_mut().find(|task| task.id == task_id) else {
-                return false;
+                return Vec::new();
             };
             if task.status.is_terminal() {
-                return false;
+                return Vec::new();
             }
             let unchanged =
                 task.review.as_ref() == Some(&review) && task.status == TaskStatus::WaitingReview;
             if unchanged {
-                return false;
+                return Vec::new();
             }
             task.review = Some(review);
             task.status = TaskStatus::WaitingReview;
-            true
+            vec![task.clone()]
         });
     }
 
     fn clear_review(&self, task_id: &str, permission_id: Option<&str>) {
         self.mutate_tasks(|tasks| {
             let Some(task) = tasks.iter_mut().find(|task| task.id == task_id) else {
-                return false;
+                return Vec::new();
             };
             let Some(current) = task.review.as_ref() else {
-                return false;
+                return Vec::new();
             };
             if let Some(permission_id) = permission_id {
                 if current.id != permission_id {
-                    return false;
+                    return Vec::new();
                 }
             }
             task.review = None;
             if task.status == TaskStatus::WaitingReview {
                 task.status = TaskStatus::Running;
             }
-            true
+            vec![task.clone()]
         });
     }
 
@@ -2101,13 +2280,13 @@ impl AgentCore {
     fn clear_permission_review(&self, task_id: &str) -> Result<AgentTask, String> {
         let updated = self.mutate_tasks(|tasks| {
             let Some(task) = tasks.iter_mut().find(|task| task.id == task_id) else {
-                return false;
+                return Vec::new();
             };
             task.review = None;
             if !task.status.is_terminal() {
                 task.status = TaskStatus::Running;
             }
-            true
+            vec![task.clone()]
         });
         if !updated {
             return Err("任务不存在".to_string());
@@ -2215,7 +2394,7 @@ impl AgentCore {
 
         // Approving is an explicit "continue" signal, so a queue paused by an
         // earlier stop resumes unless another review still blocks it.
-        self.paused.store(false, Ordering::SeqCst);
+        self.set_paused(false);
         let at = now();
         let updated = self
             .update_task(task_id, |task| {
@@ -2273,7 +2452,7 @@ impl AgentCore {
             .map_err(|error| format!("储藏改动失败：{error}"))?;
 
         self.teardown_task(task_id);
-        self.paused.store(true, Ordering::SeqCst);
+        self.set_paused(true);
         let mut message = if stash.contains("无未提交改动") {
             format!("已停止：{stash}")
         } else {
@@ -2349,7 +2528,7 @@ impl AgentCore {
     /// Clears the queue pause. Tasks still awaiting review keep blocking the
     /// worker until the user decides them.
     fn resume_queue(&self) -> AgentTasksState {
-        self.paused.store(false, Ordering::SeqCst);
+        self.set_paused(false);
         self.persist_tasks();
         self.emit_state();
         self.wake.notify_one();
@@ -2541,6 +2720,7 @@ impl AgentCore {
             .lock()
             .expect("agent tasks lock")
             .push(task.clone());
+        self.mark_task_dirty(task.clone());
         self.persist_tasks();
         self.emit_state();
         self.wake.notify_one();
@@ -2680,14 +2860,14 @@ impl AgentCore {
     /// Fails any task still marked active. Called after each worker iteration.
     fn recover_active_tasks(&self, reason: &str) {
         self.mutate_tasks(|tasks| {
-            let mut changed = false;
+            let mut changed = Vec::new();
             for task in tasks.iter_mut() {
                 if task.status.is_active() {
                     task.status = TaskStatus::Failed;
                     task.error = Some(reason.to_string());
                     task.finished_at = Some(now());
                     task.review = None;
-                    changed = true;
+                    changed.push(task.clone());
                 }
             }
             changed
@@ -2710,6 +2890,7 @@ impl AgentCore {
             .lock()
             .expect("agent cancels lock")
             .insert(task.id.clone(), Arc::new(AtomicBool::new(false)));
+        self.mark_task_dirty(task.clone());
         self.persist_tasks();
         self.emit_state();
         Some(task)
@@ -3620,6 +3801,139 @@ fn now() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
+/// Filters and paginates terminal tasks. Kept free-standing so the paging
+/// contract is unit-testable without an `AppHandle`.
+fn build_history_page(tasks: &[AgentTask], query: HistoryQuery) -> AgentTasksPage {
+    let offset = query.offset.unwrap_or(0);
+    let limit = query.limit.unwrap_or(50).clamp(1, 200);
+    let status: Option<TaskStatus> = query
+        .status
+        .as_deref()
+        .map(str::trim)
+        .filter(|status| !status.is_empty())
+        .and_then(|status| serde_json::from_value(Value::String(status.to_string())).ok());
+    let workspace_id = query
+        .workspace_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty());
+    let task_id = query
+        .task_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty());
+    let keyword = query.keyword.unwrap_or_default().trim().to_lowercase();
+
+    let mut workspaces = BTreeMap::new();
+    let mut matched: Vec<&AgentTask> = Vec::new();
+    for task in tasks {
+        if !task.status.is_terminal() {
+            continue;
+        }
+        workspaces
+            .entry(task.workspace_id.clone())
+            .or_insert_with(|| task.workspace_name.clone());
+        if let Some(task_id) = task_id {
+            if task.id != task_id {
+                continue;
+            }
+        }
+        if let Some(workspace_id) = workspace_id {
+            if task.workspace_id != workspace_id {
+                continue;
+            }
+        }
+        if let Some(status) = status {
+            if task.status != status {
+                continue;
+            }
+        }
+        if !keyword.is_empty()
+            && !task.title.to_lowercase().contains(&keyword)
+            && !task.bug_id.to_lowercase().contains(&keyword)
+        {
+            continue;
+        }
+        matched.push(task);
+    }
+    matched.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+
+    let total = matched.len();
+    let page: Vec<AgentTask> = matched
+        .into_iter()
+        .skip(offset)
+        .take(limit)
+        .cloned()
+        .collect();
+    let has_more = offset + page.len() < total;
+
+    AgentTasksPage {
+        tasks: page,
+        total,
+        has_more,
+        workspaces: workspaces
+            .into_iter()
+            .map(|(id, name)| AgentWorkspaceRef { id, name })
+            .collect(),
+    }
+}
+
+/// Deletes logs/events that belong to tasks outside the newest
+/// `ARTIFACT_TASK_LIMIT`. Only files matching the task-artifact naming scheme
+/// are touched, so user exports or unrelated files survive.
+fn prune_agent_artifacts(logs_dir: &Path, events_dir: &Path, keep: &HashSet<String>) {
+    prune_artifact_dir(logs_dir, keep, task_log_id);
+    prune_artifact_dir(events_dir, keep, task_event_id);
+}
+
+fn prune_artifact_dir(dir: &Path, keep: &HashSet<String>, task_id_of: fn(&str) -> Option<&str>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        let Some(id) = task_id_of(name) else {
+            continue;
+        };
+        if keep.contains(id) {
+            continue;
+        }
+        if let Err(error) = std::fs::remove_file(entry.path()) {
+            tracing::warn!(
+                %error,
+                path = %entry.path().display(),
+                "failed to prune agent artifact"
+            );
+        }
+    }
+}
+
+/// `<id>.log`, `<id>-server.log`, `<id>-acp.ndjson` -> task id.
+fn task_log_id(name: &str) -> Option<&str> {
+    let stem = name
+        .strip_suffix(".log")
+        .or_else(|| name.strip_suffix(".ndjson"))?;
+    let id = stem
+        .strip_suffix("-server")
+        .or_else(|| stem.strip_suffix("-acp"))
+        .unwrap_or(stem);
+    is_task_id(id).then_some(id)
+}
+
+/// `<id>.jsonl` -> task id.
+fn task_event_id(name: &str) -> Option<&str> {
+    let id = name.strip_suffix(".jsonl")?;
+    is_task_id(id).then_some(id)
+}
+
+/// Task ids are simple UUIDs (32 hex characters).
+fn is_task_id(value: &str) -> bool {
+    value.len() == 32 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
 fn truncate_text(text: &str, max: usize) -> String {
     if text.chars().count() <= max {
         return text.to_string();
@@ -3875,6 +4189,15 @@ pub fn shutdown(app: &AppHandle) {
     }
 }
 
+/// Snapshot of the Agent settings for the MCP bridge: per-project repo paths /
+/// rules (used to match a caller's working directory) and the global prompt
+/// template. Falls back to defaults before the module is initialized.
+pub fn mcp_agent_config(app: &AppHandle) -> AgentConfig {
+    app.try_state::<Arc<AgentCore>>()
+        .map(|core| core.config_snapshot())
+        .unwrap_or_default()
+}
+
 /// Blocks TAPD comment/status writes from the local agent while its worktree
 /// still has files changed by this run. This enforces "commit first, then write
 /// back" even if the model ignores the prompt. Unrelated dirty files recorded
@@ -4087,6 +4410,10 @@ pub async fn command(
             Ok(json!({ "path": path }))
         }
         "agent_tasks_list" => Ok(json!(core.tasks_state())),
+        "agent_tasks_history" => {
+            let query: HistoryQuery = serde_json::from_value(payload).unwrap_or_default();
+            Ok(json!(core.history_page(query)))
+        }
         "agent_summary" => Ok(json!(core.summary())),
         "agent_open_task" => {
             let request: TaskIdRequest = serde_json::from_value(payload)
@@ -4581,9 +4908,6 @@ mod tests {
         assert!(!parsed.commit_only);
         assert!(parsed.baseline_dirty.is_empty());
         assert_eq!(parsed.baseline_head, None);
-
-        let file: TaskFile = serde_json::from_str(r#"{"tasks": []}"#).unwrap();
-        assert!(!file.queue_paused);
     }
 
     #[test]
@@ -4853,7 +5177,8 @@ mod tests {
         let events_dir = temp_events_dir();
 
         let recovered = recover_incomplete(&mut tasks, &events_dir, "2026-11-10T01:00:00Z");
-        assert_eq!(recovered, 3);
+        let ids: Vec<&str> = recovered.iter().map(|task| task.id.as_str()).collect();
+        assert_eq!(ids, vec!["preparing", "running", "waiting"]);
         assert_eq!(tasks[0].status, TaskStatus::Queued);
         assert_eq!(tasks[1].status, TaskStatus::Failed);
         assert_eq!(tasks[1].error.as_deref(), Some("客户端重启"));
@@ -4947,7 +5272,8 @@ mod tests {
         ];
         let recovered = recover_incomplete(&mut tasks, &dir, "2026-11-10T01:00:00Z");
 
-        assert_eq!(recovered, 2);
+        let ids: Vec<&str> = recovered.iter().map(|task| task.id.as_str()).collect();
+        assert_eq!(ids, vec!["running", "waiting"]);
         assert_eq!(tasks[0].status, TaskStatus::Succeeded);
         assert_eq!(tasks[0].error, None);
         assert_eq!(tasks[0].exit_code, Some(0));
@@ -4980,6 +5306,90 @@ mod tests {
         assert!(validate_binary("").is_err());
         assert!(validate_binary("/definitely/not/a/binary").is_err());
         assert!(validate_binary("definitely-not-a-real-command-xyz").is_err());
+    }
+
+    #[test]
+    fn history_pages_terminal_tasks_newest_first() {
+        let mut tasks = vec![
+            sample_task("old", TaskStatus::Succeeded),
+            sample_task("live", TaskStatus::Running),
+            sample_task("new", TaskStatus::Failed),
+            sample_task("mid", TaskStatus::Canceled),
+        ];
+        tasks[0].created_at = "2026-01-01T00:00:00Z".to_string();
+        tasks[1].created_at = "2026-01-02T00:00:00Z".to_string();
+        tasks[2].created_at = "2026-01-03T00:00:00Z".to_string();
+        tasks[3].created_at = "2026-01-02T12:00:00Z".to_string();
+
+        let page = build_history_page(
+            &tasks,
+            HistoryQuery {
+                limit: Some(2),
+                ..HistoryQuery::default()
+            },
+        );
+        assert_eq!(page.total, 3);
+        assert!(page.has_more);
+        let ids: Vec<&str> = page.tasks.iter().map(|task| task.id.as_str()).collect();
+        assert_eq!(ids, vec!["new", "mid"]);
+
+        let next = build_history_page(
+            &tasks,
+            HistoryQuery {
+                offset: Some(2),
+                limit: Some(2),
+                ..HistoryQuery::default()
+            },
+        );
+        assert_eq!(next.total, 3);
+        assert!(!next.has_more);
+        assert_eq!(next.tasks.len(), 1);
+        assert_eq!(next.tasks[0].id, "old");
+
+        let failed = build_history_page(
+            &tasks,
+            HistoryQuery {
+                status: Some("failed".to_string()),
+                ..HistoryQuery::default()
+            },
+        );
+        assert_eq!(failed.total, 1);
+        assert_eq!(failed.tasks[0].id, "new");
+    }
+
+    #[test]
+    fn prunes_artifacts_outside_the_newest_tasks() {
+        let dir = std::env::temp_dir().join(format!(
+            "tapd-agent-artifacts-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let logs = dir.join("logs");
+        let events = dir.join("events");
+        std::fs::create_dir_all(&logs).expect("logs");
+        std::fs::create_dir_all(&events).expect("events");
+
+        let keep = "a".repeat(32);
+        let drop = "b".repeat(32);
+        for id in [&keep, &drop] {
+            std::fs::write(logs.join(format!("{id}.log")), "log").expect("log");
+            std::fs::write(logs.join(format!("{id}-server.log")), "log").expect("server log");
+            std::fs::write(logs.join(format!("{id}-acp.ndjson")), "log").expect("acp log");
+            std::fs::write(events.join(format!("{id}.jsonl")), "event").expect("event");
+        }
+        std::fs::write(logs.join("notes.txt"), "keep me").expect("unrelated");
+
+        let keep_ids: HashSet<String> = [keep.clone()].into_iter().collect();
+        prune_agent_artifacts(&logs, &events, &keep_ids);
+
+        for suffix in [".log", "-server.log", "-acp.ndjson"] {
+            assert!(logs.join(format!("{keep}{suffix}")).exists());
+            assert!(!logs.join(format!("{drop}{suffix}")).exists());
+        }
+        assert!(events.join(format!("{keep}.jsonl")).exists());
+        assert!(!events.join(format!("{drop}.jsonl")).exists());
+        assert!(logs.join("notes.txt").exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[cfg(unix)]

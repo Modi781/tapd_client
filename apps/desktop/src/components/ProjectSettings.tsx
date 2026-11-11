@@ -10,7 +10,7 @@ import { Button } from "./ui";
 import { FolderPicker } from "./FolderPicker";
 
 const INPUT_CLASS =
-  "w-full rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-700 outline-none transition placeholder:text-slate-300 focus:border-sky-300 focus:ring-2 focus:ring-sky-100";
+  "w-full rounded-lg border border-border bg-surface px-2.5 py-1.5 text-ui-caption text-slate-700 transition placeholder:text-slate-300 focus:border-sky-300 focus:outline-2 focus:outline-sky-200";
 
 const emptyProject = (): ProjectAgentConfig => ({ repoPath: "", rule: "" });
 
@@ -147,14 +147,14 @@ export function ProjectSettings(props: {
   const pickerProject = pickerFor ? projects[pickerFor] ?? emptyProject() : null;
 
   return (
-    <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-      <h2 className="flex items-center gap-2 text-sm font-semibold text-slate-900">
+    <section className="rounded-2xl border border-border bg-surface p-5 ">
+      <h2
+        className="flex items-center gap-2 text-ui-base text-slate-900"
+        title="每个项目可设置本地文件夹、项目规则和是否显示在左侧列表；改动自动保存。"
+      >
         <FolderGit2 size={15} className="text-slate-400" />
         项目列表
       </h2>
-      <p className="mt-1 text-xs text-slate-500">
-        每个项目可设置本地文件夹、项目规则和是否显示在左侧列表；改动自动保存。
-      </p>
 
       <div className="mt-3 grid gap-2 sm:grid-cols-2">
         {workspaces.map((workspace) => {
@@ -168,8 +168,8 @@ export function ProjectSettings(props: {
               key={workspace.id}
               data-project-id={workspace.id}
               className={clsx(
-                "rounded-xl border bg-white p-3 transition",
-                open ? "border-sky-200 shadow-sm" : "border-slate-100",
+                "rounded-xl border bg-surface p-3 transition",
+                open ? "border-sky-200 " : "border-slate-100",
                 dragging && "border-dashed border-sky-300 bg-sky-50/40",
               )}
             >
@@ -178,10 +178,10 @@ export function ProjectSettings(props: {
                   className="h-2.5 w-2.5 shrink-0 rounded-full"
                   style={{ backgroundColor: workspace.logoColor || "#0ea5e9" }}
                 />
-                <span className="min-w-0 flex-1 truncate text-xs font-medium text-slate-800">
+                <span className="min-w-0 flex-1 truncate text-ui-caption font-normal text-slate-800">
                   {workspace.name}
                 </span>
-                <span className="shrink-0 font-mono text-[10px] text-slate-400">
+                <span className="shrink-0 font-mono text-ui-xs text-slate-400">
                   {workspace.id}
                 </span>
                 <button
@@ -212,7 +212,7 @@ export function ProjectSettings(props: {
                     setExpanded((current) => ({ ...current, [workspace.id]: !open }))
                   }
                   className={clsx(
-                    "inline-flex shrink-0 items-center gap-1 rounded-md px-1.5 py-1 text-[10px] transition",
+                    "inline-flex shrink-0 items-center gap-1 rounded-md px-1.5 py-1 text-ui-xs transition",
                     hasRule
                       ? "text-sky-600 hover:bg-sky-50"
                       : "text-slate-400 hover:bg-slate-50",
@@ -224,10 +224,10 @@ export function ProjectSettings(props: {
               </div>
 
               <div className="mt-2">
-                <div className="flex items-center justify-between text-[10px] text-slate-400">
+                <div className="flex items-center justify-between text-ui-xs text-slate-400">
                   <span>本地文件夹</span>
                   {project.repoPath ? (
-                    <span className="truncate pl-2 font-mono text-[10px] text-slate-400">
+                    <span className="truncate pl-2 font-mono text-ui-xs text-slate-400">
                       {project.repoPath.split("/").pop()}
                     </span>
                   ) : null}
@@ -259,22 +259,16 @@ export function ProjectSettings(props: {
 
               {open ? (
                 <div className="mt-2">
-                  <div className="text-[10px] text-slate-400">项目规则</div>
+                  <div className="text-ui-xs text-slate-400">项目规则</div>
                   <textarea
                     value={project.rule}
                     onChange={(event) => edit(workspace.id, { rule: event.target.value })}
                     onBlur={save}
                     rows={4}
+                    title="默认提示词模板里的 {{project_rule}} 会引入这段规则。"
                     placeholder={"例如：\n- 只改 Rust 层，UI 交给同事\n- 提交前必须跑 cargo test"}
                     className={`${INPUT_CLASS} mt-1 resize-y leading-5`}
                   />
-                  <p className="mt-1 text-[10px] leading-4 text-slate-400">
-                    默认提示词模板里的{" "}
-                    <code className="rounded bg-slate-100 px-1 font-mono">
-                      {"{{project_rule}}"}
-                    </code>{" "}
-                    会引入这段规则。
-                  </p>
                 </div>
               ) : null}
             </div>
@@ -282,7 +276,7 @@ export function ProjectSettings(props: {
         })}
 
         {workspaces.length === 0 ? (
-          <div className="rounded-xl border border-dashed border-slate-200 p-3 text-xs text-slate-400">
+          <div className="rounded-xl border border-dashed border-border p-3 text-ui-caption text-slate-400">
             登录后加载项目
           </div>
         ) : null}
@@ -292,7 +286,7 @@ export function ProjectSettings(props: {
         open={pickerFor !== null}
         initialPath={pickerProject?.repoPath}
         title="选择项目文件夹"
-        description="设置这个 TAPD 项目对应的本地仓库目录，Agent 会以它为工作目录。"
+        description="设置这个 TAPD 项目对应的本地仓库目录，Agent 会以它为工作目录；MCP 也按它把 AI 的根目录匹配到本项目。"
         onCancel={() => setPickerFor(null)}
         onSelect={(path) => {
           const workspaceId = pickerFor;

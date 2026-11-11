@@ -24,7 +24,7 @@ pub struct AppState {
 impl AppState {
     pub fn new(paths: AppPaths, config_store: ConfigStore, config: AppConfig) -> Self {
         let cache = Arc::new(Cache::open(paths.data_dir.join("cache.sqlite3")));
-        let mcp_audit = McpAudit::load(paths.data_dir.join("mcp-audit.json"));
+        let mcp_audit = McpAudit::load(cache.clone());
         Self {
             paths,
             config_store,

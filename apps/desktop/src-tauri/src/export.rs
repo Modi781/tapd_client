@@ -49,27 +49,20 @@ pub async fn run_export(
     workspace_name: Option<String>,
 ) -> Result<ExportResult, String> {
     let detail = fetch_detail(app, workspace_id, bug_id).await?;
-    let label = workspace_name
-        .filter(|name| !name.trim().is_empty())
-        .or_else(|| {
-            let name = detail.workspace_name.trim().to_string();
-            (!name.is_empty()).then_some(name)
-        })
-        .unwrap_or_else(|| workspace_id.to_string());
+    let label = workspace_label(workspace_name, &detail, workspace_id);
+    let bug_dir = bug_export_dir(
+        paths,
+        workspace_id,
+        &label,
+        &detail.summary.id,
+        &detail.summary.title,
+    );
 
     let window = app
         .get_webview_window(session::SESSION_LABEL)
         .ok_or_else(|| "会话窗口尚未创建".to_string())?;
     let cookie = session::cookie_header(&window)?;
 
-    let workspace_dir = paths
-        .exports_dir
-        .join(format!("{}-{}", slugify(&label), workspace_id));
-    let bug_dir = workspace_dir.join(format!(
-        "{}-{}",
-        detail.summary.id,
-        slugify(&detail.summary.title)
-    ));
     let assets_dir = bug_dir.join("assets");
     std::fs::create_dir_all(&assets_dir).map_err(|error| error.to_string())?;
 
@@ -134,6 +127,76 @@ pub async fn run_export(
         downloaded_bytes: total_bytes,
         warnings,
     })
+}
+
+fn workspace_label(
+    workspace_name: Option<String>,
+    detail: &BugDetail,
+    workspace_id: &str,
+) -> String {
+    workspace_name
+        .filter(|name| !name.trim().is_empty())
+        .or_else(|| {
+            let name = detail.workspace_name.trim().to_string();
+            (!name.is_empty()).then_some(name)
+        })
+        .unwrap_or_else(|| workspace_id.to_string())
+}
+
+/// Directory that receives `bug.md`, `bug.json` and `assets/` for one bug.
+pub(crate) fn bug_export_dir(
+    paths: &tapd_core::paths::AppPaths,
+    workspace_id: &str,
+    workspace_label: &str,
+    bug_id: &str,
+    title: &str,
+) -> PathBuf {
+    paths
+        .exports_dir
+        .join(format!("{}-{}", slugify(workspace_label), workspace_id))
+        .join(format!("{}-{}", bug_id, slugify(title)))
+}
+
+/// Reuses an existing export of the same bug. An explicit `workspace_name`
+/// changes the parent directory, so every `<slug>-<workspace_id>` folder is
+/// scanned; the newest `bug.md` wins.
+pub(crate) fn find_existing_export(
+    paths: &tapd_core::paths::AppPaths,
+    workspace_id: &str,
+    bug_id: &str,
+) -> Option<PathBuf> {
+    let suffix = format!("-{workspace_id}");
+    let prefix = format!("{bug_id}-");
+    let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
+
+    for workspace_entry in std::fs::read_dir(&paths.exports_dir).ok()?.flatten() {
+        if !workspace_entry.path().is_dir() {
+            continue;
+        }
+        if !workspace_entry.file_name().to_string_lossy().ends_with(&suffix) {
+            continue;
+        }
+        let Ok(children) = std::fs::read_dir(workspace_entry.path()) else {
+            continue;
+        };
+        for child in children.flatten() {
+            let dir = child.path();
+            if !dir.is_dir()
+                || !child.file_name().to_string_lossy().starts_with(&prefix)
+                || !dir.join("bug.md").is_file()
+            {
+                continue;
+            }
+            let modified = std::fs::metadata(&dir)
+                .and_then(|meta| meta.modified())
+                .unwrap_or(std::time::UNIX_EPOCH);
+            if best.as_ref().is_none_or(|(latest, _)| modified > *latest) {
+                best = Some((modified, dir));
+            }
+        }
+    }
+
+    best.map(|(_, dir)| dir)
 }
 
 async fn fetch_detail(

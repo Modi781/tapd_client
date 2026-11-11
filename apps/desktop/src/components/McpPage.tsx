@@ -37,10 +37,10 @@ type Props = {
 };
 
 const COPY_BUTTON =
-  "inline-flex shrink-0 items-center gap-1 rounded border border-slate-200 bg-white px-2 py-1 text-[10px] text-slate-600 transition hover:border-slate-300";
+  "inline-flex shrink-0 items-center gap-1 rounded border border-border bg-surface px-2 py-1 text-ui-xs text-slate-600 transition hover:border-slate-300";
 
 const INPUT_CLASS =
-  "w-full rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-700 outline-none transition placeholder:text-slate-300 focus:border-sky-300 focus:ring-2 focus:ring-sky-100";
+  "w-full rounded-lg border border-border bg-surface px-2.5 py-1.5 text-ui-caption text-slate-700 transition placeholder:text-slate-300 focus:border-sky-300 focus:outline-2 focus:outline-sky-200";
 
 /**
  * MCP tab: server status, policy/audit, and per-client one-click import
@@ -183,7 +183,7 @@ export function McpPage({ workspaces, onCopy, toast }: Props) {
   if (!mcp) {
     return (
       <div className="flex h-full items-center justify-center">
-        <div className="text-center text-xs text-slate-400">
+        <div className="text-center text-ui-caption text-slate-400">
           {configError ? (
             <>
               <Plug size={22} className="mx-auto mb-2 text-slate-300" />
@@ -281,13 +281,13 @@ export function McpPage({ workspaces, onCopy, toast }: Props) {
     <div className="mx-auto max-w-4xl space-y-4">
       <section className="space-y-3">
         <div className="px-1">
-          <h2 className="flex items-center gap-2 text-sm font-semibold text-slate-900">
+          <h2
+            className="flex items-center gap-2 text-ui-base text-slate-900"
+            title="一键写入各客户端的用户级配置，改动前自动备份；只想对某个项目生效时，展开手动配置。"
+          >
             <Wrench size={15} className="text-slate-400" />
             接入 AI 客户端
           </h2>
-          <p className="mt-1 text-xs leading-5 text-slate-500">
-            一键写入各客户端的用户级配置，改动前自动备份；只想对某个项目生效时，展开手动配置。
-          </p>
         </div>
 
         <div className="space-y-2">
@@ -298,20 +298,20 @@ export function McpPage({ workspaces, onCopy, toast }: Props) {
             return (
               <section
                 key={guide.id}
-                className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm"
+                className="rounded-2xl border border-border bg-surface p-4 "
               >
                 <div className="flex flex-wrap items-center gap-3">
                   <div className="flex min-w-0 flex-1 items-center gap-2.5">
                     {guide.icon}
                     <div className="min-w-0">
                       <div className="flex items-center gap-2">
-                        <h3 className="text-xs font-semibold text-slate-900">{guide.title}</h3>
+                        <h3 className="text-ui-caption font-normal text-slate-900">{guide.title}</h3>
                         <Badge tone={status?.imported ? "green" : "amber"}>
                           {status?.imported ? "已导入" : "未导入"}
                         </Badge>
                       </div>
                       <p
-                        className="mt-0.5 truncate text-[10px] text-slate-400"
+                        className="mt-0.5 truncate text-ui-xs text-slate-400"
                         title={status?.path ?? guide.hint}
                       >
                         {status?.path ?? guide.hint}
@@ -345,7 +345,7 @@ export function McpPage({ workspaces, onCopy, toast }: Props) {
                 </div>
 
                 {result ? (
-                  <div className="mt-2 break-all text-[10px] leading-5 text-emerald-700">
+                  <div className="mt-2 break-all text-ui-xs leading-5 text-emerald-700">
                     <CheckCircle2 size={11} className="mr-1 inline" />
                     {result.changed ? "已写入" : "已存在，无需重复写入"}：
                     <span className="font-mono">{result.path}</span>
@@ -360,7 +360,7 @@ export function McpPage({ workspaces, onCopy, toast }: Props) {
                 {expanded ? (
                   <div className="mt-3 rounded-xl border border-slate-100 bg-slate-50 p-3">
                     <div className="flex items-start justify-between gap-3">
-                      <p className="text-[10px] leading-5 text-slate-500">{guide.manual}</p>
+                      <p className="text-ui-xs leading-5 text-slate-500">{guide.manual}</p>
                       <button
                         type="button"
                         onClick={() => onCopy(guide.code)}
@@ -370,7 +370,7 @@ export function McpPage({ workspaces, onCopy, toast }: Props) {
                         复制
                       </button>
                     </div>
-                    <pre className="mt-2 overflow-auto rounded-lg bg-slate-900 p-3 font-mono text-[10px] leading-5 text-slate-200">
+                    <pre className="theme-static-dark mt-2 overflow-auto rounded-lg bg-slate-900 p-3 font-mono text-ui-xs leading-5 text-slate-200">
                       {guide.code}
                     </pre>
                   </div>
@@ -381,16 +381,16 @@ export function McpPage({ workspaces, onCopy, toast }: Props) {
         </div>
       </section>
 
-      <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+      <section className="rounded-2xl border border-border bg-surface p-5 ">
         <div className="flex items-start justify-between gap-3">
           <div>
-            <h2 className="flex items-center gap-2 text-sm font-semibold text-slate-900">
+            <h2
+              className="flex items-center gap-2 text-ui-base text-slate-900"
+              title="把 TAPD 缺陷接入 AI 客户端，支持查询、导出与修复后回写。"
+            >
               <Plug size={15} className="text-slate-400" />
               MCP 服务
             </h2>
-            <p className="mt-1 text-xs leading-5 text-slate-500">
-              把 TAPD 缺陷接入 AI 客户端，支持查询、导出与修复后回写。
-            </p>
           </div>
           <div className="flex shrink-0 items-center gap-2">
             <Badge tone="green" dot>
@@ -414,7 +414,7 @@ export function McpPage({ workspaces, onCopy, toast }: Props) {
           </div>
         </div>
 
-        <div className="mt-4 grid gap-2 text-[11px] text-slate-500 sm:grid-cols-4">
+        <div className="mt-4 grid gap-2 text-ui-sm text-slate-500 sm:grid-cols-4">
           <StatusTile label="传输" value={mcp.transport} mono />
           <StatusTile label="本地端口" value={port} mono />
           <StatusTile label="工具" value={`${mcp.tools.length} 个`} />
@@ -425,7 +425,7 @@ export function McpPage({ workspaces, onCopy, toast }: Props) {
           {mcp.tools.map((tool) => (
             <span
               key={tool}
-              className="rounded-md bg-slate-100 px-2 py-0.5 font-mono text-[10px] text-slate-600"
+              className="rounded-md bg-slate-100 px-2 py-0.5 font-mono text-ui-xs text-slate-600"
             >
               {tool}
             </span>
@@ -437,24 +437,24 @@ export function McpPage({ workspaces, onCopy, toast }: Props) {
         </div>
       </section>
 
-      <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+      <section className="rounded-2xl border border-border bg-surface p-5 ">
         <div className="flex items-start justify-between gap-3">
           <div>
-            <h2 className="flex items-center gap-2 text-sm font-semibold text-slate-900">
+            <h2
+              className="flex items-center gap-2 text-ui-base text-slate-900"
+              title="策略只会在 TAPD 权限之上进一步收窄范围，不会扩大 AI 的访问能力。"
+            >
               <ShieldCheck size={15} className="text-slate-400" />
               MCP 策略
             </h2>
-            <p className="mt-1 text-xs leading-5 text-slate-500">
-              策略只会在 TAPD 权限之上进一步收窄范围，不会扩大 AI 的访问能力。
-            </p>
           </div>
-          <span className="shrink-0 text-[10px] text-slate-400">
+          <span className="shrink-0 text-ui-xs text-slate-400">
             {savingPolicy ? "保存中…" : "改动即保存"}
           </span>
         </div>
 
         {!policy ? (
-          <div className="mt-4 flex items-center gap-2 text-xs text-slate-400">
+          <div className="mt-4 flex items-center gap-2 text-ui-caption text-slate-400">
             <Spinner />
             读取 MCP 策略…
           </div>
@@ -483,10 +483,10 @@ export function McpPage({ workspaces, onCopy, toast }: Props) {
 
             <div>
               <div className="flex items-center justify-between gap-2">
-                <div className="text-[11px] font-medium text-slate-600">
+                <div className="text-ui-sm font-normal text-slate-600">
                   允许访问的项目
                 </div>
-                <div className="text-[10px] text-slate-400">
+                <div className="text-ui-xs text-slate-400">
                   不选任何项目 = 全部项目
                 </div>
               </div>
@@ -513,7 +513,7 @@ export function McpPage({ workspaces, onCopy, toast }: Props) {
                   );
                 })}
                 {workspaces.length === 0 ? (
-                  <span className="text-[10px] text-slate-400">
+                  <span className="text-ui-xs text-slate-400">
                     项目列表尚未加载，稍后再试。
                   </span>
                 ) : null}
@@ -521,7 +521,7 @@ export function McpPage({ workspaces, onCopy, toast }: Props) {
             </div>
 
             <div>
-              <label className="text-[11px] font-medium text-slate-600">
+              <label className="text-ui-sm font-normal text-slate-600">
                 允许的目标状态
               </label>
               <input
@@ -531,25 +531,23 @@ export function McpPage({ workspaces, onCopy, toast }: Props) {
                 onKeyDown={(event) => {
                   if (event.key === "Enter") event.currentTarget.blur();
                 }}
+                title="可填状态 key（resolved）或中文名（已解决），多个用逗号分隔。"
                 placeholder="例如 resolved, closed；留空 = 遵循 TAPD 工作流"
                 className={`${INPUT_CLASS} mt-1.5 font-mono`}
               />
-              <p className="mt-1 text-[10px] leading-5 text-slate-400">
-                可填状态 key（resolved）或中文名（已解决），多个用逗号分隔。
-              </p>
             </div>
           </div>
         )}
       </section>
 
-      <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+      <section className="rounded-2xl border border-border bg-surface p-5 ">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
-            <h2 className="flex items-center gap-2 text-sm font-semibold text-slate-900">
+            <h2 className="flex items-center gap-2 text-ui-base font-normal text-slate-900">
               <ClipboardList size={15} className="text-slate-400" />
               调用审计
             </h2>
-            <p className="mt-1 text-xs leading-5 text-slate-500">
+            <p className="mt-1 text-ui-caption leading-5 text-slate-500">
               最近 {audit.length || 120} 次 MCP 调用；拒绝与失败也会记录。
             </p>
           </div>
@@ -559,7 +557,7 @@ export function McpPage({ workspaces, onCopy, toast }: Props) {
               onChange={(event) =>
                 setAuditFilter(event.target.value as "all" | "denied" | "error")
               }
-              className="rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-[11px] text-slate-600 outline-none focus:border-sky-300"
+              className="rounded-lg border border-border bg-surface px-2 py-1.5 text-ui-sm text-slate-600 focus:border-sky-300"
             >
               <option value="all">全部</option>
               <option value="denied">被拒绝</option>
@@ -594,19 +592,19 @@ export function McpPage({ workspaces, onCopy, toast }: Props) {
 
         <div className="mt-3 max-h-[360px] overflow-auto rounded-xl border border-slate-100">
           {filteredAudit.length === 0 ? (
-            <div className="p-6 text-center text-[11px] text-slate-400">
+            <div className="p-6 text-center text-ui-sm text-slate-400">
               {audit.length ? "没有匹配的记录" : "暂无调用记录"}
             </div>
           ) : (
-            <table className="w-full text-left text-[11px]">
-              <thead className="sticky top-0 bg-slate-50 text-[10px] uppercase tracking-wide text-slate-400">
+            <table className="w-full text-left text-ui-sm">
+              <thead className="sticky top-0 bg-slate-50 text-ui-xs text-slate-400">
                 <tr>
-                  <th className="px-3 py-2 font-medium">时间</th>
-                  <th className="px-2 py-2 font-medium">工具</th>
-                  <th className="px-2 py-2 font-medium">客户端</th>
-                  <th className="px-2 py-2 font-medium">结果</th>
-                  <th className="px-2 py-2 font-medium">耗时</th>
-                  <th className="px-2 py-2 font-medium">项目 / 缺陷</th>
+                  <th className="px-3 py-2 font-normal">时间</th>
+                  <th className="px-2 py-2 font-normal">工具</th>
+                  <th className="px-2 py-2 font-normal">客户端</th>
+                  <th className="px-2 py-2 font-normal">结果</th>
+                  <th className="px-2 py-2 font-normal">耗时</th>
+                  <th className="px-2 py-2 font-normal">项目 / 缺陷</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
@@ -616,10 +614,10 @@ export function McpPage({ workspaces, onCopy, toast }: Props) {
                     className="text-slate-600"
                     title={entry.error ?? undefined}
                   >
-                    <td className="whitespace-nowrap px-3 py-2 font-mono text-[10px] text-slate-400">
+                    <td className="whitespace-nowrap px-3 py-2 font-mono text-ui-xs text-slate-400">
                       {formatAuditTime(entry.ts)}
                     </td>
-                    <td className="px-2 py-2 font-mono text-[10px] text-slate-700">
+                    <td className="px-2 py-2 font-mono text-ui-xs text-slate-700">
                       {entry.tool}
                     </td>
                     <td className="px-2 py-2">{entry.client}</td>
@@ -643,7 +641,7 @@ export function McpPage({ workspaces, onCopy, toast }: Props) {
                     <td className="px-2 py-2 tabular-nums text-slate-500">
                       {entry.durationMs}ms
                     </td>
-                    <td className="max-w-[190px] truncate px-2 py-2 font-mono text-[10px] text-slate-400">
+                    <td className="max-w-[190px] truncate px-2 py-2 font-mono text-ui-xs text-slate-400">
                       {entry.workspaceId ?? "—"}
                       {entry.bugId ? ` / ${entry.bugId}` : ""}
                     </td>
@@ -662,10 +660,10 @@ export function McpPage({ workspaces, onCopy, toast }: Props) {
 
 function chipClass(active: boolean): string {
   return clsx(
-    "rounded-full border px-2.5 py-1 text-[10px] transition",
+    "rounded-full border px-2.5 py-1 text-ui-xs transition",
     active
       ? "border-sky-200 bg-sky-50 text-sky-700"
-      : "border-slate-200 bg-white text-slate-500 hover:border-slate-300",
+      : "border-border bg-surface text-slate-500 hover:border-slate-300",
   );
 }
 
@@ -673,8 +671,8 @@ function PolicyRow(props: { title: string; hint: string; children: ReactNode }) 
   return (
     <div className="flex items-start justify-between gap-4 rounded-xl border border-slate-100 bg-slate-50/70 p-3">
       <div className="min-w-0">
-        <div className="text-[11px] font-medium text-slate-700">{props.title}</div>
-        <div className="mt-0.5 text-[10px] leading-5 text-slate-400">{props.hint}</div>
+        <div className="text-ui-sm font-normal text-slate-700">{props.title}</div>
+        <div className="mt-0.5 text-ui-xs leading-5 text-slate-400">{props.hint}</div>
       </div>
       {props.children}
     </div>
@@ -701,7 +699,7 @@ function Toggle(props: {
     >
       <span
         className={clsx(
-          "absolute top-0.5 h-4 w-4 rounded-full bg-white shadow transition-all",
+          "absolute top-0.5 h-4 w-4 rounded-full bg-surface transition-all",
           props.checked ? "left-[18px]" : "left-0.5",
         )}
       />
@@ -733,7 +731,7 @@ function StatusTile({
 }) {
   return (
     <div className="rounded-lg border border-slate-100 bg-slate-50 p-2.5">
-      <div className="text-[10px] uppercase tracking-wide text-slate-400">{label}</div>
+      <div className="text-ui-xs text-slate-400">{label}</div>
       <div
         className={
           mono
@@ -759,9 +757,9 @@ function PathRow(props: {
 
   return (
     <div className="flex items-center gap-3 rounded-xl border border-slate-100 bg-slate-50 p-2.5">
-      <span className="w-24 shrink-0 text-[11px] text-slate-400">{props.label}</span>
+      <span className="w-24 shrink-0 text-ui-sm text-slate-400">{props.label}</span>
       <span
-        className="min-w-0 flex-1 truncate font-mono text-[11px] text-slate-600"
+        className="min-w-0 flex-1 truncate font-mono text-ui-sm text-slate-600"
         title={props.value}
       >
         {props.value}

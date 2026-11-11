@@ -544,6 +544,26 @@ pub async fn workspace_context(
     let user_data = root
         .pointer("/data/get_current_user_ret/data")
         .ok_or_else(|| "unexpected identity response".to_string())?;
+
+    // The same payload carries the signed-in user's avatar (`img_src`, which
+    // the TAPD front-end maps to `currentUser.imgsrc`). Caching it here keeps
+    // the account view and sidebar fresh on every launch and page entry; the
+    // WeCom scan panel is only one of several login paths and often has none.
+    if let Some(avatar) = current_user_avatar(user_data) {
+        let changed = state
+            .config
+            .lock()
+            .expect("config lock")
+            .me_avatar
+            .as_deref()
+            != Some(avatar.as_str());
+        if changed {
+            if let Err(error) = state.update_config(|config| config.me_avatar = Some(avatar)) {
+                tracing::warn!(%error, "failed to cache current user avatar");
+            }
+        }
+    }
+
     let user = UserProfile {
         nick: string_field(user_data, "user_nick"),
         user_id: string_field(user_data, "user_id"),
@@ -976,12 +996,14 @@ pub async fn mcp_config(state: State<'_, SharedState>) -> Result<McpConfigInfo, 
             "tapd_list_my_bugs",
             "tapd_get_bug",
             "tapd_export_bug_md",
+            "tapd_get_bug_prompt",
             "tapd_get_bug_transitions",
             "tapd_add_bug_comment",
             "tapd_update_bug_status",
             "tapd_notify_user",
             "tapd_wait_notification",
             "tapd_request_review",
+            "agent_task_report",
         ],
         port: state.runtime_info().map(|runtime| runtime.port),
         clients,
@@ -1123,6 +1145,44 @@ fn string_field(value: &Value, key: &str) -> String {
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_string()
+}
+
+/// Reads the avatar URL from a TAPD user object.
+///
+/// `img_src` is what the web app uses, but older/other endpoints answer with
+/// `avatar`/`head`, and a relative path is common. Anything that is not an
+/// absolute http(s) URL after resolving against `www.tapd.cn` is ignored.
+fn current_user_avatar(user: &Value) -> Option<String> {
+    [
+        "img_src",
+        "imgsrc",
+        "avatar",
+        "avatar_url",
+        "head",
+        "user_avatar",
+    ]
+    .iter()
+    .find_map(|key| user.get(*key).and_then(Value::as_str))
+    .and_then(normalize_avatar_url)
+}
+
+fn normalize_avatar_url(raw: &str) -> Option<String> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
+
+    let url = if let Some(rest) = raw.strip_prefix("//") {
+        format!("https://{rest}")
+    } else if raw.starts_with("https://") || raw.starts_with("http://") {
+        raw.to_string()
+    } else if raw.starts_with('/') {
+        format!("https://www.tapd.cn{raw}")
+    } else {
+        return None;
+    };
+
+    Some(url)
 }
 
 #[tauri::command]
@@ -1569,14 +1629,28 @@ pub fn clear_app_data(app: AppHandle, state: State<'_, SharedState>) -> Result<(
     Ok(())
 }
 
+/// Accepts any `tapd.cn` host, so avatars served from `viper.tapd.cn` are
+/// proxied with the session cookie just like captures and attachments.
 pub(crate) fn is_tapd_media_url(url: &str) -> bool {
-    [
-        "https://www.tapd.cn/",
-        "https://file.tapd.cn/",
-        "https://tdl.tapd.cn/",
-    ]
-    .iter()
-    .any(|prefix| url.starts_with(prefix))
+    let Some(rest) = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+    else {
+        return false;
+    };
+
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    let host = authority
+        .rsplit('@')
+        .next()
+        .unwrap_or_default()
+        .split(':')
+        .next()
+        .unwrap_or_default()
+        .trim_start_matches('.')
+        .to_ascii_lowercase();
+
+    host == "tapd.cn" || host.ends_with(".tapd.cn")
 }
 
 #[cfg(test)]
@@ -1591,8 +1665,39 @@ mod tests {
         assert!(is_tapd_media_url(
             "https://file.tapd.cn/1/attachments/download/2/a.png"
         ));
+        assert!(is_tapd_media_url("https://viper.tapd.cn/user_logo/123.jpg"));
+        assert!(is_tapd_media_url("http://tapd.cn/a.png"));
         assert!(!is_tapd_media_url("https://evil.example.com/a.png"));
+        assert!(!is_tapd_media_url("https://tapd.cn.evil.example/a.png"));
         assert!(!is_tapd_media_url("file:///etc/passwd"));
+    }
+
+    #[test]
+    fn resolves_current_user_avatar_urls() {
+        let user = serde_json::json!({
+            "img_src": "/users/avatar/2015551610/abc.png",
+        });
+        assert_eq!(
+            current_user_avatar(&user).as_deref(),
+            Some("https://www.tapd.cn/users/avatar/2015551610/abc.png")
+        );
+
+        let user = serde_json::json!({
+            "img_src": "//viper.tapd.cn/user_logo/2015551610.jpg",
+        });
+        assert_eq!(
+            current_user_avatar(&user).as_deref(),
+            Some("https://viper.tapd.cn/user_logo/2015551610.jpg")
+        );
+
+        let user = serde_json::json!({ "imgsrc": "https://wework.qpic.cn/a.png" });
+        assert_eq!(
+            current_user_avatar(&user).as_deref(),
+            Some("https://wework.qpic.cn/a.png")
+        );
+
+        assert!(current_user_avatar(&serde_json::json!({})).is_none());
+        assert!(current_user_avatar(&serde_json::json!({ "img_src": "" })).is_none());
     }
 
     #[test]

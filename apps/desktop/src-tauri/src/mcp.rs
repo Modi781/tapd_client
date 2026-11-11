@@ -4,7 +4,11 @@
 //! Every call passes the user-configurable policy (read/write, project scope,
 //! allowed statuses) and is written to the local audit log.
 
-use std::time::{Duration, Instant};
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+    time::{Duration, Instant},
+};
 
 use serde_json::{json, Map, Value};
 use tapd_core::{
@@ -17,6 +21,7 @@ use tapd_core::{
 use tauri::AppHandle;
 
 use crate::{
+    agent::{self, ProjectAgentConfig, PromptVars},
     bug_write::{self, add_comment, load_transition_info, resolve_status_key},
     commands::session_request_json,
     mcp_audit::McpAuditEntry,
@@ -25,6 +30,11 @@ use crate::{
 
 const MAX_RESULTS: u32 = 50;
 const DEFAULT_RESULTS: u32 = 20;
+
+/// Prompt used by `tapd_get_bug_prompt` for external MCP clients. It mirrors
+/// `agent::DEFAULT_PROMPT_TEMPLATE` but drops the review-queue flow, which only
+/// exists for tasks owned by the desktop app.
+const MCP_PROMPT_TEMPLATE: &str = "请修复 TAPD 缺陷：{{title}}\n\n缺陷详情文件：{{md_path}}\n本地仓库：{{repo_path}}\n项目：{{workspace_name}} / 严重程度：{{severity}} / 优先级：{{priority}}\n\n项目规则：\n{{project_rule}}\n\n要求：\n1. 先完整阅读 bug.md 和 assets/ 下的截图、视频，定位根因，做最小必要修改，并遵循团队代码规范。\n2. 修改后运行相关测试或构建。\n3. 改动复杂（多文件、跨模块、涉及公共接口/数据模型/依赖/构建配置、风险较高或测试失败）时，先向用户说明方案与风险、等待确认，不要直接扩大改动范围。\n4. 提交成功后（git commit，不要 push），再用 tapd_add_bug_comment 追加评论、tapd_update_bug_status 更新状态；评论说明原因、解决方案与影响范围。\n5. 任何情况下都不要在提交成功前评论或更新 TAPD 状态。";
 
 pub async fn handle(
     app: &AppHandle,
@@ -133,6 +143,7 @@ fn summarize_arguments(arguments: &Value) -> Value {
         "status",
         "next_status",
         "owner",
+        "root",
         "limit",
         "page",
         "only_unresolved",
@@ -214,12 +225,13 @@ async fn dispatch(
     client: &str,
 ) -> Result<Value, String> {
     match tool {
-        "tapd_whoami" => whoami(app, state).await,
+        "tapd_whoami" => whoami(app, state, arguments).await,
         "tapd_list_projects" => list_projects(app, state).await,
         "tapd_list_bugs" => list_bugs(app, state, arguments).await,
         "tapd_list_my_bugs" => list_my_bugs(app, state, arguments).await,
         "tapd_get_bug" => get_bug(app, state, arguments).await,
         "tapd_export_bug_md" => export_bug_md(app, state, arguments).await,
+        "tapd_get_bug_prompt" => get_bug_prompt(app, state, arguments).await,
         "tapd_get_bug_transitions" => get_bug_transitions(app, state, arguments).await,
         "tapd_add_bug_comment" => add_bug_comment(app, state, arguments).await,
         "tapd_update_bug_status" => update_bug_status(app, state, arguments).await,
@@ -234,7 +246,7 @@ async fn dispatch(
     }
 }
 
-async fn whoami(app: &AppHandle, state: &SharedState) -> Result<Value, String> {
+async fn whoami(app: &AppHandle, state: &SharedState, arguments: &Value) -> Result<Value, String> {
     let (user, workspaces) = load_context(app).await?;
     let policy = state.config_snapshot().mcp_policy;
     let allowed: Vec<Workspace> = workspaces
@@ -243,12 +255,26 @@ async fn whoami(app: &AppHandle, state: &SharedState) -> Result<Value, String> {
         .collect();
     let default_workspace = default_workspace_id(state, &allowed, &policy);
 
+    let agent_config = agent::mcp_agent_config(app);
+    let local_projects: Vec<Value> = agent_config
+        .projects
+        .iter()
+        .filter(|(_, project)| !project.repo_path.trim().is_empty())
+        .map(|(workspace_id, project)| {
+            json!({ "workspaceId": workspace_id, "repoPath": project.repo_path })
+        })
+        .collect();
+    let matched_workspace = root_hint(arguments)
+        .and_then(|root| match_workspace_by_root(&agent_config.projects, &root));
+
     Ok(json!({
         "nick": user.get("user_nick").and_then(Value::as_str).unwrap_or_default(),
         "userId": user.get("user_id").and_then(Value::as_str).unwrap_or_default(),
         "company": user.get("company").and_then(Value::as_str).unwrap_or_default(),
         "defaultWorkspaceId": default_workspace,
         "workspaces": allowed.len(),
+        "localProjects": local_projects,
+        "matchedWorkspaceId": matched_workspace,
     }))
 }
 
@@ -268,10 +294,10 @@ async fn list_bugs(
     arguments: &Value,
 ) -> Result<Value, String> {
     let (_, workspaces) = load_context(app).await?;
-    let workspace_id = resolve_workspace(state, &workspaces, arguments)?;
+    let workspace_id = resolve_workspace(app, state, &workspaces, arguments)?;
     let page = query_bugs(app, state, &workspace_id, arguments, false).await?;
 
-    Ok(page_json(page))
+    Ok(page_json(page, &workspace_id))
 }
 
 async fn list_my_bugs(
@@ -280,16 +306,16 @@ async fn list_my_bugs(
     arguments: &Value,
 ) -> Result<Value, String> {
     let (_, workspaces) = load_context(app).await?;
-    let workspace_id = resolve_workspace(state, &workspaces, arguments)?;
+    let workspace_id = resolve_workspace(app, state, &workspaces, arguments)?;
     let page = query_bugs(app, state, &workspace_id, arguments, true).await?;
 
-    Ok(page_json(page))
+    Ok(page_json(page, &workspace_id))
 }
 
 async fn get_bug(app: &AppHandle, state: &SharedState, arguments: &Value) -> Result<Value, String> {
     let bug_id = string_arg(arguments, "bug_id").ok_or_else(|| "bug_id is required".to_string())?;
     let (_, workspaces) = load_context(app).await?;
-    let workspace_id = resolve_workspace(state, &workspaces, arguments)?;
+    let workspace_id = resolve_workspace(app, state, &workspaces, arguments)?;
 
     let detail = crate::commands::fetch_bug_detail(app, &workspace_id, &bug_id).await?;
     serde_json::to_value(detail).map_err(|error| error.to_string())
@@ -302,7 +328,7 @@ async fn export_bug_md(
 ) -> Result<Value, String> {
     let bug_id = string_arg(arguments, "bug_id").ok_or_else(|| "bug_id is required".to_string())?;
     let (_, workspaces) = load_context(app).await?;
-    let workspace_id = resolve_workspace(state, &workspaces, arguments)?;
+    let workspace_id = resolve_workspace(app, state, &workspaces, arguments)?;
     let workspace_name = string_arg(arguments, "workspace_name").or_else(|| {
         workspaces
             .iter()
@@ -315,6 +341,141 @@ async fn export_bug_md(
             .await?;
 
     serde_json::to_value(result).map_err(|error| error.to_string())
+}
+
+/// Renders the same prompt the desktop Agent would receive, so an external AI
+/// can start from the exported `bug.md`, the project rule and the local repo.
+async fn get_bug_prompt(
+    app: &AppHandle,
+    state: &SharedState,
+    arguments: &Value,
+) -> Result<Value, String> {
+    let bug_id = string_arg(arguments, "bug_id").ok_or_else(|| "bug_id is required".to_string())?;
+    let (_, workspaces) = load_context(app).await?;
+    let workspace_id = resolve_workspace(app, state, &workspaces, arguments)?;
+    let detail = crate::commands::fetch_bug_detail(app, &workspace_id, &bug_id).await?;
+    let workspace_name = workspaces
+        .iter()
+        .find(|workspace| workspace.id == workspace_id)
+        .map(|workspace| workspace.name.clone())
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or_else(|| detail.workspace_name.clone());
+
+    let refresh = arguments
+        .get("refresh")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let mut warnings: Vec<String> = Vec::new();
+    let mut notes: Vec<String> = Vec::new();
+
+    let mut exported = false;
+    let mut reused = false;
+    let mut asset_count = 0usize;
+    let mut dir: Option<String> = None;
+    let mut md_path: Option<String> = None;
+
+    let existing = if refresh {
+        None
+    } else {
+        crate::export::find_existing_export(&state.paths, &workspace_id, &detail.summary.id)
+    };
+
+    if let Some(existing) = existing {
+        reused = true;
+        md_path = Some(existing.join("bug.md").to_string_lossy().to_string());
+        asset_count = std::fs::read_dir(existing.join("assets"))
+            .map(|entries| entries.flatten().count())
+            .unwrap_or(0);
+        dir = Some(existing.to_string_lossy().to_string());
+    } else {
+        match crate::export::run_export(
+            app,
+            &state.paths,
+            &workspace_id,
+            &detail.summary.id,
+            Some(workspace_name.clone()),
+        )
+        .await
+        {
+            Ok(result) => {
+                exported = true;
+                md_path = Some(result.markdown_path);
+                asset_count = result.asset_count;
+                dir = Some(result.dir);
+                warnings.extend(result.warnings);
+            }
+            Err(error) => warnings.push(format!("导出缺陷详情失败：{error}")),
+        }
+    }
+
+    let agent_config = agent::mcp_agent_config(app);
+    let project = agent_config.projects.get(&workspace_id);
+    let repo_path = project
+        .map(|project| project.repo_path.trim().to_string())
+        .filter(|path| !path.is_empty())
+        .or_else(|| root_hint(arguments))
+        .unwrap_or_else(|| "（当前工作目录）".to_string());
+    let project_rule = project
+        .map(|project| project.rule.trim().to_string())
+        .unwrap_or_default();
+
+    let (kind, template) = match string_arg(arguments, "template") {
+        Some(custom) => ("custom".to_string(), custom),
+        None if string_arg(arguments, "kind").as_deref() == Some("agent") => {
+            ("agent".to_string(), agent_config.prompt_template.clone())
+        }
+        None => ("mcp".to_string(), MCP_PROMPT_TEMPLATE.to_string()),
+    };
+    if template.contains("{{task_id}}") {
+        notes.push(
+            "外部 MCP 客户端没有活动 Agent 任务，{{task_id}} 为空，也无法调用 tapd_request_review；复杂改动请先向用户说明方案。"
+                .to_string(),
+        );
+    }
+
+    let md_path_value = md_path
+        .clone()
+        .unwrap_or_else(|| "（导出失败，请调用 tapd_export_bug_md）".to_string());
+    let vars = PromptVars {
+        task_id: String::new(),
+        title: detail.summary.title.clone(),
+        md_path: md_path_value,
+        repo_path: repo_path.clone(),
+        workspace_name: workspace_name.clone(),
+        bug_id: detail.summary.id.clone(),
+        severity: label_or_raw(&detail.summary.severity_label, &detail.summary.severity),
+        priority: label_or_raw(&detail.summary.priority_label, &detail.summary.priority),
+        project_rule,
+        user_prompt: string_arg(arguments, "instructions").unwrap_or_default(),
+        attachments: Vec::new(),
+    };
+    let prompt = agent::render_prompt(&template, &vars);
+
+    Ok(json!({
+        "prompt": prompt,
+        "kind": kind,
+        "bugId": detail.summary.id,
+        "title": detail.summary.title,
+        "workspaceId": workspace_id,
+        "workspaceName": workspace_name,
+        "repoPath": repo_path,
+        "mdPath": md_path,
+        "dir": dir,
+        "assetCount": asset_count,
+        "exported": exported,
+        "reused": reused,
+        "warnings": warnings,
+        "notes": notes,
+    }))
+}
+
+fn label_or_raw(label: &str, raw: &str) -> String {
+    let label = label.trim();
+    if label.is_empty() {
+        raw.trim().to_string()
+    } else {
+        label.to_string()
+    }
 }
 
 async fn query_bugs(
@@ -385,8 +546,9 @@ async fn query_bugs(
     Ok(page)
 }
 
-fn page_json(page: BugListPage) -> Value {
+fn page_json(page: BugListPage, workspace_id: &str) -> Value {
     json!({
+        "workspaceId": workspace_id,
         "total": page.total,
         "page": page.page,
         "perpage": page.perpage,
@@ -438,6 +600,7 @@ async fn resolve_me(app: &AppHandle, state: &SharedState) -> Result<Option<Strin
 }
 
 fn resolve_workspace(
+    app: &AppHandle,
     state: &SharedState,
     workspaces: &[Workspace],
     arguments: &Value,
@@ -450,6 +613,35 @@ fn resolve_workspace(
                 return Err(format!("项目 {workspace_id} 不在 MCP 策略允许的项目范围内"));
             }
             return Ok(workspace_id);
+        }
+    }
+
+    if let Some(root) = root_hint(arguments) {
+        let projects = agent::mcp_agent_config(app).projects;
+        match match_workspace_by_root(&projects, &root) {
+            Some(workspace_id) => {
+                if !workspaces
+                    .iter()
+                    .any(|workspace| workspace.id == workspace_id)
+                {
+                    return Err(format!(
+                        "目录 {root} 匹配到项目 {workspace_id}，但当前账号无法访问该项目"
+                    ));
+                }
+                if !policy.allows_workspace(&workspace_id) {
+                    return Err(format!(
+                        "目录 {root} 匹配到项目 {workspace_id}，但该项目不在 MCP 策略允许的项目范围内"
+                    ));
+                }
+                return Ok(workspace_id);
+            }
+            // A cwd hint is best-effort; an explicit root should fail loudly.
+            None if !root_is_cwd_hint(arguments) => {
+                return Err(format!(
+                    "无法根据目录 {root} 匹配 TAPD 项目：请在对应项目的「本地文件夹」中配置该目录，或显式传 workspace_id"
+                ));
+            }
+            None => {}
         }
     }
 
@@ -470,6 +662,102 @@ fn resolve_workspace(
         .ok_or_else(|| "没有符合 MCP 策略的可用项目".to_string())
 }
 
+/// Directory the caller is working in: `root` (preferred), or its aliases.
+fn root_hint(arguments: &Value) -> Option<String> {
+    ["root", "repo_path", "repoPath", "cwd"]
+        .iter()
+        .find_map(|key| string_arg(arguments, key))
+}
+
+/// The sidecar marks a `root` it filled from its own process cwd. Such a hint
+/// may fall back to the last selected project instead of failing.
+fn root_is_cwd_hint(arguments: &Value) -> bool {
+    string_arg(arguments, "rootSource").as_deref() == Some("cwd")
+}
+
+/// Resolves the project whose configured repository contains (or is contained
+/// by) `root`. Exact matches win, then the closest surrounding project. A
+/// parent root only matches when exactly one project lives beneath it, so a
+/// shared parent never picks a sibling project by accident.
+fn match_workspace_by_root(
+    projects: &BTreeMap<String, ProjectAgentConfig>,
+    root: &str,
+) -> Option<String> {
+    let root = normalize_path(root)?;
+    let mut exact: Vec<&str> = Vec::new();
+    let mut around: Vec<(&str, usize)> = Vec::new();
+    let mut contains: Vec<(&str, usize)> = Vec::new();
+
+    for (workspace_id, project) in projects {
+        let Some(repo) = normalize_path(&project.repo_path) else {
+            continue;
+        };
+        let len = repo.as_os_str().len();
+        if repo == root {
+            exact.push(workspace_id.as_str());
+        } else if is_inside(&root, &repo) {
+            // The caller works inside this repo.
+            around.push((workspace_id.as_str(), len));
+        } else if is_inside(&repo, &root) {
+            // This repo lives inside the caller's directory.
+            contains.push((workspace_id.as_str(), len));
+        }
+    }
+
+    if !exact.is_empty() {
+        return match exact.as_slice() {
+            [workspace_id] => Some((*workspace_id).to_string()),
+            _ => None,
+        };
+    }
+
+    // A single nested project is a real match; several siblings are ambiguous.
+    if let [project] = contains.as_slice() {
+        around.push(*project);
+    }
+
+    let deepest = around.iter().map(|(_, len)| *len).max()?;
+    let winners: Vec<&str> = around
+        .iter()
+        .filter(|(_, len)| *len == deepest)
+        .map(|(workspace_id, _)| *workspace_id)
+        .collect();
+
+    match winners.as_slice() {
+        [workspace_id] => Some((*workspace_id).to_string()),
+        _ => None,
+    }
+}
+
+/// Canonical form when possible (resolves `/var` vs `/private/var` and
+/// symlinks); falls back to a lexical trim so non-existent paths still compare.
+fn normalize_path(value: &str) -> Option<PathBuf> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+    let expanded = match value.strip_prefix("~/") {
+        Some(rest) => std::env::var_os("HOME")
+            .map(|home| PathBuf::from(home).join(rest))
+            .unwrap_or_else(|| PathBuf::from(value)),
+        None => PathBuf::from(value),
+    };
+
+    if let Ok(canonical) = expanded.canonicalize() {
+        return Some(canonical);
+    }
+
+    let trimmed = expanded.to_string_lossy();
+    let trimmed = trimmed.trim_end_matches('/');
+    let trimmed = if trimmed.is_empty() { "/" } else { trimmed };
+    Some(PathBuf::from(trimmed))
+}
+
+/// Component-wise containment, so `/repo/app2` is not inside `/repo/app`.
+fn is_inside(child: &Path, parent: &Path) -> bool {
+    child != parent && child.starts_with(parent)
+}
+
 // ---------------------------------------------------------------------------
 // Write-back tools (comments / status)
 // ---------------------------------------------------------------------------
@@ -481,7 +769,7 @@ async fn get_bug_transitions(
 ) -> Result<Value, String> {
     let bug_id = string_arg(arguments, "bug_id").ok_or_else(|| "bug_id is required".to_string())?;
     let (_, workspaces) = load_context(app).await?;
-    let workspace_id = resolve_workspace(state, &workspaces, arguments)?;
+    let workspace_id = resolve_workspace(app, state, &workspaces, arguments)?;
 
     let info = load_transition_info(app, &workspace_id, &bug_id).await?;
     let transitions: Vec<Value> = info
@@ -509,7 +797,7 @@ async fn add_bug_comment(
         .or_else(|| string_arg(arguments, "body"))
         .ok_or_else(|| "comment is required".to_string())?;
     let (_, workspaces) = load_context(app).await?;
-    let workspace_id = resolve_workspace(state, &workspaces, arguments)?;
+    let workspace_id = resolve_workspace(app, state, &workspaces, arguments)?;
 
     let data = add_comment(app, &workspace_id, &bug_id, &comment).await?;
     Ok(json!({
@@ -529,7 +817,7 @@ async fn update_bug_status(
         .or_else(|| string_arg(arguments, "next_status"))
         .ok_or_else(|| "status is required".to_string())?;
     let (_, workspaces) = load_context(app).await?;
-    let workspace_id = resolve_workspace(state, &workspaces, arguments)?;
+    let workspace_id = resolve_workspace(app, state, &workspaces, arguments)?;
     // The working accept workflow sends an empty array; keep the same shape
     // unless the caller supplies explicit transition fields.
     let fields = arguments
@@ -617,8 +905,14 @@ fn string_array(arguments: &Value, key: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod policy_tests {
-    use super::{policy_violation, summarize_arguments};
+    use super::{
+        match_workspace_by_root, policy_violation, root_hint, root_is_cwd_hint,
+        summarize_arguments, MCP_PROMPT_TEMPLATE,
+    };
+    use crate::agent::{render_prompt, ProjectAgentConfig, PromptVars};
     use serde_json::json;
+    use std::collections::BTreeMap;
+    use std::path::Path;
     use tapd_core::config::McpPolicy;
 
     #[test]
@@ -661,5 +955,101 @@ mod policy_tests {
         assert_eq!(summary["status"], "resolved");
         assert_eq!(summary["commentChars"], 11);
         assert!(summary.get("comment").is_none());
+    }
+
+    fn project(repo_path: &Path) -> ProjectAgentConfig {
+        ProjectAgentConfig {
+            repo_path: repo_path.to_string_lossy().to_string(),
+            rule: String::new(),
+        }
+    }
+
+    #[test]
+    fn matches_project_by_exact_nested_and_ambiguous_roots() {
+        let base = std::env::temp_dir().join(format!("tapd-root-{}", uuid::Uuid::new_v4()));
+        let repo = base.join("repo");
+        let nested = repo.join("apps").join("desktop");
+        let other = base.join("other");
+        std::fs::create_dir_all(&nested).expect("nested dir");
+        std::fs::create_dir_all(&other).expect("other dir");
+
+        let mut projects = BTreeMap::new();
+        projects.insert("111".to_string(), project(&repo));
+        projects.insert("222".to_string(), project(&other));
+
+        let lookup = |path: &Path| match_workspace_by_root(&projects, &path.to_string_lossy());
+        assert_eq!(lookup(&repo).as_deref(), Some("111"));
+        assert_eq!(lookup(&nested).as_deref(), Some("111"));
+        // Two configured repos sit under `base`, so a parent root is ambiguous.
+        assert_eq!(lookup(&base), None);
+        assert_eq!(match_workspace_by_root(&projects, "/no/such/dir"), None);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn deepest_project_wins_when_repos_nest() {
+        let base = std::env::temp_dir().join(format!("tapd-nest-{}", uuid::Uuid::new_v4()));
+        let outer = base.join("monorepo");
+        let inner = outer.join("apps").join("web");
+        std::fs::create_dir_all(&inner).expect("inner dir");
+
+        let mut projects = BTreeMap::new();
+        projects.insert("outer".to_string(), project(&outer));
+        projects.insert("inner".to_string(), project(&inner));
+
+        let root = inner.join("src");
+        std::fs::create_dir_all(&root).expect("src dir");
+        assert_eq!(
+            match_workspace_by_root(&projects, &root.to_string_lossy()).as_deref(),
+            Some("inner")
+        );
+
+        // A project nested under the caller's directory still beats the parent
+        // repo the caller is also inside.
+        let apps = outer.join("apps");
+        assert_eq!(
+            match_workspace_by_root(&projects, &apps.to_string_lossy()).as_deref(),
+            Some("inner")
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn root_hint_reads_aliases_and_marks_cwd_source() {
+        assert_eq!(root_hint(&json!({ "root": "/a" })).as_deref(), Some("/a"));
+        assert_eq!(
+            root_hint(&json!({ "repo_path": "/b" })).as_deref(),
+            Some("/b")
+        );
+        assert_eq!(root_hint(&json!({ "cwd": " " })), None);
+        assert!(root_is_cwd_hint(&json!({ "rootSource": "cwd" })));
+        assert!(!root_is_cwd_hint(&json!({ "root": "/a" })));
+    }
+
+    #[test]
+    fn mcp_prompt_template_carries_paths_and_rule() {
+        let vars = PromptVars {
+            task_id: String::new(),
+            title: "按钮错位".to_string(),
+            md_path: "/exports/bug.md".to_string(),
+            repo_path: "/repo".to_string(),
+            workspace_name: "UU".to_string(),
+            bug_id: "42".to_string(),
+            severity: "严重".to_string(),
+            priority: "高".to_string(),
+            project_rule: "先跑 pnpm test".to_string(),
+            user_prompt: String::new(),
+            attachments: Vec::new(),
+        };
+        let prompt = render_prompt(MCP_PROMPT_TEMPLATE, &vars);
+        assert!(prompt.contains("按钮错位"));
+        assert!(prompt.contains("/exports/bug.md"));
+        assert!(prompt.contains("/repo"));
+        assert!(prompt.contains("先跑 pnpm test"));
+        assert!(!prompt.contains("{{"));
+        // External clients cannot pause the desktop review queue.
+        assert!(!prompt.contains("tapd_request_review"));
     }
 }

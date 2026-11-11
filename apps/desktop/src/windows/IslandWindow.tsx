@@ -20,6 +20,7 @@ import {
 } from "lucide-react";
 
 import { agentApi, type AgentSummary } from "../lib/agent";
+import { bugTitle } from "../lib/bug";
 import {
   formatNotificationTime,
   NOTIFICATION_KIND_LABELS,
@@ -298,13 +299,13 @@ export function IslandWindow() {
                 ? "单击展开通知 · 双击打开客户端 · 可拖动"
                 : "双击打开客户端 · 可拖动"
           }
-          className="island-pill group flex cursor-grab items-center gap-2 rounded-full bg-slate-900/90 px-3 py-1.5 text-[11px] text-slate-200 ring-1 ring-white/10 backdrop-blur-xl transition hover:bg-slate-900/95 active:cursor-grabbing"
+          className="island-pill group flex cursor-grab items-center gap-2 rounded-full bg-slate-900/90 px-3 py-1.5 text-ui-sm text-slate-200 border border-white/10 backdrop-blur-xl transition hover:bg-slate-900/95 active:cursor-grabbing"
         >
           <StatusDot tone={tone} />
-          <span className="font-semibold tracking-wide text-slate-100">TAPD</span>
+          <span className="font-normal text-slate-100">TAPD</span>
           <span className="text-slate-400">{statusLabel}</span>
           {items.length > 0 ? (
-            <span className="rounded-full bg-sky-500 px-1.5 py-0.5 text-[10px] font-semibold leading-none text-white">
+            <span className="rounded-full bg-sky-500 px-1.5 py-0.5 text-ui-xs font-normal leading-none text-white">
               {items.length}
             </span>
           ) : null}
@@ -316,7 +317,7 @@ export function IslandWindow() {
   return (
     <div className="flex h-full w-full flex-col gap-1.5 overflow-hidden p-1.5">
       {items.length === 0 ? (
-        <div className="island-expand grid flex-1 place-items-center rounded-2xl bg-slate-900/90 text-[11px] text-slate-400 ring-1 ring-white/10 backdrop-blur-xl">
+        <div className="island-expand grid flex-1 place-items-center rounded-2xl bg-slate-900/90 text-ui-sm text-slate-400 border border-white/10 backdrop-blur-xl">
           暂无待处理通知
         </div>
       ) : (
@@ -342,7 +343,7 @@ export function IslandWindow() {
           return (
             <article
               key={item.id}
-              className="island-expand relative flex min-h-0 flex-1 flex-col rounded-2xl bg-slate-900/92 p-3 ring-1 ring-white/10 backdrop-blur-xl"
+              className="island-expand relative flex min-h-0 flex-1 flex-col rounded-2xl bg-slate-900/92 p-3 border border-white/10 backdrop-blur-xl"
             >
               <button
                 type="button"
@@ -359,8 +360,8 @@ export function IslandWindow() {
                 )}
               </button>
 
-              <div className="flex items-center gap-1.5 pr-7 text-[10px] text-slate-400">
-                <span className="truncate font-medium text-slate-300">
+              <div className="flex items-center gap-1.5 pr-7 text-ui-xs text-slate-400">
+                <span className="truncate font-normal text-slate-300">
                   {item.workspaceName}
                 </span>
                 <KindBadge kind={item.kind} />
@@ -370,13 +371,13 @@ export function IslandWindow() {
               </div>
 
               <h2
-                className="mt-1 line-clamp-2 text-[13px] font-semibold leading-5 text-slate-100"
-                title={item.title}
+                className="mt-1 line-clamp-2 text-ui-base font-normal leading-5 text-slate-100"
+                title={bugTitle(item.title)}
               >
-                {item.title}
+                {bugTitle(item.title)}
               </h2>
 
-              <div className="mt-1 flex items-center gap-1.5 text-[10px] text-slate-400">
+              <div className="mt-1 flex items-center gap-1.5 text-ui-xs text-slate-400">
                 {item.severity ? (
                   <span className="rounded bg-rose-500/15 px-1.5 py-0.5 text-rose-200">
                     {item.severity}
@@ -397,7 +398,7 @@ export function IslandWindow() {
                   type="button"
                   disabled={Boolean(busy)}
                   onClick={() => void run(item, "handle")}
-                  className="inline-flex flex-1 items-center justify-center gap-1 rounded-lg bg-sky-500 px-2.5 py-1.5 text-[11px] font-medium text-white transition hover:bg-sky-400 disabled:cursor-not-allowed disabled:opacity-50"
+                  className="inline-flex flex-1 items-center justify-center gap-1 rounded-lg bg-sky-500 px-2.5 py-1.5 text-ui-sm font-normal text-white transition hover:bg-sky-400 disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   {itemBusy === "handle" ? (
                     <Loader2 size={12} className="animate-spin" />
@@ -410,7 +411,7 @@ export function IslandWindow() {
                   type="button"
                   disabled={Boolean(busy)}
                   onClick={() => void run(item, "view")}
-                  className="inline-flex flex-1 items-center justify-center gap-1 rounded-lg bg-white/5 px-2.5 py-1.5 text-[11px] font-medium text-slate-200 ring-1 ring-white/10 transition hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-50"
+                  className="inline-flex flex-1 items-center justify-center gap-1 rounded-lg bg-white/5 px-2.5 py-1.5 text-ui-sm font-normal text-slate-200 border border-white/10 transition hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   {itemBusy === "view" ? (
                     <Loader2 size={12} className="animate-spin" />
@@ -422,7 +423,7 @@ export function IslandWindow() {
               </div>
 
               {error ? (
-                <p className="mt-1.5 line-clamp-2 text-[10px] leading-4 text-rose-300" title={error}>
+                <p className="mt-1.5 line-clamp-2 text-ui-xs leading-4 text-rose-300" title={error}>
                   {error}
                 </p>
               ) : null}
@@ -483,7 +484,7 @@ const AI_TONE_META: Record<
 
 const AI_ACTION_CLASS: Record<string, string> = {
   primary: "bg-sky-500 text-white hover:bg-sky-400",
-  secondary: "bg-white/5 text-slate-200 ring-1 ring-white/10 hover:bg-white/10",
+  secondary: "bg-white/5 text-slate-200 border border-white/10 hover:bg-white/10",
   danger: "bg-rose-500/90 text-white hover:bg-rose-400",
 };
 
@@ -502,7 +503,7 @@ function AiCard(props: {
   const dismissBusy = busyAction === "ignore";
 
   return (
-    <article className="island-expand relative flex min-h-0 flex-1 flex-col rounded-2xl bg-slate-900/92 p-3 ring-1 ring-white/10 backdrop-blur-xl">
+    <article className="island-expand relative flex min-h-0 flex-1 flex-col rounded-2xl bg-slate-900/92 p-3 border border-white/10 backdrop-blur-xl">
       <button
         type="button"
         aria-label="关闭"
@@ -514,17 +515,17 @@ function AiCard(props: {
         {dismissBusy ? <Loader2 size={12} className="animate-spin" /> : <X size={13} />}
       </button>
 
-      <div className="flex items-center gap-1.5 pr-7 text-[10px] text-slate-400">
+      <div className="flex items-center gap-1.5 pr-7 text-ui-xs text-slate-400">
         <span className={clsx("grid h-4 w-4 shrink-0 place-items-center rounded-full", meta.iconBg)}>
           <Icon
             size={11}
             className={clsx(meta.iconColor, payload.tone === "progress" && "animate-spin")}
           />
         </span>
-        <span className="truncate font-medium text-slate-300" title={payload.client || item.workspaceName}>
+        <span className="truncate font-normal text-slate-300" title={payload.client || item.workspaceName}>
           {payload.client || item.workspaceName || "AI"}
         </span>
-        <span className={clsx("shrink-0 rounded px-1.5 py-0.5 text-[9px] font-medium", meta.badge)}>
+        <span className={clsx("shrink-0 rounded px-1.5 py-0.5 text-ui-2xs font-normal", meta.badge)}>
           {meta.label}
         </span>
         <span className="ml-auto shrink-0 tabular-nums">
@@ -533,7 +534,7 @@ function AiCard(props: {
       </div>
 
       <h2
-        className="mt-1 line-clamp-2 text-[13px] font-semibold leading-5 text-slate-100"
+        className="mt-1 line-clamp-2 text-ui-base font-normal leading-5 text-slate-100"
         title={item.title}
       >
         {item.title}
@@ -547,7 +548,7 @@ function AiCard(props: {
             type="button"
             disabled={Boolean(busyAction)}
             onClick={onDismiss}
-            className="inline-flex flex-1 items-center justify-center gap-1 rounded-lg bg-white/5 px-2.5 py-1.5 text-[11px] font-medium text-slate-200 ring-1 ring-white/10 transition hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-50"
+            className="inline-flex flex-1 items-center justify-center gap-1 rounded-lg bg-white/5 px-2.5 py-1.5 text-ui-sm font-normal text-slate-200 border border-white/10 transition hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-50"
           >
             {dismissBusy ? <Loader2 size={12} className="animate-spin" /> : <Check size={12} />}
             知道了
@@ -566,7 +567,7 @@ function AiCard(props: {
       </div>
 
       {error ? (
-        <p className="mt-1.5 line-clamp-2 text-[10px] leading-4 text-rose-300" title={error}>
+        <p className="mt-1.5 line-clamp-2 text-ui-xs leading-4 text-rose-300" title={error}>
           {error}
         </p>
       ) : null}
@@ -587,7 +588,7 @@ function AiActionButton(props: {
       disabled={disabled}
       onClick={onClick}
       className={clsx(
-        "inline-flex flex-1 items-center justify-center gap-1 rounded-lg px-2.5 py-1.5 text-[11px] font-medium transition disabled:cursor-not-allowed disabled:opacity-50",
+        "inline-flex flex-1 items-center justify-center gap-1 rounded-lg px-2.5 py-1.5 text-ui-sm font-normal transition disabled:cursor-not-allowed disabled:opacity-50",
         AI_ACTION_CLASS[action.style ?? "secondary"] ?? AI_ACTION_CLASS.secondary,
       )}
     >
@@ -608,7 +609,7 @@ function AiBlocks({ blocks }: { blocks: AiBlock[] }) {
             return (
               <p
                 key={index}
-                className="line-clamp-2 whitespace-pre-wrap break-words text-[11px] leading-4 text-slate-300"
+                className="line-clamp-2 whitespace-pre-wrap break-words text-ui-sm leading-4 text-slate-300"
               >
                 {block.text}
               </p>
@@ -617,7 +618,7 @@ function AiBlocks({ blocks }: { blocks: AiBlock[] }) {
             return (
               <pre
                 key={index}
-                className="line-clamp-2 overflow-hidden rounded bg-black/30 px-1.5 py-1 font-mono text-[10px] leading-4 text-slate-200"
+                className="line-clamp-2 overflow-hidden rounded bg-black/30 px-1.5 py-1 font-mono text-ui-xs leading-4 text-slate-200"
               >
                 {block.text}
               </pre>
@@ -628,7 +629,7 @@ function AiBlocks({ blocks }: { blocks: AiBlock[] }) {
                 {block.fields.map((field, fieldIndex) => (
                   <div
                     key={fieldIndex}
-                    className="flex items-center justify-between gap-2 text-[10px] leading-4"
+                    className="flex items-center justify-between gap-2 text-ui-xs leading-4"
                   >
                     <span className="shrink-0 text-slate-400">{field.label}</span>
                     <span className="min-w-0 truncate text-right text-slate-200" title={field.value}>
@@ -642,7 +643,7 @@ function AiBlocks({ blocks }: { blocks: AiBlock[] }) {
             const percent = block.percent ?? 30;
             return (
               <div key={index} className="space-y-1">
-                <div className="flex items-center justify-between text-[10px] text-slate-400">
+                <div className="flex items-center justify-between text-ui-xs text-slate-400">
                   <span className="truncate">{block.label ?? "进度"}</span>
                   {block.percent != null ? (
                     <span className="ml-2 shrink-0 tabular-nums">
@@ -731,14 +732,14 @@ function UpdateCapsule({ state }: { state: UpdateState | null }) {
 
   if (failed) {
     return (
-      <div className="island-expand flex h-full w-full items-center gap-4 rounded-[30px] bg-slate-900/95 px-7 text-slate-100 shadow-2xl ring-1 ring-white/10 backdrop-blur-xl">
+      <div className="island-expand flex h-full w-full items-center gap-4 rounded-[30px] bg-slate-900/95 px-7 text-slate-100  border border-white/10 backdrop-blur-xl">
         <span className="grid h-10 w-10 shrink-0 place-items-center rounded-full bg-rose-500/15 text-rose-400">
           <AlertTriangle size={20} />
         </span>
         <div className="min-w-0 flex-1">
-          <p className="text-sm font-semibold">更新失败</p>
+          <p className="text-ui-base font-normal">更新失败</p>
           <p
-            className="mt-0.5 truncate text-[11px] text-slate-400"
+            className="mt-0.5 truncate text-ui-sm text-slate-400"
             title={state?.error ?? undefined}
           >
             {state?.error ?? "下载或安装过程中出现错误。"}
@@ -747,7 +748,7 @@ function UpdateCapsule({ state }: { state: UpdateState | null }) {
         <button
           type="button"
           onClick={manual}
-          className="inline-flex shrink-0 items-center gap-1.5 rounded-xl bg-white/10 px-4 py-2 text-xs font-medium text-slate-100 ring-1 ring-white/10 transition hover:bg-white/15"
+          className="inline-flex shrink-0 items-center gap-1.5 rounded-xl bg-white/10 px-4 py-2 text-ui-caption font-normal text-slate-100 border border-white/10 transition hover:bg-white/15"
         >
           <Download size={13} />
           手动下载
@@ -756,7 +757,7 @@ function UpdateCapsule({ state }: { state: UpdateState | null }) {
           type="button"
           disabled={cancelling}
           onClick={() => void cancel()}
-          className="inline-flex shrink-0 items-center gap-1.5 rounded-xl bg-white/5 px-4 py-2 text-xs font-medium text-slate-300 ring-1 ring-white/10 transition hover:bg-white/10 disabled:opacity-50"
+          className="inline-flex shrink-0 items-center gap-1.5 rounded-xl bg-white/5 px-4 py-2 text-ui-caption font-normal text-slate-300 border border-white/10 transition hover:bg-white/10 disabled:opacity-50"
         >
           {cancelling ? <Loader2 size={13} className="animate-spin" /> : <X size={13} />}
           取消
@@ -783,22 +784,22 @@ function UpdateCapsule({ state }: { state: UpdateState | null }) {
         : "校验更新包并写入应用目录…";
 
   return (
-    <div className="island-expand flex h-full w-full flex-col justify-center gap-2.5 rounded-[30px] bg-slate-900/95 px-7 py-4 text-slate-100 shadow-2xl ring-1 ring-white/10 backdrop-blur-xl">
+    <div className="island-expand flex h-full w-full flex-col justify-center gap-2.5 rounded-[30px] bg-slate-900/95 px-7 py-4 text-slate-100  border border-white/10 backdrop-blur-xl">
       <div className="flex items-center gap-2.5">
         {phase === "ready" ? (
           <CheckCircle2 size={17} className="text-emerald-400" />
         ) : (
           <Loader2 size={17} className="animate-spin text-sky-400" />
         )}
-        <span className="text-sm font-semibold tracking-wide">{title}</span>
-        <span className="rounded-full bg-white/5 px-2 py-0.5 text-[10px] text-slate-300">
+        <span className="text-ui-base font-normal tracking-wide">{title}</span>
+        <span className="rounded-full bg-white/5 px-2 py-0.5 text-ui-xs text-slate-300">
           TAPD Client
         </span>
-        <span className="font-mono text-[10px] text-slate-400">
+        <span className="font-mono text-ui-xs text-slate-400">
           v{state?.currentVersion ?? "—"}
           {target ? ` → v${target}` : ""}
         </span>
-        <span className="ml-auto text-[11px] tabular-nums text-slate-400">
+        <span className="ml-auto text-ui-sm tabular-nums text-slate-400">
           {phase === "downloading" && percent != null ? `${percent.toFixed(0)}%` : detail}
         </span>
       </div>
@@ -819,7 +820,7 @@ function UpdateCapsule({ state }: { state: UpdateState | null }) {
         />
       </div>
 
-      <div className="flex items-center justify-between text-[10px] text-slate-400">
+      <div className="flex items-center justify-between text-ui-xs text-slate-400">
         <span>{detail}</span>
         <span>更新期间主窗口不可打开</span>
       </div>
@@ -831,7 +832,7 @@ function KindBadge({ kind }: { kind: NotificationItem["kind"] }) {
   return (
     <span
       className={clsx(
-        "shrink-0 rounded px-1.5 py-0.5 text-[9px] font-medium",
+        "shrink-0 rounded px-1.5 py-0.5 text-ui-2xs font-normal",
         kind === "new" && "bg-sky-400/15 text-sky-300",
         kind === "transferred" && "bg-violet-400/15 text-violet-300",
         kind === "reopened" && "bg-amber-400/15 text-amber-300",

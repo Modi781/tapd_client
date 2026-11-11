@@ -65,14 +65,14 @@ export function Segmented<T extends string>({
       ref={containerRef}
       role="tablist"
       className={clsx(
-        "relative inline-flex items-center rounded-lg border border-slate-200 bg-slate-50 p-0.5",
+        "relative inline-flex items-center rounded-lg border border-border bg-slate-50 p-0.5",
         className,
       )}
     >
       {indicator ? (
         <span
           aria-hidden="true"
-          className="absolute inset-y-0.5 rounded-md bg-white shadow-sm transition-[left,width] duration-300 ease-out"
+          className="absolute inset-y-0.5 rounded-md bg-selected  transition-[left,width] duration-300 ease-out"
           style={{ left: indicator.left, width: indicator.width }}
         />
       ) : null}
@@ -90,8 +90,8 @@ export function Segmented<T extends string>({
             className={clsx(
               "relative z-10 inline-flex items-center gap-1 rounded-md transition-colors",
               size === "compact"
-                ? "px-2 py-0.5 text-[11px]"
-                : "px-2.5 py-1 text-xs",
+                ? "px-2 py-0.5 text-ui-sm"
+                : "px-2.5 py-1 text-ui-caption",
               active ? "text-slate-900" : "text-slate-500 hover:text-slate-700",
             )}
           >

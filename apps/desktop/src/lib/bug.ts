@@ -31,3 +31,43 @@ export const isMyBug = (
 /** The first owner, for compact labels and the claim hint. */
 export const primaryOwner = (owner: string | null | undefined): string =>
   ownerNames(owner)[0] ?? "";
+
+/** TAPD titles come from testers and usually carry full-width punctuation. */
+const TITLE_PUNCTUATION: Record<string, string> = {
+  "【": "[",
+  "】": "]",
+  "「": '"',
+  "」": '"',
+  "『": "'",
+  "』": "'",
+  "（": "(",
+  "）": ")",
+  "《": "<",
+  "》": ">",
+  "，": ",",
+  "。": ".",
+  "：": ":",
+  "；": ";",
+  "、": ",",
+  "？": "?",
+  "！": "!",
+  "—": "-",
+  "～": "~",
+  "％": "%",
+  "　": " ",
+};
+
+/**
+ * Render a bug title with ASCII punctuation so it matches the rest of the UI.
+ *
+ * Bracketed ranges are kept apart from the surrounding text (`[x]y` → `[x] y`,
+ * `a[x]` → `a [x]`), while a bracket at the very start of the title stays flush.
+ * Only the title is rewritten; descriptions, comments and exported Markdown keep
+ * the original text.
+ */
+export const bugTitle = (value: string | null | undefined): string =>
+  (value ?? "")
+    .replace(/…+/g, "...")
+    .replace(/[【】「」『』（）《》，。：；、？！—～％　]/g, (char) => TITLE_PUNCTUATION[char])
+    .replace(/(?<=[^\s[({])(?=[[({])/gu, " ")
+    .replace(/(?<=[\]})])(?=[^\s.,;:!?)\]}>])/gu, " ");

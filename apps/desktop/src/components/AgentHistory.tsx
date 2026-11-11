@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import clsx from "clsx";
 import {
@@ -18,19 +18,23 @@ import {
   exportDirFor,
   type AgentTask,
   type AgentTaskStatus,
+  type AgentWorkspaceRef,
 } from "../lib/agent";
 import { relativeTime } from "../lib/api";
+import { bugTitle } from "../lib/bug";
 import { AgentLogViewer } from "./AgentLogViewer";
 import { Badge, Button } from "./ui";
 
 // History only contains terminal tasks; active ones live in the run tab.
 const STATUS_OPTIONS: AgentTaskStatus[] = ["succeeded", "failed", "canceled"];
+const PAGE_SIZE = 50;
 
 const SELECT_CLASS =
-  "rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-xs text-slate-700 outline-none transition focus:border-sky-300 focus:ring-2 focus:ring-sky-100";
+  "rounded-lg border border-border bg-surface px-2 py-1.5 text-ui-caption text-slate-700 transition focus:border-sky-300 focus:outline-2 focus:outline-sky-200";
 
 type Props = {
-  tasks: AgentTask[];
+  /** Changes when a task leaves the live queue, so the first page refreshes. */
+  revision?: string;
   /** History row selected by the island capsule / enqueue flow. */
   focusTaskId?: string | null;
   onOpenBug: (workspaceId: string, bugId: string) => void;
@@ -39,64 +43,101 @@ type Props = {
   toast: (kind: "ok" | "error", text: string) => void;
 };
 
-/** Execution records: filterable newest-first list plus a detail/log viewer. */
-export function AgentHistory({ tasks, focusTaskId, onOpenBug, onQueued, toast }: Props) {
+/** Execution records: server-filtered, paginated newest-first list plus detail. */
+export function AgentHistory({
+  revision,
+  focusTaskId,
+  onOpenBug,
+  onQueued,
+  toast,
+}: Props) {
   const [workspaceFilter, setWorkspaceFilter] = useState("all");
   const [statusFilter, setStatusFilter] = useState<"all" | AgentTaskStatus>("all");
   const [query, setQuery] = useState("");
+  const [debouncedQuery, setDebouncedQuery] = useState("");
+  const [tasks, setTasks] = useState<AgentTask[]>([]);
+  const [total, setTotal] = useState(0);
+  const [hasMore, setHasMore] = useState(false);
+  const [workspaces, setWorkspaces] = useState<AgentWorkspaceRef[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [logTask, setLogTask] = useState<AgentTask | null>(null);
   const [resumeBusy, setResumeBusy] = useState<string | null>(null);
   const [retryBusy, setRetryBusy] = useState<string | null>(null);
   const appliedFocusRef = useRef<string | null>(null);
+  const requestRef = useRef(0);
 
-  const workspaces = useMemo(() => {
-    const map = new Map<string, string>();
-    for (const task of tasks) {
-      map.set(task.workspaceId, task.workspaceName || task.workspaceId);
-    }
-    return Array.from(map.entries()).map(([id, name]) => ({ id, name }));
-  }, [tasks]);
-
-  const filtered = useMemo(() => {
-    const keyword = query.trim().toLowerCase();
-    return tasks
-      .filter((task) => workspaceFilter === "all" || task.workspaceId === workspaceFilter)
-      .filter((task) => statusFilter === "all" || task.status === statusFilter)
-      .filter(
-        (task) =>
-          !keyword ||
-          task.title.toLowerCase().includes(keyword) ||
-          task.bugId.toLowerCase().includes(keyword),
-      )
-      .slice()
-      .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt));
-  }, [tasks, workspaceFilter, statusFilter, query]);
-
-  // Keep a sensible selection as tasks stream in or filters change.
+  // Debounce the keyword so typing does not fire a request per keystroke.
   useEffect(() => {
-    setSelectedId((current) => {
-      if (current && filtered.some((task) => task.id === current)) return current;
-      return filtered[0]?.id ?? null;
-    });
-  }, [filtered]);
+    const timer = setTimeout(() => setDebouncedQuery(query.trim()), 250);
+    return () => clearTimeout(timer);
+  }, [query]);
 
-  const selected = useMemo(
-    () => filtered.find((task) => task.id === selectedId) ?? null,
-    [filtered, selectedId],
+  const fetchPage = useCallback(
+    async (offset: number, focus?: string | null) => {
+      const request = ++requestRef.current;
+      if (offset === 0) {
+        setLoading(true);
+        setLoadingMore(false);
+      } else {
+        setLoadingMore(true);
+      }
+      try {
+        const page = await agentApi.tasksHistory({
+          workspaceId: workspaceFilter === "all" ? undefined : workspaceFilter,
+          status: statusFilter === "all" ? undefined : statusFilter,
+          keyword: debouncedQuery || undefined,
+          taskId: focus || undefined,
+          offset,
+          limit: PAGE_SIZE,
+        });
+        if (request !== requestRef.current) return;
+        setTasks((current) => (offset === 0 ? page.tasks : [...current, ...page.tasks]));
+        setTotal(page.total);
+        setHasMore(page.hasMore);
+        setWorkspaces(page.workspaces);
+        if (focus) setSelectedId(focus);
+      } catch (error) {
+        if (request === requestRef.current) toast("error", String(error));
+      } finally {
+        if (request === requestRef.current) {
+          setLoading(false);
+          setLoadingMore(false);
+        }
+      }
+    },
+    [workspaceFilter, statusFilter, debouncedQuery, toast],
   );
 
-  // A focus request from the island/enqueue flow wins over active filters.
+  // First page on mount, filter change and whenever a task leaves the queue.
   useEffect(() => {
-    if (!focusTaskId) return;
-    if (appliedFocusRef.current === focusTaskId) return;
-    if (!tasks.some((task) => task.id === focusTaskId)) return;
+    void fetchPage(0);
+  }, [fetchPage, revision]);
+
+  // Keep a sensible selection as pages load or filters change.
+  useEffect(() => {
+    setSelectedId((current) => {
+      if (current && tasks.some((task) => task.id === current)) return current;
+      return tasks[0]?.id ?? null;
+    });
+  }, [tasks]);
+
+  const selected = useMemo(
+    () => tasks.find((task) => task.id === selectedId) ?? null,
+    [tasks, selectedId],
+  );
+
+  // A focus request from the island/enqueue flow wins over the current page.
+  useEffect(() => {
+    if (!focusTaskId || appliedFocusRef.current === focusTaskId) return;
     appliedFocusRef.current = focusTaskId;
-    setWorkspaceFilter("all");
-    setStatusFilter("all");
-    setQuery("");
-    setSelectedId(focusTaskId);
-  }, [focusTaskId, tasks]);
+    if (tasks.some((task) => task.id === focusTaskId)) {
+      setSelectedId(focusTaskId);
+      return;
+    }
+    void fetchPage(0, focusTaskId);
+  }, [focusTaskId, tasks, fetchPage]);
 
   const openExportDir = (task: AgentTask) => {
     const dir = exportDirFor(task.mdPath);
@@ -180,24 +221,29 @@ export function AgentHistory({ tasks, focusTaskId, onOpenBug, onQueued, toast }:
             value={query}
             onChange={(event) => setQuery(event.target.value)}
             placeholder="搜索标题或缺陷 ID"
-            className="w-full rounded-lg border border-slate-200 bg-white py-1.5 pl-8 pr-2.5 text-xs text-slate-700 outline-none transition placeholder:text-slate-300 focus:border-sky-300 focus:ring-2 focus:ring-sky-100"
+            className="w-full rounded-lg border border-border bg-surface py-1.5 pl-8 pr-2.5 text-ui-caption text-slate-700 transition placeholder:text-slate-300 focus:border-sky-300 focus:outline-2 focus:outline-sky-200"
           />
         </label>
 
-        <span className="shrink-0 text-[11px] text-slate-400">
-          {filtered.length} 条记录
-        </span>
+        <span className="shrink-0 text-ui-sm text-slate-400">{total} 条记录</span>
       </div>
 
       <div className="flex min-h-0 flex-1 gap-3">
-        <div className="w-[300px] shrink-0 overflow-y-auto rounded-xl border border-slate-200 bg-white p-1.5 shadow-sm">
-          {filtered.length === 0 ? (
-            <div className="px-3 py-8 text-center text-xs text-slate-400">
-              没有匹配的执行记录
+        <div className="w-[300px] shrink-0 overflow-y-auto rounded-xl border border-border bg-surface p-1.5 ">
+          {tasks.length === 0 ? (
+            <div className="grid place-items-center px-3 py-8 text-center text-ui-caption text-slate-400">
+              {loading ? (
+                <span className="inline-flex items-center gap-1.5">
+                  <Loader2 size={13} className="animate-spin" />
+                  加载中…
+                </span>
+              ) : (
+                "没有匹配的执行记录"
+              )}
             </div>
           ) : (
             <div className="space-y-1">
-              {filtered.map((task) => (
+              {tasks.map((task) => (
                 <button
                   key={task.id}
                   type="button"
@@ -205,7 +251,7 @@ export function AgentHistory({ tasks, focusTaskId, onOpenBug, onQueued, toast }:
                   className={clsx(
                     "w-full rounded-lg px-2.5 py-2 text-left transition",
                     task.id === selectedId
-                      ? "bg-sky-50 ring-1 ring-sky-200"
+                      ? "bg-sky-50 border border-sky-200"
                       : "hover:bg-slate-50",
                   )}
                 >
@@ -213,32 +259,43 @@ export function AgentHistory({ tasks, focusTaskId, onOpenBug, onQueued, toast }:
                     <Badge tone={AGENT_STATUS_TONES[task.status]} dot>
                       {AGENT_STATUS_LABELS[task.status]}
                     </Badge>
-                    <span className="ml-auto shrink-0 text-[10px] text-slate-400">
+                    <span className="ml-auto shrink-0 text-ui-xs text-slate-400">
                       {relativeTime(task.createdAt)}
                     </span>
                   </div>
-                  <div className="mt-1 line-clamp-2 text-[12px] font-medium leading-4 text-slate-700">
-                    {task.title || "（无标题）"}
+                  <div className="mt-1 line-clamp-2 text-ui-caption font-normal leading-4 text-slate-700">
+                    {bugTitle(task.title) || "（无标题）"}
                   </div>
-                  <div className="mt-0.5 truncate font-mono text-[10px] text-slate-400">
+                  <div className="mt-0.5 truncate font-mono text-ui-xs text-slate-400">
                     {task.workspaceName || task.workspaceId} · #{task.bugId.slice(-7)}
                   </div>
                 </button>
               ))}
+              {hasMore ? (
+                <button
+                  type="button"
+                  disabled={loadingMore}
+                  onClick={() => void fetchPage(tasks.length)}
+                  className="mt-1 flex w-full items-center justify-center gap-1.5 rounded-lg border border-border bg-surface px-2.5 py-2 text-ui-caption text-slate-600 transition hover:bg-slate-50 disabled:opacity-60"
+                >
+                  {loadingMore ? <Loader2 size={12} className="animate-spin" /> : null}
+                  加载更多（已显示 {tasks.length} / {total}）
+                </button>
+              ) : null}
             </div>
           )}
         </div>
 
-        <div className="min-w-0 flex-1 overflow-y-auto rounded-xl border border-slate-200 bg-white shadow-sm">
+        <div className="min-w-0 flex-1 overflow-y-auto rounded-xl border border-border bg-surface ">
           {!selected ? (
-            <div className="grid h-full place-items-center px-6 py-10 text-center text-xs text-slate-400">
+            <div className="grid h-full place-items-center px-6 py-10 text-center text-ui-caption text-slate-400">
               选择左侧记录查看详情
             </div>
           ) : (
             <div className="p-4">
               <div className="flex flex-wrap items-center gap-2">
-                <h2 className="min-w-0 flex-1 truncate text-sm font-semibold text-slate-900">
-                  {selected.title || "（无标题）"}
+                <h2 className="min-w-0 flex-1 truncate text-ui-base font-normal text-slate-900">
+                  {bugTitle(selected.title) || "（无标题）"}
                 </h2>
                 <Badge tone={AGENT_STATUS_TONES[selected.status]}>
                   {AGENT_STATUS_LABELS[selected.status]}
@@ -304,7 +361,7 @@ export function AgentHistory({ tasks, focusTaskId, onOpenBug, onQueued, toast }:
                 </Button>
               </div>
 
-              <dl className="mt-3 grid grid-cols-2 gap-x-4 gap-y-2 text-[11px] sm:grid-cols-3">
+              <dl className="mt-3 grid grid-cols-2 gap-x-4 gap-y-2 text-ui-sm sm:grid-cols-3">
                 <Meta label="工作区" value={selected.workspaceName || selected.workspaceId} />
                 <Meta label="缺陷 ID" value={selected.bugId} mono />
                 <Meta label="来源" value={selected.source || "—"} />
@@ -329,17 +386,17 @@ export function AgentHistory({ tasks, focusTaskId, onOpenBug, onQueued, toast }:
               </dl>
 
               {selected.error ? (
-                <div className="mt-3 break-all rounded-lg bg-rose-50 px-2.5 py-2 text-[11px] leading-5 text-rose-700 ring-1 ring-rose-100">
-                  <div className="mb-0.5 font-semibold">错误</div>
+                <div className="mt-3 break-all rounded-lg bg-rose-50 px-2.5 py-2 text-ui-sm leading-5 text-rose-700 border border-rose-100">
+                  <div className="mb-0.5 font-normal">错误</div>
                   {selected.error}
                 </div>
               ) : null}
 
               <details className="mt-3 rounded-lg border border-slate-100 bg-slate-50/60">
-                <summary className="cursor-pointer select-none px-2.5 py-1.5 text-[11px] font-medium text-slate-600">
+                <summary className="cursor-pointer select-none px-2.5 py-1.5 text-ui-sm font-normal text-slate-600">
                   提示词
                 </summary>
-                <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words px-2.5 pb-2.5 font-mono text-[11px] leading-5 text-slate-600">
+                <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words px-2.5 pb-2.5 font-mono text-ui-sm leading-5 text-slate-600">
                   {selected.prompt || "（空）"}
                 </pre>
               </details>
@@ -366,14 +423,14 @@ function Meta(props: {
 }) {
   return (
     <div className={clsx("min-w-0", props.wide && "col-span-2 sm:col-span-3")}>
-      <dt className="text-[10px] uppercase tracking-wide text-slate-400">
+      <dt className="text-ui-xs text-slate-400">
         {props.label}
       </dt>
       <dd
         title={props.title}
         className={clsx(
           "truncate text-slate-700",
-          props.mono && "font-mono text-[10px]",
+          props.mono && "font-mono text-ui-xs",
         )}
       >
         {props.value}

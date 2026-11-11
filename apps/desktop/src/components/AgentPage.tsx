@@ -33,6 +33,7 @@ import {
   type PermissionReply,
 } from "../lib/agent";
 import { relativeTime } from "../lib/api";
+import { bugTitle } from "../lib/bug";
 import { AgentApproval } from "./AgentApproval";
 import { AgentHistory } from "./AgentHistory";
 import { AgentTerminal } from "./AgentTerminal";
@@ -94,9 +95,6 @@ export function AgentPage({
   const activeTaskId = tasksState?.activeTaskId ?? null;
   const runTasks = tasks.filter((task) => isActiveStatus(task.status));
   const approvalTasks = tasks.filter((task) => isApprovalStatus(task.status));
-  const historyTasks = tasks.filter(
-    (task) => !isActiveStatus(task.status) && !isApprovalStatus(task.status),
-  );
 
   const refresh = useCallback(async () => {
     try {
@@ -179,7 +177,13 @@ export function AgentPage({
     if (focusRefreshRef.current !== focusTaskId) {
       focusRefreshRef.current = focusTaskId;
       void refresh();
+      return;
     }
+
+    // Terminal tasks are not in the live snapshot; the history tab fetches
+    // them by id.
+    appliedFocusRef.current = focusTaskId;
+    setTab("history");
   }, [focusTaskId, tasksState, refresh]);
 
   // The title-bar review badge opens the approval queue directly.
@@ -379,7 +383,7 @@ export function AgentPage({
                 <span className="inline-flex items-center gap-1.5">
                   运行
                   {counts.waiting > 0 ? (
-                    <span className="inline-flex min-w-[2ch] justify-center rounded-full bg-rose-500 px-1.5 py-0.5 text-[9px] font-semibold leading-none tabular-nums text-white">
+                    <span className="inline-flex min-w-[2ch] justify-center rounded-full bg-rose-500 px-1.5 py-0.5 text-ui-2xs font-normal leading-none tabular-nums text-white">
                       {counts.waiting}
                     </span>
                   ) : null}
@@ -392,7 +396,7 @@ export function AgentPage({
                 <span className="inline-flex items-center gap-1.5">
                   待审核
                   {counts.awaiting > 0 ? (
-                    <span className="inline-flex min-w-[2ch] justify-center rounded-full bg-amber-500 px-1.5 py-0.5 text-[9px] font-semibold leading-none tabular-nums text-white">
+                    <span className="inline-flex min-w-[2ch] justify-center rounded-full bg-amber-500 px-1.5 py-0.5 text-ui-2xs font-normal leading-none tabular-nums text-white">
                       {counts.awaiting}
                     </span>
                   ) : null}
@@ -403,7 +407,7 @@ export function AgentPage({
           ]}
         />
 
-        <span className="text-[11px] text-slate-400">
+        <span className="text-ui-sm text-slate-400">
           {counts.active} 运行 · {counts.queued} 排队 · {counts.waiting} 权限 ·{" "}
           {counts.awaiting} 待审核
           {counts.paused ? " · 队列已暂停" : ""}
@@ -437,7 +441,7 @@ export function AgentPage({
 
       {tab === "history" ? (
         <AgentHistory
-          tasks={historyTasks}
+          revision={`${counts.active}:${counts.queued}:${counts.waiting}:${counts.awaiting}`}
           focusTaskId={focusTaskId}
           onOpenBug={onOpenBug}
           onQueued={(taskId) => {
@@ -460,26 +464,24 @@ export function AgentPage({
       ) : (
         <div className="flex min-h-0 flex-1 gap-3">
           {/* Left: live execution queue, FIFO. */}
-          <aside className="flex w-[300px] shrink-0 flex-col overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
+          <aside className="flex w-[300px] shrink-0 flex-col overflow-hidden rounded-xl border border-border bg-surface ">
             <div className="flex shrink-0 items-center gap-1.5 border-b border-slate-100 px-3 py-2">
               <ListOrdered size={13} className="text-slate-400" />
-              <span className="text-[11px] font-medium text-slate-500">执行队列</span>
-              <span className="ml-auto text-[10px] tabular-nums text-slate-400">
-                {counts.active} 运行 · {counts.queued} 排队
-              </span>
+              <span className="text-ui-sm text-slate-500">执行队列</span>
             </div>
 
             <div className="min-h-0 flex-1 overflow-y-auto p-1.5">
               {!loaded ? (
-                <div className="flex items-center justify-center gap-2 py-10 text-xs text-slate-400">
+                <div className="flex items-center justify-center gap-2 py-10 text-ui-caption text-slate-400">
                   <Loader2 size={14} className="animate-spin" />
                   正在读取…
                 </div>
               ) : runTasks.length === 0 ? (
-                <div className="px-3 py-8 text-center text-xs leading-5 text-slate-400">
+                <div
+                  className="flex h-full items-center justify-center px-3 text-center text-ui-caption text-slate-400"
+                  title="在缺陷详情点击「用 Agent 修复」后会排在这里"
+                >
                   队列为空
-                  <br />
-                  在缺陷详情点击「用 Agent 修复」后会排在这里
                 </div>
               ) : (
                 <div className="space-y-1">
@@ -513,19 +515,19 @@ export function AgentPage({
           </aside>
 
           {/* Right: PTY terminal for the running task, queue card otherwise. */}
-          <section className="flex min-w-0 flex-1 flex-col overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
+          <section className="flex min-w-0 flex-1 flex-col overflow-hidden rounded-xl border border-border bg-surface ">
             {!selectedTask ? (
               <div className="grid min-h-0 flex-1 place-items-center p-6 text-center">
                 <div className="max-w-md">
                   <div className="mx-auto grid h-12 w-12 place-items-center rounded-2xl bg-slate-100 text-slate-400">
                     <Bot size={22} />
                   </div>
-                  <h3 className="mt-3 text-sm font-semibold text-slate-800">
+                  <h3
+                    className="mt-3 text-ui-base text-slate-800"
+                    title="在缺陷详情点击「用 Agent 修复」后，任务会出现在这里；已结束的任务在「历史」中查看终端或恢复会话。"
+                  >
                     当前没有运行中的任务
                   </h3>
-                  <p className="mt-1 text-xs leading-5 text-slate-500">
-                    在缺陷详情点击「用 Agent 修复」后，任务会出现在这里；已结束的任务在「历史」中查看终端或恢复会话。
-                  </p>
                   {counts.awaiting > 0 ? (
                     <Button
                       size="sm"
@@ -555,23 +557,23 @@ export function AgentPage({
               <>
                 <div className="shrink-0 border-b border-slate-100 px-3.5 py-2.5">
                   <div className="flex flex-wrap items-start gap-2.5">
-                    <span className="mt-0.5 grid h-7 w-7 shrink-0 place-items-center rounded-lg bg-slate-900 text-sky-300">
+                    <span className="mt-0.5 grid h-7 w-7 shrink-0 place-items-center theme-static-dark rounded-lg bg-slate-900 text-sky-300">
                       <Terminal size={14} />
                     </span>
 
                     <div className="min-w-0 flex-1">
                       <div className="flex min-w-0 items-center gap-2">
                         <h2
-                          className="truncate text-[13px] font-semibold text-slate-900"
-                          title={selectedTask.title}
+                          className="truncate text-ui-base font-normal text-slate-900"
+                          title={bugTitle(selectedTask.title)}
                         >
-                          {selectedTask.title || "（无标题）"}
+                          {bugTitle(selectedTask.title) || "（无标题）"}
                         </h2>
                         <Badge tone={AGENT_STATUS_TONES[selectedTask.status]}>
                           {AGENT_STATUS_LABELS[selectedTask.status]}
                         </Badge>
                       </div>
-                      <div className="mt-1 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-[10px] text-slate-400">
+                      <div className="mt-1 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-ui-xs text-slate-400">
                         <span className="shrink-0">
                           {selectedTask.workspaceName || selectedTask.workspaceId} · #
                           {selectedTask.bugId.slice(-7)}
@@ -659,25 +661,25 @@ export function AgentPage({
                   <div className="shrink-0 border-b border-amber-200/70 bg-amber-50/70 px-3.5 py-2.5">
                     <div className="flex min-w-0 items-center gap-1.5">
                       <ShieldAlert size={14} className="shrink-0 text-amber-600" />
-                      <span className="shrink-0 text-xs font-semibold text-amber-900">
+                      <span className="shrink-0 text-ui-caption font-normal text-amber-900">
                         Agent 请求权限
                       </span>
                       <span
-                        className="min-w-0 flex-1 truncate text-[11px] text-amber-800"
+                        className="min-w-0 flex-1 truncate text-ui-sm text-amber-800"
                         title={selectedTask.review.title}
                       >
                         {selectedTask.review.title}
                       </span>
                     </div>
                     <div
-                      className="mt-1 truncate font-mono text-[10px] text-amber-700/90"
+                      className="mt-1 truncate font-mono text-ui-xs text-amber-700/90"
                       title={`${selectedTask.review.action} · ${selectedTask.review.resource}`}
                     >
                       {selectedTask.review.action} · {selectedTask.review.resource}
                     </div>
                     {replyFallback ? (
                       <div
-                        className="mb-2 rounded-lg border border-rose-200 bg-white/70 px-2.5 py-1.5 text-[11px] leading-4 text-rose-700"
+                        className="mb-2 rounded-lg border border-rose-200 bg-surface/70 px-2.5 py-1.5 text-ui-sm leading-4 text-rose-700"
                         title={replyFallback}
                       >
                         运行时没有接受这次回执，请重试或选择其他选项。
@@ -686,7 +688,7 @@ export function AgentPage({
                     <div className="mt-2 flex flex-wrap items-center gap-1.5">
                       {runtimeBlocksDecision ? (
                         <>
-                          <span className="min-w-0 flex-1 text-[11px] leading-4 text-amber-900">
+                          <span className="min-w-0 flex-1 text-ui-sm leading-4 text-amber-900">
                             {decisionFallbackText}
                           </span>
                           {interactive ? (
@@ -813,7 +815,7 @@ export function AgentPage({
                 ) : null}
 
                 {selectedTask.error ? (
-                  <div className="shrink-0 break-all border-b border-rose-100 bg-rose-50 px-3.5 py-1.5 text-[11px] leading-5 text-rose-700">
+                  <div className="shrink-0 break-all border-b border-rose-100 bg-rose-50 px-3.5 py-1.5 text-ui-sm leading-5 text-rose-700">
                     {selectedTask.error}
                   </div>
                 ) : null}
@@ -831,15 +833,17 @@ export function AgentPage({
                   </div>
                 ) : (
                   <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 bg-slate-50/70 p-6 text-center">
-                    <div className="grid h-12 w-12 place-items-center rounded-2xl bg-slate-900 text-sky-300">
+                    <div className="grid h-12 w-12 place-items-center theme-static-dark rounded-2xl bg-slate-900 text-sky-300">
                       <Terminal size={22} />
                     </div>
                     <div>
-                      <p className="text-sm font-medium text-slate-700">任务尚未开始</p>
-                      <p className="mt-1 max-w-md text-[11px] leading-5 text-slate-500">
-                        任务开始后，opencode TUI 会直接显示在这里，可以像命令行一样操作。
+                      <p
+                        className="text-ui-base text-slate-700"
+                        title="任务开始后，opencode TUI 会直接显示在这里，可以像命令行一样操作。"
+                      >
+                        任务尚未开始
                       </p>
-                      <p className="mt-2 break-all font-mono text-[10px] text-slate-400">
+                      <p className="mt-2 break-all font-mono text-ui-xs text-slate-400">
                         {selectedTask.logPath}
                       </p>
                     </div>
@@ -856,7 +860,7 @@ export function AgentPage({
 
 function QueueGroup({ label }: { label: string }) {
   return (
-    <div className="px-1.5 pb-1 pt-2 text-[10px] font-medium tracking-wide text-slate-400 first:pt-0.5">
+    <div className="px-1.5 pb-1 pt-2 text-ui-xs font-normal text-slate-400 first:pt-0.5">
       {label}
     </div>
   );
@@ -876,13 +880,13 @@ function RunQueueRow(props: {
       onClick={props.onSelect}
       className={clsx(
         "w-full rounded-lg px-2.5 py-2 text-left transition",
-        props.selected ? "bg-sky-50 ring-1 ring-sky-200" : "hover:bg-slate-50",
+        props.selected ? "bg-sky-50 border border-sky-200" : "hover:bg-slate-50",
       )}
     >
       <div className="flex items-center gap-1.5">
         {position ? (
           <span
-            className="grid h-4 min-w-4 place-items-center rounded bg-slate-100 px-1 font-mono text-[9px] text-slate-500"
+            className="grid h-4 min-w-4 place-items-center rounded bg-slate-100 px-1 font-mono text-ui-2xs text-slate-500"
             title={`排队第 ${position} 位`}
           >
             {position}
@@ -895,7 +899,7 @@ function RunQueueRow(props: {
         <Badge tone={AGENT_STATUS_TONES[task.status]} dot={task.status === "queued"}>
           {AGENT_STATUS_LABELS[task.status]}
         </Badge>
-        <span className="ml-auto shrink-0 text-[10px] text-slate-400">
+        <span className="ml-auto shrink-0 text-ui-xs text-slate-400">
           {task.status === "queued"
             ? relativeTime(task.createdAt)
             : task.startedAt
@@ -904,12 +908,12 @@ function RunQueueRow(props: {
         </span>
       </div>
       <div
-        className="mt-1 line-clamp-2 text-[12px] font-medium leading-4 text-slate-700"
-        title={task.title}
+        className="mt-1 line-clamp-2 text-ui-caption font-normal leading-4 text-slate-700"
+        title={bugTitle(task.title)}
       >
-        {task.title || "（无标题）"}
+        {bugTitle(task.title) || "（无标题）"}
       </div>
-      <div className="mt-0.5 truncate font-mono text-[10px] text-slate-400">
+      <div className="mt-0.5 truncate font-mono text-ui-xs text-slate-400">
         {task.workspaceName || task.workspaceId} · #{task.bugId.slice(-7)}
       </div>
     </button>
@@ -936,14 +940,14 @@ function QueuedTaskDetail(props: {
           <div className="min-w-0 flex-1">
             <div className="flex min-w-0 items-center gap-2">
               <h2
-                className="truncate text-[13px] font-semibold text-slate-900"
-                title={task.title}
+                className="truncate text-ui-base font-normal text-slate-900"
+                title={bugTitle(task.title)}
               >
-                {task.title || "（无标题）"}
+                {bugTitle(task.title) || "（无标题）"}
               </h2>
               <Badge tone="neutral">排队中</Badge>
             </div>
-            <div className="mt-1 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-[10px] text-slate-400">
+            <div className="mt-1 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-ui-xs text-slate-400">
               <span className="shrink-0">
                 {task.workspaceName || task.workspaceId} · #{task.bugId.slice(-7)}
               </span>
@@ -985,25 +989,26 @@ function QueuedTaskDetail(props: {
       </div>
 
       <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 bg-slate-50/70 p-6 text-center">
-        <div className="grid h-12 w-12 place-items-center rounded-2xl bg-slate-900 text-sky-300">
+        <div className="grid h-12 w-12 place-items-center theme-static-dark rounded-2xl bg-slate-900 text-sky-300">
           <Hourglass size={22} />
         </div>
         <div>
-          <p className="text-sm font-medium text-slate-700">
+          <p
+            className="text-ui-base text-slate-700"
+            title={
+              position > 1
+                ? `前面还有 ${position - 1} 个任务；开始后 opencode 终端会显示在这里。`
+                : "下一个就轮到它；开始后 opencode 终端会显示在这里。"
+            }
+          >
             排队第 {position} 位
           </p>
-          <p className="mt-1 max-w-md text-[11px] leading-5 text-slate-500">
-            {position > 1
-              ? `前面还有 ${position - 1} 个任务；`
-              : "下一个就轮到它；"}
-            开始后 opencode 终端会显示在这里。
-          </p>
           {props.queuePaused ? (
-            <p className="mt-2 text-[11px] text-amber-600">
+            <p className="mt-2 text-ui-sm text-amber-600">
               队列已暂停，点击右上角「继续队列」恢复执行。
             </p>
           ) : null}
-          <p className="mt-2 break-all font-mono text-[10px] text-slate-400">
+          <p className="mt-2 break-all font-mono text-ui-xs text-slate-400">
             {task.logPath}
           </p>
         </div>

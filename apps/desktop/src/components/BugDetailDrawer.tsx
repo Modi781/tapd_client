@@ -8,7 +8,6 @@ import {
   Check,
   ChevronDown,
   ChevronRight,
-  Copy,
   Download,
   FileArchive,
   FileText,
@@ -45,7 +44,7 @@ import {
   type OpenTargetSet,
   type WorkspaceMember,
 } from "../lib/api";
-import { isMyBug, ownerNames } from "../lib/bug";
+import { bugTitle, isMyBug, ownerNames } from "../lib/bug";
 import {
   agentBugKey,
   agentInFlightLabel,
@@ -352,7 +351,7 @@ function BugDetailDrawerImpl(props: Props) {
       <aside
         aria-hidden={!open}
         className={clsx(
-          "flex h-full min-w-0 flex-col overflow-hidden rounded-xl bg-white shadow-[0_1px_3px_rgba(15,23,42,0.06)] ring-1 ring-black/[0.06]",
+          "flex h-full min-w-0 flex-col overflow-hidden rounded-xl bg-surface  border border-border",
           !open && "pointer-events-none",
         )}
       >
@@ -361,8 +360,8 @@ function BugDetailDrawerImpl(props: Props) {
           data-tauri-drag-region
         >
           <div className="min-w-0">
-            <div className="flex flex-wrap items-center gap-2 text-[11px] text-slate-400">
-              <span className="rounded bg-rose-50 px-1.5 py-0.5 font-bold text-rose-600">
+            <div className="flex flex-wrap items-center gap-2 text-ui-sm text-slate-400">
+              <span className="rounded bg-rose-50 px-1.5 py-0.5 font-normal text-rose-600">
                 BUG
               </span>
               <span className="font-mono">#{detail?.shortId || detail?.id?.slice(-7) || "—"}</span>
@@ -381,13 +380,24 @@ function BugDetailDrawerImpl(props: Props) {
               ) : null}
             </div>
             {detail ? (
-              <h2 className="mt-2 text-base font-semibold leading-6 text-slate-900">
-                {detail.title}
-              </h2>
+              <div className="mt-2 flex items-start gap-1.5">
+                <h2 className="min-w-0 flex-1 text-base font-normal leading-6 text-slate-900">
+                  {bugTitle(detail.title)}
+                </h2>
+                <button
+                  type="button"
+                  onClick={() => onOpenWeb(detail.bugUrl)}
+                  title="在 TAPD 中打开"
+                  aria-label="在 TAPD 中打开"
+                  className="mt-0.5 grid h-6 w-6 shrink-0 place-items-center rounded-md text-slate-400 transition hover:bg-slate-100 hover:text-slate-700"
+                >
+                  <ArrowUpRight size={14} />
+                </button>
+              </div>
             ) : loading ? (
               <SkeletonBlock className="mt-3 h-4 w-3/4 rounded" />
             ) : (
-              <h2 className="mt-2 text-base font-semibold leading-6 text-slate-900">
+              <h2 className="mt-2 text-base font-normal leading-6 text-slate-900">
                 缺陷详情
               </h2>
             )}
@@ -405,7 +415,7 @@ function BugDetailDrawerImpl(props: Props) {
 
         <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
           {error ? (
-            <div className="rounded-xl border border-rose-200 bg-rose-50 p-4 text-xs leading-6 text-rose-700">
+            <div className="rounded-xl border border-rose-200 bg-rose-50 p-4 text-ui-caption leading-6 text-rose-700">
               {error}
             </div>
           ) : null}
@@ -427,8 +437,8 @@ function BugDetailDrawerImpl(props: Props) {
               />
 
               {!mine ? (
-                <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-[11px] leading-5 text-amber-800">
-                  <p className="font-semibold">
+                <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-ui-sm leading-5 text-amber-800">
+                  <p className="font-normal">
                     当前处理人：{detail.owner || "未分配"}
                   </p>
                   <p className="mt-0.5">
@@ -440,16 +450,16 @@ function BugDetailDrawerImpl(props: Props) {
                   <SectionTitle icon={<GitBranch size={14} />} title="状态流转" />
                   <div className="mt-2">
                     {transitionsLoading ? (
-                      <p className="inline-flex items-center gap-1.5 text-[11px] text-slate-400">
+                      <p className="inline-flex items-center gap-1.5 text-ui-sm text-slate-400">
                         <Loader2 size={12} className="animate-spin" />
                         正在读取可流转状态…
                       </p>
                     ) : transitionsError ? (
-                      <div className="break-all rounded-xl border border-amber-200 bg-amber-50 p-3 text-[11px] leading-5 text-amber-700">
+                      <div className="break-all rounded-xl border border-amber-200 bg-amber-50 p-3 text-ui-sm leading-5 text-amber-700">
                         流转状态读取失败：{transitionsError}
                       </div>
                     ) : (transitions?.transitions.length ?? 0) === 0 ? (
-                      <p className="rounded-xl border border-dashed border-slate-200 p-3 text-xs text-slate-400">
+                      <p className="rounded-xl border border-dashed border-border p-3 text-ui-caption text-slate-400">
                         当前状态没有可执行的流转
                       </p>
                     ) : (
@@ -475,18 +485,18 @@ function BugDetailDrawerImpl(props: Props) {
               <section>
                 <SectionTitle icon={<FileText size={14} />} title="缺陷描述" />
                 {detail.descriptionText ? (
-                  <div className="mt-2 whitespace-pre-wrap break-words rounded-xl border border-slate-100 bg-slate-50/70 p-4 text-[13px] leading-6 text-slate-700">
+                  <div className="mt-2 whitespace-pre-wrap break-words rounded-xl border border-slate-100 bg-slate-50/70 p-4 text-ui-base leading-6 text-slate-700">
                     {detail.descriptionText}
                   </div>
                 ) : (
-                  <div className="mt-2 rounded-xl border border-dashed border-slate-200 p-4 text-xs text-slate-400">
+                  <div className="mt-2 rounded-xl border border-dashed border-border p-4 text-ui-caption text-slate-400">
                     暂无文字描述
                     {detail.descriptionHtml.includes("<video") ? "（包含视频，见资源）" : ""}
                   </div>
                 )}
                 {detail.descriptionHtml.includes("<img") ||
                 detail.descriptionHtml.includes("<video") ? (
-                  <p className="mt-2 text-[11px] text-slate-400">
+                  <p className="mt-2 text-ui-sm text-slate-400">
                     描述中包含内嵌图片/视频，已在下方「资源」列出；导出 MD 时会下载到 assets 目录。
                   </p>
                 ) : null}
@@ -499,7 +509,7 @@ function BugDetailDrawerImpl(props: Props) {
                 />
                 <div className="mt-2 space-y-2">
                   {resourceCount === 0 ? (
-                    <div className="rounded-xl border border-dashed border-slate-200 p-3 text-xs text-slate-400">
+                    <div className="rounded-xl border border-dashed border-border p-3 text-ui-caption text-slate-400">
                       没有附件或内嵌图片/视频
                     </div>
                   ) : (
@@ -517,7 +527,7 @@ function BugDetailDrawerImpl(props: Props) {
                       ))}
                       {embeddedMedia.length > 0 ? (
                         <div className="space-y-1.5 rounded-xl border border-slate-100 bg-slate-50/60 p-2">
-                          <p className="px-1 text-[10px] text-slate-400">
+                          <p className="px-1 text-ui-xs text-slate-400">
                             描述 / 评论内嵌（{embeddedMedia.length}）
                           </p>
                           {embeddedMedia.map((media, index) => (
@@ -545,7 +555,7 @@ function BugDetailDrawerImpl(props: Props) {
                 />
                 <div className="mt-2 space-y-3">
                   {detail.comments.length === 0 ? (
-                    <div className="rounded-xl border border-dashed border-slate-200 p-3 text-xs text-slate-400">
+                    <div className="rounded-xl border border-dashed border-border p-3 text-ui-caption text-slate-400">
                       还没有评论
                     </div>
                   ) : (
@@ -572,11 +582,11 @@ function BugDetailDrawerImpl(props: Props) {
                 {showChanges ? (
                   <div className="mt-2 space-y-2">
                     {changes.error ? (
-                      <div className="break-all rounded-xl border border-amber-200 bg-amber-50 p-3 text-[11px] leading-5 text-amber-700">
+                      <div className="break-all rounded-xl border border-amber-200 bg-amber-50 p-3 text-ui-sm leading-5 text-amber-700">
                         变更记录获取失败：{changes.error}
                       </div>
                     ) : changes.changes.length === 0 ? (
-                      <div className="rounded-xl border border-dashed border-slate-200 p-3 text-xs text-slate-400">
+                      <div className="rounded-xl border border-dashed border-border p-3 text-ui-caption text-slate-400">
                         暂无变更记录
                       </div>
                     ) : (
@@ -585,7 +595,7 @@ function BugDetailDrawerImpl(props: Props) {
                           <ChangeItem key={entry.seq} entry={entry} />
                         ))}
                         {changeCount > changes.changes.length ? (
-                          <p className="px-1 text-[10px] text-slate-400">
+                          <p className="px-1 text-ui-xs text-slate-400">
                             仅显示最近 {changes.changes.length} 条，共 {changeCount} 条。
                           </p>
                         ) : null}
@@ -614,10 +624,10 @@ function BugDetailDrawerImpl(props: Props) {
                     />
                   </button>
                   {showCustomFields ? (
-                    <dl className="mt-2 grid gap-2 rounded-xl border border-slate-100 bg-slate-50/60 p-3 text-xs sm:grid-cols-2">
+                    <dl className="mt-2 grid gap-2 rounded-xl border border-slate-100 bg-slate-50/60 p-3 text-ui-caption sm:grid-cols-2">
                       {customFields.map(([key, value]) => (
                         <div key={key} className="min-w-0">
-                          <dt className="truncate font-mono text-[10px] text-slate-400">{key}</dt>
+                          <dt className="truncate font-mono text-ui-xs text-slate-400">{key}</dt>
                           <dd className="mt-0.5 break-words text-slate-700">{value}</dd>
                         </div>
                       ))}
@@ -643,10 +653,10 @@ function BugDetailDrawerImpl(props: Props) {
                     }}
                     rows={4}
                     placeholder="写评论（纯文本，⌘/Ctrl + Enter 发送）"
-                    className="mt-2 w-full resize-y rounded-xl border border-slate-200 bg-white p-3 text-xs leading-6 text-slate-700 outline-none transition focus:border-sky-400 focus:ring-2 focus:ring-sky-100"
+                    className="mt-2 w-full resize-y rounded-xl border border-border bg-surface p-3 text-ui-caption leading-6 text-slate-700 transition focus:border-sky-400 focus:outline-2 focus:outline-sky-200"
                   />
                   <div className="mt-2 flex items-center justify-end gap-2">
-                    <span className="mr-auto text-[10px] text-slate-400">
+                    <span className="mr-auto text-ui-xs text-slate-400">
                       {commentText.length > 0 ? `${commentText.length} 字` : ""}
                     </span>
                     <Button
@@ -667,11 +677,11 @@ function BugDetailDrawerImpl(props: Props) {
         </div>
 
         {detail ? (
-          <div className="shrink-0 border-t border-slate-100 bg-white px-4 py-3">
+          <div className="shrink-0 border-t border-slate-100 bg-surface px-4 py-3">
             {lastExport ? (
-              <div className="mb-2 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-[10px] leading-4 text-emerald-900">
+              <div className="mb-2 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-ui-xs leading-4 text-emerald-900">
                 <div className="flex flex-wrap items-center gap-2">
-                  <span className="font-semibold">
+                  <span className="font-normal">
                     已导出 {lastExport.assetCount} 个资源 ·{" "}
                     {formatBytes(lastExport.downloadedBytes)}
                   </span>
@@ -679,14 +689,14 @@ function BugDetailDrawerImpl(props: Props) {
                     <button
                       type="button"
                       onClick={() => onOpenPath(lastExport.dir)}
-                      className="rounded border border-emerald-300 bg-white px-1.5 py-0.5"
+                      className="rounded border border-emerald-300 bg-surface px-1.5 py-0.5"
                     >
                       打开目录
                     </button>
                     <button
                       type="button"
                       onClick={() => onCopy(lastExport.markdownPath)}
-                      className="rounded border border-emerald-300 bg-white px-1.5 py-0.5"
+                      className="rounded border border-emerald-300 bg-surface px-1.5 py-0.5"
                     >
                       复制路径
                     </button>
@@ -717,19 +727,11 @@ function BugDetailDrawerImpl(props: Props) {
                   认领
                 </Button>
               ) : null}
-              <Button
-                size="sm"
-                variant={mine ? "primary" : "secondary"}
-                icon={<ArrowUpRight size={13} />}
-                onClick={() => onOpenWeb(detail.bugUrl)}
-              >
-                在 TAPD 中打开
-              </Button>
               {mine ? (
                 agentInfo ? (
                   <Button
                     size="sm"
-                    variant="secondary"
+                    variant="primary"
                     icon={
                       agentInfo.task.status === "preparing" ||
                       agentInfo.task.status === "running" ? (
@@ -747,7 +749,7 @@ function BugDetailDrawerImpl(props: Props) {
                   <div className="inline-flex">
                     <Button
                       size="sm"
-                      variant="secondary"
+                      variant="primary"
                       className="rounded-r-none"
                       icon={<Bot size={13} />}
                       disabled={exporting || loading}
@@ -757,8 +759,8 @@ function BugDetailDrawerImpl(props: Props) {
                     </Button>
                     <Button
                       size="sm"
-                      variant="secondary"
-                      className="rounded-l-none border-l-0 px-2"
+                      variant="primary"
+                      className="rounded-l-none border-l border-primary-foreground/20 px-2"
                       title="添加补充说明或资源后启动"
                       aria-label="添加补充说明或资源后启动"
                       disabled={exporting || loading}
@@ -769,14 +771,6 @@ function BugDetailDrawerImpl(props: Props) {
                   </div>
                 )
               ) : null}
-              <Button
-                size="sm"
-                variant="secondary"
-                icon={<Copy size={13} />}
-                onClick={() => onCopy(detail.bugUrl)}
-              >
-                复制链接
-              </Button>
               <Button
                 size="sm"
                 variant="secondary"
@@ -818,7 +812,7 @@ function DetailSkeleton() {
     <div role="status" aria-busy="true" className="space-y-5">
       <span className="sr-only">正在加载缺陷详情</span>
 
-      <div className="grid grid-cols-2 gap-x-4 gap-y-3 rounded-xl border border-slate-100 bg-white p-3 sm:grid-cols-4">
+      <div className="grid grid-cols-2 gap-x-4 gap-y-3 rounded-xl border border-slate-100 bg-surface p-3 sm:grid-cols-4">
         {Array.from({ length: 8 }, (_, index) => (
           <div key={index} className="space-y-1.5">
             <SkeletonBlock className="h-2.5 w-10" />
@@ -838,7 +832,7 @@ function DetailSkeleton() {
 
       <div>
         <SkeletonBlock className="h-3 w-20" />
-        <div className="mt-2 flex items-center gap-3 rounded-xl border border-slate-100 bg-white p-3">
+        <div className="mt-2 flex items-center gap-3 rounded-xl border border-slate-100 bg-surface p-3">
           <SkeletonBlock className="h-10 w-10 shrink-0 rounded-lg" />
           <div className="min-w-0 flex-1 space-y-1.5">
             <SkeletonBlock className="h-3 w-1/2" />
@@ -850,7 +844,7 @@ function DetailSkeleton() {
 
       <div>
         <SkeletonBlock className="h-3 w-16" />
-        <div className="mt-2 space-y-2 rounded-xl border border-slate-100 bg-white p-3">
+        <div className="mt-2 space-y-2 rounded-xl border border-slate-100 bg-surface p-3">
           <div className="flex items-center gap-2">
             <SkeletonBlock className="h-5 w-5 rounded-full" />
             <SkeletonBlock className="h-2.5 w-16" />
@@ -894,7 +888,7 @@ function MetaGrid(props: {
   ];
 
   return (
-    <dl className="grid grid-cols-2 gap-x-4 gap-y-2 rounded-xl border border-slate-100 bg-white p-3 text-xs sm:grid-cols-4">
+    <dl className="grid grid-cols-2 gap-x-4 gap-y-2 rounded-xl border border-slate-100 bg-surface p-3 text-ui-caption sm:grid-cols-4">
       <UserField
         label="处理人"
         field="current_owner"
@@ -919,7 +913,7 @@ function MetaGrid(props: {
       />
       {items.map(([label, value]) => (
         <div key={label} className="min-w-0">
-          <dt className="text-[10px] uppercase tracking-wide text-slate-400">{label}</dt>
+          <dt className="text-ui-xs text-slate-400">{label}</dt>
           <dd className="mt-0.5 truncate text-slate-700" title={value}>
             {value}
           </dd>
@@ -957,7 +951,7 @@ function UserField(props: {
   if (!mine) {
     return (
       <div className="min-w-0">
-        <dt className="text-[10px] uppercase tracking-wide text-slate-400">{label}</dt>
+        <dt className="text-ui-xs text-slate-400">{label}</dt>
         <dd className="mt-0.5 truncate text-slate-700" title={current || "—"}>
           {current || "—"}
         </dd>
@@ -975,7 +969,7 @@ function UserField(props: {
 
   return (
     <div className="min-w-0">
-      <dt className="flex items-center gap-1 text-[10px] uppercase tracking-wide text-slate-400">
+      <dt className="flex items-center gap-1 text-ui-xs text-slate-400">
         {label}
         {saving ? <Loader2 size={9} className="animate-spin" /> : null}
       </dt>
@@ -988,7 +982,7 @@ function UserField(props: {
             if (members.length === 0 && !membersLoading) onRefreshMembers();
           }}
           title="从项目成员中选择"
-          className="w-full min-w-0 truncate rounded-md border border-slate-200 bg-white px-1 py-0.5 text-xs text-slate-700 outline-none transition focus:border-sky-400 focus:ring-2 focus:ring-sky-100 disabled:opacity-60"
+          className="w-full min-w-0 truncate rounded-md border border-border bg-surface px-1 py-0.5 text-ui-caption text-slate-700 transition focus:border-sky-400 focus:outline-2 focus:outline-sky-200 disabled:opacity-60"
         >
           {!current ? (
             <option value="">
@@ -1031,7 +1025,7 @@ function Thumbnail(props: {
       disabled={!clickable}
       className={clsx(
         "grid h-10 w-10 shrink-0 place-items-center overflow-hidden rounded-lg bg-slate-50 text-slate-400",
-        clickable && "transition hover:ring-2 hover:ring-sky-200",
+        clickable && "transition hover:outline-2 hover:outline-sky-200",
       )}
     >
       {source && !broken ? (
@@ -1056,7 +1050,7 @@ function PreviewButton(props: { onClick: () => void }) {
       onClick={props.onClick}
       title="预览"
       aria-label="预览"
-      className="grid h-7 w-7 shrink-0 place-items-center rounded-md border border-slate-200 bg-white text-slate-500 transition hover:border-slate-300 hover:text-slate-800"
+      className="grid h-7 w-7 shrink-0 place-items-center rounded-md border border-border bg-surface text-slate-500 transition hover:border-slate-300 hover:text-slate-800"
     >
       <Eye size={13} />
     </button>
@@ -1080,7 +1074,7 @@ function OpenButton(props: {
 
   return (
     <div className="relative shrink-0">
-      <div className="inline-flex items-stretch overflow-hidden rounded-md border border-slate-200 bg-white text-[11px] text-slate-600">
+      <div className="inline-flex items-stretch overflow-hidden rounded-md border border-border bg-surface text-ui-sm text-slate-600">
         <button
           type="button"
           onClick={onOpen}
@@ -1095,7 +1089,7 @@ function OpenButton(props: {
           aria-label="选择默认打开方式"
           aria-expanded={menuOpen}
           onClick={() => setMenuOpen((current) => !current)}
-          className="border-l border-slate-200 px-1 transition hover:bg-slate-50"
+          className="border-l border-border px-1 transition hover:bg-slate-50"
         >
           <ChevronDown size={11} />
         </button>
@@ -1109,8 +1103,8 @@ function OpenButton(props: {
             onClick={() => setMenuOpen(false)}
             className="fixed inset-0 z-20 cursor-default"
           />
-          <div className="absolute right-0 z-30 mt-1 w-52 overflow-hidden rounded-lg border border-slate-200 bg-white py-1 shadow-lg">
-            <p className="px-3 py-1 text-[10px] text-slate-400">默认打开方式</p>
+          <div className="absolute right-0 z-30 mt-1 w-52 overflow-hidden rounded-lg border border-border bg-surface py-1 ">
+            <p className="px-3 py-1 text-ui-xs text-slate-400">默认打开方式</p>
             {(targets?.targets ?? []).map((target) => {
               const active = target.id === targets?.selected;
               return (
@@ -1122,7 +1116,7 @@ function OpenButton(props: {
                     onSelect(target.id);
                   }}
                   className={clsx(
-                    "flex w-full items-center gap-2 px-3 py-1.5 text-left text-[11px] transition hover:bg-slate-50",
+                    "flex w-full items-center gap-2 px-3 py-1.5 text-left text-ui-sm transition hover:bg-slate-50",
                     active ? "text-slate-800" : "text-slate-600",
                   )}
                 >
@@ -1133,7 +1127,7 @@ function OpenButton(props: {
               );
             })}
             {targets && targets.targets.length === 0 ? (
-              <p className="px-3 py-2 text-[11px] text-slate-400">没有可用的应用</p>
+              <p className="px-3 py-2 text-ui-sm text-slate-400">没有可用的应用</p>
             ) : null}
           </div>
         </>
@@ -1184,7 +1178,7 @@ function AttachmentRow(props: {
     : -1;
 
   return (
-    <div className="flex items-center gap-3 rounded-xl border border-slate-100 bg-white p-3">
+    <div className="flex items-center gap-3 rounded-xl border border-slate-100 bg-surface p-3">
       <Thumbnail
         url={attachment.downloadUrl}
         icon={Icon}
@@ -1193,10 +1187,10 @@ function AttachmentRow(props: {
         onClick={previewable && previewIndex >= 0 ? () => onPreview(previewIndex) : undefined}
       />
       <div className="min-w-0 flex-1">
-        <div className="truncate text-xs font-medium text-slate-700" title={attachment.filename}>
+        <div className="truncate text-ui-caption font-normal text-slate-700" title={attachment.filename}>
           {attachment.filename}
         </div>
-        <div className="mt-0.5 flex items-center gap-2 text-[10px] text-slate-400">
+        <div className="mt-0.5 flex items-center gap-2 text-ui-xs text-slate-400">
           <span>{formatBytes(attachment.size)}</span>
           <span className="truncate">{attachment.contentType || attachment.filetype}</span>
           {attachment.owner ? <span>{attachment.owner}</span> : null}
@@ -1232,7 +1226,7 @@ function EmbeddedMediaRow(props: {
     : -1;
 
   return (
-    <div className="flex items-center gap-3 rounded-lg border border-slate-100 bg-white p-2.5">
+    <div className="flex items-center gap-3 rounded-lg border border-slate-100 bg-surface p-2.5">
       <Thumbnail
         url={media.url}
         icon={Icon}
@@ -1241,10 +1235,10 @@ function EmbeddedMediaRow(props: {
         onClick={previewable && previewIndex >= 0 ? () => onPreview(previewIndex) : undefined}
       />
       <div className="min-w-0 flex-1">
-        <div className="truncate text-xs text-slate-700" title={media.url}>
+        <div className="truncate text-ui-caption text-slate-700" title={media.url}>
           {media.filenameHint || "内嵌资源"}
         </div>
-        <div className="mt-0.5 text-[10px] text-slate-400">{kindLabel} · 描述/评论内嵌</div>
+        <div className="mt-0.5 text-ui-xs text-slate-400">{kindLabel} · 描述/评论内嵌</div>
       </div>
       {previewable && previewIndex >= 0 ? (
         <PreviewButton onClick={() => onPreview(previewIndex)} />
@@ -1287,22 +1281,22 @@ function mediaKindOf(
 
 function ChangeItem({ entry }: { entry: ChangeEntry }) {
   return (
-    <div className="rounded-xl border border-slate-100 bg-white p-3">
-      <div className="flex flex-wrap items-center gap-2 text-[11px] text-slate-400">
+    <div className="rounded-xl border border-slate-100 bg-surface p-3">
+      <div className="flex flex-wrap items-center gap-2 text-ui-sm text-slate-400">
         <span className="font-mono text-slate-500">#{entry.seq}</span>
-        <span className="font-medium text-slate-600">{entry.author || "未知"}</span>
+        <span className="font-normal text-slate-600">{entry.author || "未知"}</span>
         <span className="inline-flex items-center gap-1">
           <CalendarClock size={10} />
           {entry.time}
         </span>
         {entry.kind ? (
-          <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] text-slate-500">
+          <span className="rounded bg-slate-100 px-1.5 py-0.5 text-ui-xs text-slate-500">
             {entry.kind}
           </span>
         ) : null}
       </div>
       {entry.fields.length === 0 ? (
-        <p className="mt-2 text-[11px] text-slate-400">（无字段明细）</p>
+        <p className="mt-2 text-ui-sm text-slate-400">（无字段明细）</p>
       ) : (
         <dl className="mt-2 space-y-1">
           {entry.fields.map((field, index) => (
@@ -1316,7 +1310,7 @@ function ChangeItem({ entry }: { entry: ChangeEntry }) {
 
 function ChangeFieldLine({ field }: { field: ChangeField }) {
   return (
-    <div className="grid grid-cols-[minmax(56px,auto)_1fr_auto_1fr] items-baseline gap-2 text-[11px] leading-5">
+    <div className="grid grid-cols-[minmax(56px,auto)_1fr_auto_1fr] items-baseline gap-2 text-ui-sm leading-5">
       <dt className="truncate text-slate-400" title={field.field}>
         {field.field}
       </dt>
@@ -1340,22 +1334,22 @@ function CommentItem(props: { comment: Comment; depth: number }) {
   return (
     <div
       className={clsx(
-        "rounded-xl border border-slate-100 bg-white p-3",
+        "rounded-xl border border-slate-100 bg-surface p-3",
         depth > 0 && "ml-5 border-l-2 border-l-slate-200",
       )}
     >
-      <div className="flex items-center gap-2 text-[11px] text-slate-400">
-        <span className="grid h-5 w-5 place-items-center rounded-full bg-slate-100 text-[9px] text-slate-500">
+      <div className="flex items-center gap-2 text-ui-sm text-slate-400">
+        <span className="grid h-5 w-5 place-items-center rounded-full bg-slate-100 text-ui-2xs text-slate-500">
           {comment.author ? comment.author.slice(-2) : "?"}
         </span>
-        <span className="font-medium text-slate-600">{comment.author || "未知"}</span>
+        <span className="font-normal text-slate-600">{comment.author || "未知"}</span>
         <span className="inline-flex items-center gap-1">
           <CalendarClock size={10} />
           {comment.created}
         </span>
         {comment.isDeleted ? <Badge tone="red">已删除</Badge> : null}
       </div>
-      <p className="mt-2 whitespace-pre-wrap break-words text-xs leading-6 text-slate-700">
+      <p className="mt-2 whitespace-pre-wrap break-words text-ui-caption leading-6 text-slate-700">
         {comment.plainText || "（空评论）"}
       </p>
       {comment.replies.length > 0 ? (
@@ -1371,7 +1365,7 @@ function CommentItem(props: { comment: Comment; depth: number }) {
 
 function SectionTitle(props: { icon: ReactNode; title: string }) {
   return (
-    <div className="flex items-center gap-1.5 text-xs font-semibold text-slate-700">
+    <div className="flex items-center gap-1.5 text-ui-caption font-normal text-slate-700">
       <span className="text-slate-400">{props.icon}</span>
       {props.title}
     </div>

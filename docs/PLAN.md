@@ -195,7 +195,7 @@ M0 产出 `docs/spike.md`：请求样例、响应结构、分页/total 字段、
 
 ## 6. 数据模型（初版设计草案）
 
-> 以下是开工时的设计草案，用于说明数据关系；当前实现以 `apps/desktop/src-tauri/src/cache.rs` 的迁移为准：`snapshots`、`bugs`、`agent_tasks`、`notification_*`。
+> 以下是开工时的设计草案，用于说明数据关系；当前实现以 `apps/desktop/src-tauri/src/cache.rs` 的迁移为准：`snapshots`、`bugs`、`agent_tasks`、`agent_queue_state`、`mcp_audit`、`notification_*`。
 
 ```sql
 workspaces(id TEXT PK, name, company_id, enabled INT, sort INT, last_synced_at);

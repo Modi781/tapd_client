@@ -3,16 +3,23 @@
 //! The sidecar forwards every call to `/mcp/call`; the app records the tool,
 //! client, policy decision and outcome here. Bodies/comment text are never
 //! stored, only small scalar summaries.
+//!
+//! Entries live in the `mcp_audit` table of `cache.sqlite3` and are trimmed to
+//! the newest [`MAX_ENTRIES`] rows on every write. The in-memory copy keeps
+//! the UI list fast; JSON is only written when the user exports the log.
 
 use std::{
-    fs,
-    io::{self, Write},
-    path::{Path, PathBuf},
-    sync::Mutex,
+    fs, io,
+    path::Path,
+    sync::{Arc, Mutex},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
+use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+use crate::cache::Cache;
 
 const MAX_ENTRIES: usize = 500;
 
@@ -41,21 +48,17 @@ struct AuditFile {
 }
 
 pub struct McpAudit {
-    path: PathBuf,
+    cache: Arc<Cache>,
     entries: Mutex<Vec<McpAuditEntry>>,
 }
 
 impl McpAudit {
-    pub fn load(path: impl Into<PathBuf>) -> Self {
-        let path = path.into();
-        let entries = fs::read_to_string(&path)
-            .ok()
-            .and_then(|raw| serde_json::from_str::<AuditFile>(&raw).ok())
-            .map(|file| file.entries)
-            .unwrap_or_default();
-
+    /// Opens the audit log from SQLite. Auditing degrades to the in-memory
+    /// list when SQLite is unavailable.
+    pub fn load(cache: Arc<Cache>) -> Self {
+        let entries = load_entries(&cache).unwrap_or_default();
         Self {
-            path,
+            cache,
             entries: Mutex::new(entries),
         }
     }
@@ -65,13 +68,25 @@ impl McpAudit {
     pub fn record(&self, entry: McpAuditEntry) -> io::Result<()> {
         {
             let mut entries = self.entries.lock().expect("mcp audit lock");
-            entries.push(entry);
+            entries.push(entry.clone());
             let excess = entries.len().saturating_sub(MAX_ENTRIES);
             if excess > 0 {
                 entries.drain(0..excess);
             }
         }
-        self.persist()
+
+        let result = self.cache.with_conn(|conn| {
+            let tx = conn.unchecked_transaction()?;
+            insert_row(&tx, &entry)?;
+            trim(&tx)?;
+            tx.commit()
+        });
+        match result {
+            Some(Ok(())) => Ok(()),
+            Some(Err(error)) => Err(io::Error::other(error.to_string())),
+            // SQLite disabled: the in-memory audit still works.
+            None => Ok(()),
+        }
     }
 
     pub fn list(&self, limit: usize) -> Vec<McpAuditEntry> {
@@ -79,17 +94,28 @@ impl McpAudit {
         entries
             .iter()
             .rev()
-            .take(limit.max(1).min(MAX_ENTRIES))
+            .take(limit.clamp(1, MAX_ENTRIES))
             .cloned()
             .collect()
     }
 
     pub fn clear(&self) -> io::Result<()> {
-        self.entries.lock().expect("mcp audit lock").clear();
-        if self.path.exists() {
-            fs::remove_file(&self.path)?;
+        let result = self
+            .cache
+            .with_conn(|conn| conn.execute("DELETE FROM mcp_audit", []));
+        match result {
+            Some(Ok(_)) => {
+                self.entries.lock().expect("mcp audit lock").clear();
+                Ok(())
+            }
+            // SQLite disabled: clearing the in-memory copy is all we can do.
+            None => {
+                self.entries.lock().expect("mcp audit lock").clear();
+                Ok(())
+            }
+            // Keep the memory copy in sync with the rows that still exist.
+            Some(Err(error)) => Err(io::Error::other(error.to_string())),
         }
-        Ok(())
     }
 
     /// Writes the full audit log as pretty JSON and returns the file path.
@@ -102,24 +128,165 @@ impl McpAudit {
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
         fs::write(path, raw)
     }
+}
 
-    fn persist(&self) -> io::Result<()> {
-        let entries = self.entries.lock().expect("mcp audit lock").clone();
-        let raw = serde_json::to_vec_pretty(&AuditFile { entries })
-            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-        if let Some(parent) = self.path.parent() {
-            fs::create_dir_all(parent)?;
+fn insert_row(conn: &Connection, entry: &McpAuditEntry) -> rusqlite::Result<()> {
+    let summary = serde_json::to_string(&entry.summary).unwrap_or_else(|_| "null".to_string());
+    conn.execute(
+        "INSERT OR REPLACE INTO mcp_audit (
+            id, ts, tool, client, decision, ok, duration_ms,
+            workspace_id, bug_id, error, summary, created_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+        params![
+            entry.id,
+            entry.ts,
+            entry.tool,
+            entry.client,
+            entry.decision,
+            if entry.ok { 1i64 } else { 0i64 },
+            entry.duration_ms as i64,
+            entry.workspace_id,
+            entry.bug_id,
+            entry.error,
+            summary,
+            unix_now(),
+        ],
+    )?;
+    Ok(())
+}
+
+/// Drops everything except the newest `MAX_ENTRIES` rows.
+fn trim(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute(
+        "DELETE FROM mcp_audit WHERE rowid NOT IN (
+            SELECT rowid FROM mcp_audit ORDER BY rowid DESC LIMIT ?1
+         )",
+        params![MAX_ENTRIES as i64],
+    )?;
+    Ok(())
+}
+
+fn load_entries(cache: &Cache) -> Option<Vec<McpAuditEntry>> {
+    cache
+        .with_conn(|conn| {
+            let mut statement = conn
+                .prepare(
+                    "SELECT id, ts, tool, client, decision, ok, duration_ms,
+                            workspace_id, bug_id, error, summary
+                       FROM mcp_audit ORDER BY rowid ASC",
+                )
+                .ok()?;
+            let rows = statement
+                .query_map([], |row| {
+                    let summary: String = row.get(10)?;
+                    Ok(McpAuditEntry {
+                        id: row.get(0)?,
+                        ts: row.get(1)?,
+                        tool: row.get(2)?,
+                        client: row.get(3)?,
+                        decision: row.get(4)?,
+                        ok: row.get::<_, i64>(5)? != 0,
+                        duration_ms: row.get::<_, i64>(6)? as u64,
+                        workspace_id: row.get(7)?,
+                        bug_id: row.get(8)?,
+                        error: row.get(9)?,
+                        summary: serde_json::from_str(&summary).unwrap_or(Value::Null),
+                    })
+                })
+                .ok()?;
+            Some(rows.flatten().collect())
+        })
+        .flatten()
+}
+
+fn unix_now() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn temp_dir() -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("tapd-mcp-audit-{}", uuid::Uuid::new_v4().simple()));
+        fs::create_dir_all(&dir).expect("temp dir");
+        dir
+    }
+
+    fn entry(tool: &str) -> McpAuditEntry {
+        McpAuditEntry {
+            id: uuid::Uuid::new_v4().simple().to_string(),
+            ts: "2026-01-01T00:00:00Z".to_string(),
+            tool: tool.to_string(),
+            client: "zcode".to_string(),
+            decision: "allowed".to_string(),
+            ok: true,
+            duration_ms: 3,
+            workspace_id: Some("ws".to_string()),
+            bug_id: Some("bug".to_string()),
+            error: None,
+            summary: serde_json::json!({ "limit": 20 }),
         }
-        let tmp = self.path.with_extension("json.tmp");
-        {
-            let mut file = fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .open(&tmp)?;
-            file.write_all(&raw)?;
-            file.sync_all()?;
+    }
+
+    #[test]
+    fn loads_persisted_entries() {
+        let dir = temp_dir();
+        let cache = Arc::new(Cache::open(dir.join("cache.sqlite3")));
+        let audit = McpAudit::load(cache.clone());
+        audit.record(entry("tapd_whoami")).expect("record");
+
+        let reloaded = McpAudit::load(cache.clone());
+        assert_eq!(reloaded.list(10).len(), 1);
+        assert_eq!(reloaded.list(10)[0].tool, "tapd_whoami");
+    }
+
+    #[test]
+    fn trims_to_the_newest_entries() {
+        let dir = temp_dir();
+        let cache = Arc::new(Cache::open(dir.join("cache.sqlite3")));
+        let audit = McpAudit::load(cache.clone());
+
+        for index in 0..=MAX_ENTRIES {
+            audit
+                .record(entry(&format!("tool-{index}")))
+                .expect("record");
         }
-        fs::rename(&tmp, &self.path)
+
+        let entries = audit.list(MAX_ENTRIES + 10);
+        assert_eq!(entries.len(), MAX_ENTRIES);
+        assert_eq!(entries[0].tool, format!("tool-{MAX_ENTRIES}"));
+
+        let rows: i64 = cache
+            .with_conn(|conn| {
+                conn.query_row("SELECT COUNT(*) FROM mcp_audit", [], |row| row.get(0))
+                    .unwrap()
+            })
+            .expect("sqlite");
+        assert_eq!(rows, MAX_ENTRIES as i64);
+    }
+
+    #[test]
+    fn clear_removes_memory_and_sqlite_rows() {
+        let dir = temp_dir();
+        let cache = Arc::new(Cache::open(dir.join("cache.sqlite3")));
+        let audit = McpAudit::load(cache.clone());
+        audit.record(entry("tapd_whoami")).expect("record");
+
+        audit.clear().expect("clear");
+        assert!(audit.list(10).is_empty());
+
+        let rows: i64 = cache
+            .with_conn(|conn| {
+                conn.query_row("SELECT COUNT(*) FROM mcp_audit", [], |row| row.get(0))
+                    .unwrap()
+            })
+            .expect("sqlite");
+        assert_eq!(rows, 0);
     }
 }

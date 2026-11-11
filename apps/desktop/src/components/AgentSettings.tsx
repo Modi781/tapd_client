@@ -6,7 +6,7 @@ import type { SettingsSectionProps } from "../lib/feature";
 import { Badge, Button } from "./ui";
 
 const INPUT_CLASS =
-  "w-full rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-700 outline-none transition placeholder:text-slate-300 focus:border-sky-300 focus:ring-2 focus:ring-sky-100";
+  "w-full rounded-lg border border-border bg-surface px-2.5 py-1.5 text-ui-caption text-slate-700 transition placeholder:text-slate-300 focus:border-sky-300 focus:outline-2 focus:outline-sky-200";
 
 const PROMPT_VARIABLES = [
   "{{title}}",
@@ -54,10 +54,12 @@ export function AgentSettings({ config, runtime, onChange, onCommit, toast }: Pr
     <section>
       <div className="flex items-start justify-between gap-3">
         <div>
-          <h3 className="text-[12px] font-semibold text-slate-800">运行时配置</h3>
-          <p className="mt-0.5 text-[11px] leading-5 text-slate-500">
-            {runtime.name} · 修改后自动保存
-          </p>
+          <h3
+            className="text-ui-caption text-slate-800"
+            title={`${runtime.name} · 修改后自动保存`}
+          >
+            运行时配置
+          </h3>
         </div>
         <div className="flex shrink-0 items-center gap-2">
           {version ? <Badge tone="green">{version}</Badge> : null}
@@ -74,7 +76,7 @@ export function AgentSettings({ config, runtime, onChange, onCommit, toast }: Pr
 
       <div className="mt-3 space-y-4">
         <div>
-          <label className="text-[11px] font-medium text-slate-600">
+          <label className="text-ui-sm font-normal text-slate-600">
             {runtime.name} 可执行路径
           </label>
           <input
@@ -91,7 +93,7 @@ export function AgentSettings({ config, runtime, onChange, onCommit, toast }: Pr
 
         {runtime.transports.length > 1 ? (
           <div>
-            <label className="text-[11px] font-medium text-slate-600">
+            <label className="text-ui-sm font-normal text-slate-600">
               通信方式
             </label>
             <select
@@ -113,16 +115,18 @@ export function AgentSettings({ config, runtime, onChange, onCommit, toast }: Pr
                 </option>
               ))}
             </select>
-            <p className="mt-1 text-[10px] leading-4 text-slate-400">
-              ACP 使用结构化事件与权限选项；PTY 保留可交互的 TUI。
-            </p>
           </div>
         ) : null}
 
         <div>
           <div className="flex flex-wrap items-center justify-between gap-2">
-            <span className="text-[11px] font-medium text-slate-600">提示词模板</span>
-            <span className="text-[10px] text-slate-400">
+            <span
+              className="text-ui-sm text-slate-600"
+              title="变量会替换为缺陷信息；{{project_rule}} 来自项目设置。"
+            >
+              提示词模板
+            </span>
+            <span className="text-ui-xs text-slate-400">
               支持变量：{PROMPT_VARIABLES.join(" ")}
             </span>
           </div>
@@ -137,23 +141,16 @@ export function AgentSettings({ config, runtime, onChange, onCommit, toast }: Pr
             {PROMPT_VARIABLES.map((variable) => (
               <span
                 key={variable}
-                className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-[10px] text-slate-500"
+                className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-ui-xs text-slate-500"
               >
                 {variable}
               </span>
             ))}
           </div>
-          <p className="mt-1.5 text-[10px] leading-4 text-slate-400">
-            变量会替换为缺陷信息；
-            <code className="rounded bg-slate-100 px-1 font-mono">
-              {"{{project_rule}}"}
-            </code>{" "}
-            来自项目设置。
-          </p>
         </div>
 
         <details className="rounded-xl border border-slate-100 bg-slate-50/50">
-          <summary className="cursor-pointer select-none px-3 py-2 text-[11px] text-slate-500">
+          <summary className="cursor-pointer select-none px-3 py-2 text-ui-sm text-slate-500">
             高级
           </summary>
           <div className="grid gap-3 p-3 pt-0 sm:grid-cols-2">
@@ -186,8 +183,11 @@ function NumberField(props: {
   onCommit?: () => void;
 }) {
   return (
-    <div className="rounded-xl border border-slate-100 bg-slate-50/70 p-3">
-      <div className="text-[10px] uppercase tracking-wide text-slate-400">
+    <div
+      className="rounded-xl border border-slate-100 bg-slate-50/70 p-3"
+      title={props.hint}
+    >
+      <div className="text-ui-xs text-slate-400">
         {props.label}
       </div>
       <input
@@ -201,7 +201,7 @@ function NumberField(props: {
         }}
         className={`${INPUT_CLASS} mt-1.5 font-mono`}
       />
-      <div className="mt-1 text-[10px] leading-4 text-slate-400">{props.hint}</div>
+      <div className="mt-1 text-ui-xs leading-4 text-slate-400">{props.hint}</div>
     </div>
   );
 }

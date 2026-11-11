@@ -13,6 +13,7 @@ import {
 import { api, type AppInfo } from "../lib/api";
 import type { SettingsSectionProps } from "../lib/feature";
 import { AgentManagement } from "./AgentManagement";
+import { AppearanceCard } from "./AppearanceCard";
 import { CapturesPage } from "./CapturesPage";
 import { Dialog } from "./Dialog";
 import { NotificationSettings } from "./NotificationSettings";
@@ -73,19 +74,20 @@ export function SettingsPage(props: Props) {
 
   return (
     <div className="mx-auto max-w-4xl space-y-4">
+      <AppearanceCard />
 
       <NotificationSettings toast={toast} />
 
       <AgentManagement toast={toast} />
 
-      <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+      <section className="rounded-2xl border border-border bg-surface p-5 ">
         <div className="flex items-center justify-between gap-3">
           <div className="min-w-0">
-            <h2 className="flex items-center gap-2 text-sm font-semibold text-slate-900">
+            <h2 className="flex items-center gap-2 text-ui-base font-normal text-slate-900">
               <ShieldCheck size={15} className="text-slate-400" />
               运行信息
             </h2>
-            <p className="mt-1 truncate text-xs text-slate-500">
+            <p className="mt-1 truncate text-ui-caption text-slate-500">
               {info
                 ? `v${info.version} · MCP ${
                     info.runtimePort ? `127.0.0.1:${info.runtimePort}` : "未启动"
@@ -120,11 +122,7 @@ export function SettingsPage(props: Props) {
             </Button>
           }
         >
-          <p className="text-[11px] leading-5 text-slate-500">
-            打包版本、脱敏配置、最近日志与 MCP 审计；不含 Cookie、API token 和请求正文。
-          </p>
-
-          <dl className="mt-3 space-y-1 text-xs">
+          <dl className="mt-3 space-y-1 text-ui-caption">
             <PlainRow label="版本" value={info?.version ?? "—"} onCopy={onCopy} />
             <PlainRow
               label="MCP 本地端口"
@@ -135,10 +133,10 @@ export function SettingsPage(props: Props) {
 
           <div className="mt-4 divide-y divide-slate-100">
             {paths.map(([label, value]) => (
-              <div key={label} className="flex items-center gap-3 py-2 text-xs">
+              <div key={label} className="flex items-center gap-3 py-2 text-ui-caption">
                 <span className="w-24 shrink-0 text-slate-400">{label}</span>
                 <span
-                  className="min-w-0 flex-1 truncate font-mono text-[11px] text-slate-600"
+                  className="min-w-0 flex-1 truncate font-mono text-ui-sm text-slate-600"
                   title={value}
                 >
                   {value}
@@ -146,14 +144,14 @@ export function SettingsPage(props: Props) {
                 <button
                   type="button"
                   onClick={() => onOpenPath(value)}
-                  className="inline-flex shrink-0 items-center gap-1 rounded border border-slate-200 px-2 py-1 text-[11px] text-slate-600 transition hover:border-slate-300"
+                  className="inline-flex shrink-0 items-center gap-1 rounded border border-border px-2 py-1 text-ui-sm text-slate-600 transition hover:border-slate-300"
                 >
                   <FolderOpen size={11} />
                 </button>
                 <button
                   type="button"
                   onClick={() => onCopy(value)}
-                  className="inline-flex shrink-0 items-center gap-1 rounded border border-slate-200 px-2 py-1 text-[11px] text-slate-600 transition hover:border-slate-300"
+                  className="inline-flex shrink-0 items-center gap-1 rounded border border-border px-2 py-1 text-ui-sm text-slate-600 transition hover:border-slate-300"
                 >
                   <Copy size={11} />
                 </button>
@@ -163,19 +161,19 @@ export function SettingsPage(props: Props) {
         </Dialog>
       ) : null}
 
-      <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+      <section className="rounded-2xl border border-border bg-surface p-5 ">
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
-            <h2 className="flex items-center gap-2 text-sm font-semibold text-slate-900">
+            <h2
+              className="flex items-center gap-2 text-ui-base text-slate-900"
+              title="删除应用数据目录下的全部配置、离线缓存、日志、抓包与 Agent 任务记录，然后自动重启应用。导出目录不受影响。"
+            >
               <Trash2 size={15} className="text-slate-400" />
               本地数据
             </h2>
-            <p className="mt-1 text-xs leading-5 text-slate-500">
-              删除应用数据目录下的全部配置、离线缓存、日志、抓包与 Agent 任务记录，然后自动重启应用。导出目录不受影响。
-            </p>
             {info ? (
               <p
-                className="mt-1 truncate font-mono text-[11px] text-slate-400"
+                className="mt-1 truncate font-mono text-ui-sm text-slate-400"
                 title={info.paths.dataDir}
               >
                 {info.paths.dataDir}
@@ -213,17 +211,17 @@ export function SettingsPage(props: Props) {
           )}
         </div>
         {confirmClear ? (
-          <p className="mt-3 rounded-lg bg-rose-50 px-3 py-2 text-[11px] leading-5 text-rose-600">
+          <p className="mt-3 rounded-lg bg-rose-50 px-3 py-2 text-ui-sm leading-5 text-rose-600">
             操作不可撤销：引导进度、MCP 策略、Agent 任务与离线缓存都会被清除。TAPD Cookie
             保存在 WebView 会话中，如需退出登录请使用账户页。
           </p>
         ) : null}
       </section>
 
-      <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+      <section className="rounded-2xl border border-border bg-surface p-5 ">
         <div className="flex items-center justify-between gap-3">
           <div>
-            <h2 className="flex items-center gap-2 text-sm font-semibold text-slate-900">
+            <h2 className="flex items-center gap-2 text-ui-base font-normal text-slate-900">
               <FileJson size={15} className="text-slate-400" />
               接口抓包
             </h2>
@@ -239,10 +237,10 @@ export function SettingsPage(props: Props) {
         </div>
       </section>
 
-      <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+      <section className="rounded-2xl border border-border bg-surface p-5 ">
         <div className="flex items-center justify-between gap-3">
           <div>
-            <h2 className="flex items-center gap-2 text-sm font-semibold text-slate-900">
+            <h2 className="flex items-center gap-2 text-ui-base font-normal text-slate-900">
               <Sparkles size={15} className="text-slate-400" />
               新手引导
             </h2>
@@ -282,7 +280,7 @@ function PlainRow(props: { label: string; value: string; onCopy: (text: string) 
   return (
     <div className="flex items-center gap-3 py-1">
       <dt className="w-24 shrink-0 text-slate-400">{props.label}</dt>
-      <dd className="min-w-0 flex-1 truncate font-mono text-[11px] text-slate-600">{props.value}</dd>
+      <dd className="min-w-0 flex-1 truncate font-mono text-ui-sm text-slate-600">{props.value}</dd>
       <button
         type="button"
         onClick={() => props.onCopy(props.value)}

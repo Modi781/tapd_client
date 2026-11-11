@@ -199,13 +199,13 @@ export function MediaPreview(props: Props) {
     : null;
 
   return createPortal(
-    <div className="fixed inset-0 z-[60] flex flex-col bg-slate-950/95 text-slate-100">
+    <div className="theme-static-dark fixed inset-0 z-[60] flex flex-col bg-slate-950/95 text-slate-100">
       <header className="relative flex shrink-0 items-center justify-center border-b border-white/10 px-4 py-2.5">
         <div className="min-w-0 max-w-[min(60%,34rem)] text-center">
-          <div className="truncate text-xs font-medium" title={current.label}>
+          <div className="truncate text-ui-caption font-normal" title={current.label}>
             {current.label}
           </div>
-          <div className="text-[10px] text-slate-400">
+          <div className="text-ui-xs text-slate-400">
             {index + 1} / {items.length}
             {current.size ? ` · ${formatBytes(current.size)}` : ""}
             {current.kind === "video" ? " · 视频" : ""}
@@ -218,7 +218,7 @@ export function MediaPreview(props: Props) {
               <IconButton label="缩小" onClick={() => zoomBy(0.8)}>
                 <ZoomOut size={15} />
               </IconButton>
-              <span className="w-11 text-center font-mono text-[11px] text-slate-300">
+              <span className="w-11 text-center font-mono text-ui-sm text-slate-300">
                 {Math.round(zoom * 100)}%
               </span>
               <IconButton label="放大" onClick={() => zoomBy(1.25)}>
@@ -267,7 +267,7 @@ export function MediaPreview(props: Props) {
                 }
                 style={mediaSize ?? undefined}
                 className={clsx(
-                  "m-auto rounded-lg bg-black shadow-2xl",
+                  "m-auto rounded-lg bg-black ",
                   mediaSize ? null : "max-h-[calc(100vh-10rem)] max-w-full",
                 )}
               />
@@ -294,7 +294,7 @@ export function MediaPreview(props: Props) {
                   : undefined
               }
               className={clsx(
-                "m-auto select-none rounded-lg bg-white/5 shadow-2xl",
+                "m-auto select-none rounded-lg bg-white/5 ",
                 mediaSize ? null : "max-h-[calc(100vh-10rem)] max-w-full",
               )}
             />
@@ -392,7 +392,7 @@ function IconButton(props: {
 
 function Hint(props: { text: string }) {
   return (
-    <div className="m-auto rounded-xl border border-dashed border-white/20 px-4 py-6 text-xs text-slate-400">
+    <div className="m-auto rounded-xl border border-dashed border-white/20 px-4 py-6 text-ui-caption text-slate-400">
       {props.text}
     </div>
   );

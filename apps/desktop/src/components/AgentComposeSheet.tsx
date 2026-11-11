@@ -15,6 +15,8 @@ import {
 import clsx from "clsx";
 
 import { agentApi } from "../lib/agent";
+import { bugTitle } from "../lib/bug";
+import { useResolvedTheme } from "../lib/appearance";
 import { Button } from "./ui";
 
 export type AgentComposePayload = {
@@ -39,6 +41,7 @@ type Props = {
  */
 export function AgentComposeSheet(props: Props) {
   const { open, title, submitting, onClose, onSubmit, toast } = props;
+  const theme = useResolvedTheme();
   const [prompt, setPrompt] = useState("");
   const [attachments, setAttachments] = useState<string[]>([]);
   const [saving, setSaving] = useState(false);
@@ -193,8 +196,8 @@ export function AgentComposeSheet(props: Props) {
         aria-label="用 Agent 修复"
         data-agent-compose
         className={clsx(
-          "agent-sheet-up absolute inset-x-0 bottom-0 flex h-[min(64vh,560px)] flex-col overflow-hidden rounded-t-2xl border-t border-slate-200 bg-white shadow-[0_-18px_50px_-12px_rgb(15_23_42_/_0.28)]",
-          dragging && "ring-2 ring-inset ring-sky-300",
+          "agent-sheet-up absolute inset-x-0 bottom-0 flex h-[min(64vh,560px)] flex-col overflow-hidden rounded-t-2xl border-t border-border bg-surface ",
+          dragging && "outline-2 -outline-offset-2 outline-sky-300",
         )}
         onDragOver={(event) => event.preventDefault()}
       >
@@ -203,9 +206,9 @@ export function AgentComposeSheet(props: Props) {
             <Sparkles size={15} />
           </span>
           <div className="min-w-0">
-            <h2 className="text-[13px] font-semibold text-slate-900">用 Agent 修复</h2>
-            <p className="truncate text-[11px] text-slate-500" title={title}>
-              {title}
+            <h2 className="text-ui-base font-normal text-slate-900">用 Agent 修复</h2>
+            <p className="truncate text-ui-sm text-slate-500" title={bugTitle(title)}>
+              {bugTitle(title)}
             </p>
           </div>
           <button
@@ -220,7 +223,7 @@ export function AgentComposeSheet(props: Props) {
         </header>
 
         <div className="flex min-h-0 flex-1 flex-col gap-3 px-5 py-3">
-          <div className="agent-compose-editor min-h-0 flex-1" data-color-mode="light">
+          <div className="agent-compose-editor min-h-0 flex-1" data-color-mode={theme}>
             <MDEditor
               value={prompt}
               onChange={(value) => setPrompt(value ?? "")}
@@ -254,9 +257,10 @@ export function AgentComposeSheet(props: Props) {
         </div>
 
         <footer className="flex shrink-0 items-center gap-2 border-t border-slate-100 bg-slate-50/70 px-5 py-3">
-          <span className="min-w-0 truncate text-[10px] text-slate-400">
-            图片、视频只把本地路径交给 Agent
-          </span>
+          <span
+            className="min-w-0 truncate text-ui-xs text-slate-400"
+            title="图片、视频只把本地路径交给 Agent"
+          />
           <div className="ml-auto flex items-center gap-2">
             <Button size="sm" variant="ghost" onClick={onClose} disabled={submitting}>
               取消
@@ -289,18 +293,19 @@ function AttachmentTray(props: {
 
   return (
     <div
+      title="也可以拖入或粘贴截图"
       className={clsx(
         "flex shrink-0 flex-wrap items-center gap-1.5 rounded-xl border border-dashed px-2 py-1.5 transition",
         dragging
           ? "border-sky-300 bg-sky-50"
-          : "border-slate-200 bg-slate-50/60",
+          : "border-border bg-slate-50/60",
       )}
     >
       {paths.map((path) => (
         <span
           key={path}
           title={path}
-          className="group inline-flex max-w-[260px] items-center gap-1.5 rounded-lg border border-slate-200 bg-white py-1 pl-1.5 pr-1 text-[10px] text-slate-600"
+          className="group inline-flex max-w-[260px] items-center gap-1.5 rounded-lg border border-border bg-surface py-1 pl-1.5 pr-1 text-ui-xs text-slate-600"
         >
           <AttachmentIcon path={path} />
           <span className="truncate">{fileName(path)}</span>
@@ -319,15 +324,11 @@ function AttachmentTray(props: {
         type="button"
         onClick={onPick}
         disabled={saving}
-        className="inline-flex items-center gap-1 rounded-lg px-1.5 py-1 text-[10px] text-slate-500 transition hover:bg-white hover:text-slate-700 disabled:opacity-50"
+        className="inline-flex items-center gap-1 rounded-lg px-1.5 py-1 text-ui-xs text-slate-500 transition hover:bg-surface hover:text-slate-700 disabled:opacity-50"
       >
         {saving ? <Loader2 size={11} className="animate-spin" /> : <Paperclip size={11} />}
         {saving ? "保存中" : paths.length > 0 ? "继续添加" : "添加图片 / 视频"}
       </button>
-
-      <span className="ml-auto text-[10px] text-slate-300">
-        也可以拖入或粘贴截图
-      </span>
     </div>
   );
 }

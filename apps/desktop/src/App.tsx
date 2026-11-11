@@ -22,6 +22,7 @@ import {
 
 import {
   api,
+  avatarSrc,
   onSessionChanged,
   setMediaEndpoint,
   type AppInfo,
@@ -776,6 +777,9 @@ export default function App() {
         try {
           const next = await api.workspaceContext();
           setContext(next);
+          // The identity payload also refreshes the cached avatar, so re-read
+          // app_info now that the backend has written it.
+          void refreshBase();
           if (next.user.nick) {
             void api.setCurrentUser(next.user.nick);
           }
@@ -804,7 +808,7 @@ export default function App() {
       setContextLoading(false);
       done();
     }
-  }, []);
+  }, [refreshBase]);
 
   // Entering the account view refreshes the identity/session snapshot, so a
   // changed company/name (or a newly cached avatar) shows up immediately.
@@ -1233,8 +1237,8 @@ export default function App() {
   const toastNode = toast ? (
     <div
       className={clsx(
-        "fixed bottom-5 right-5 z-[60] flex max-w-md items-start gap-2 rounded-xl px-4 py-3 text-sm shadow-2xl",
-        toast.kind === "ok" ? "bg-slate-900 text-slate-100" : "bg-rose-600 text-white",
+        "theme-static-dark fixed bottom-5 right-5 z-[60] flex max-w-md items-start gap-2 rounded-xl px-4 py-3 text-ui-base ",
+        toast.kind === "ok" ? "bg-slate-900 text-slate-100" : "bg-rose-500 text-white",
       )}
     >
       {toast.kind === "ok" ? (
@@ -1255,7 +1259,7 @@ export default function App() {
 
   if (!info) {
     return (
-      <div className="flex h-full items-center justify-center gap-2 bg-slate-50 text-xs text-slate-400">
+      <div className="flex h-full items-center justify-center gap-2 bg-slate-50 text-ui-caption text-slate-400">
         <Loader2 size={16} className="animate-spin" />
         正在启动客户端…
       </div>
@@ -1288,26 +1292,16 @@ export default function App() {
               ? "账户与会话"
               : "设置";
   const subtitle =
-    view === "bugs"
-      ? workspace
-        ? `项目 ${workspace.id} · ${scope === "mine" ? "我负责的" : "全部缺陷"}`
-        : projectsKnown
-          ? "选择左侧项目开始"
-          : "正在读取项目…"
-      : view === "projects"
-        ? "显示、本地文件夹与 Agent 规则"
-        : view === "agent"
-          ? "运行 opencode、审核改动与查看执行历史"
-          : view === "mcp"
-            ? "接入 AI 客户端"
-            : view === "account"
-              ? ""
-              : "通知与 AI 配置";
+    view === "bugs" && !workspace
+      ? projectsKnown
+        ? "选择左侧项目开始"
+        : "正在读取项目…"
+      : "";
 
   return (
     <div
       className={clsx(
-        "flex h-full flex-col overflow-hidden bg-[#f4f4f2] text-slate-900",
+        "flex h-full flex-col overflow-hidden bg-canvas text-slate-900",
         (resizingSidebar || resizingDetail) && "select-none",
       )}
     >
@@ -1320,7 +1314,7 @@ export default function App() {
       >
         <span className="ml-[62px] h-full flex-1" data-tauri-drag-region />
         {refreshing ? (
-          <div className="pointer-events-none absolute inset-x-0 flex items-center justify-center gap-1.5 text-[11px] text-slate-400">
+          <div className="pointer-events-none absolute inset-x-0 flex items-center justify-center gap-1.5 text-ui-sm text-slate-400">
             <Loader2 size={12} className="animate-spin" />
             更新中
           </div>
@@ -1339,7 +1333,7 @@ export default function App() {
           >
             <span className="relative">
               <ShieldAlert size={16} />
-              <span className="absolute -right-1.5 -top-1.5 min-w-[14px] rounded-full bg-amber-500 px-1 text-center text-[9px] font-semibold leading-[14px] tabular-nums text-white">
+              <span className="absolute -right-1.5 -top-1.5 min-w-[14px] rounded-full bg-amber-500 px-1 text-center text-ui-2xs font-normal leading-[14px] tabular-nums text-white">
                 {pendingReviews}
               </span>
             </span>
@@ -1357,22 +1351,22 @@ export default function App() {
             >
               <span className="relative">
                 <ArrowUpCircle size={16} />
-                <span className="absolute -right-1 -top-1 h-1.5 w-1.5 rounded-full bg-emerald-500 ring-2 ring-[#f4f4f2]" />
+                <span className="absolute -right-1 -top-1 h-1.5 w-1.5 rounded-full bg-emerald-500 border-2 border-canvas" />
               </span>
             </button>
 
-            <div className="pointer-events-none invisible absolute right-0 top-9 z-50 w-80 translate-y-1 rounded-xl bg-slate-900/95 p-3 text-slate-200 opacity-0 shadow-2xl ring-1 ring-white/10 backdrop-blur-xl transition-all duration-150 group-hover:visible group-hover:translate-y-0 group-hover:opacity-100">
-              <div className="flex items-center gap-2 text-[11px]">
+            <div className="pointer-events-none invisible absolute right-0 top-9 z-50 w-80 translate-y-1 theme-static-dark rounded-xl bg-slate-900/95 p-3 text-slate-200 opacity-0  border border-white/10 backdrop-blur-xl transition-all duration-150 group-hover:visible group-hover:translate-y-0 group-hover:opacity-100">
+              <div className="flex items-center gap-2 text-ui-sm">
                 <ArrowUpCircle size={13} className="text-emerald-400" />
-                <span className="font-semibold text-slate-100">
+                <span className="font-normal text-slate-100">
                   新版本 v{updateState.available.version}
                 </span>
-                <span className="ml-auto text-[10px] text-slate-400">更新日志</span>
+                <span className="ml-auto text-ui-xs text-slate-400">更新日志</span>
               </div>
-              <p className="mt-2 max-h-56 overflow-y-auto whitespace-pre-line text-[11px] leading-5 text-slate-300">
+              <p className="mt-2 max-h-56 overflow-y-auto whitespace-pre-line text-ui-sm leading-5 text-slate-300">
                 {updateState.available.notes}
               </p>
-              <p className="mt-2 border-t border-white/10 pt-2 text-[10px] text-slate-400">
+              <p className="mt-2 border-t border-white/10 pt-2 text-ui-xs text-slate-400">
                 点击前往账户页更新
               </p>
             </div>
@@ -1394,8 +1388,8 @@ export default function App() {
                 className={clsx(
                   "grid h-9 w-9 place-items-center rounded-xl transition",
                   view === item.id
-                    ? "bg-black/[0.07] text-slate-900"
-                    : "text-slate-500 hover:bg-black/[0.04] hover:text-slate-700",
+                    ? "bg-overlay text-slate-900"
+                    : "text-slate-500 hover:bg-overlay-soft hover:text-slate-700",
                 )}
               >
                 <span
@@ -1436,12 +1430,12 @@ export default function App() {
                 )}
               >
                 <Avatar
-                  src={info.meAvatar}
+                  src={avatarSrc(info.meAvatar)}
                   name={context?.user.nick || info.me}
-                  className="h-8 w-8 text-[11px] shadow-sm ring-2 ring-white"
+                  className="h-8 w-8 text-ui-sm  border-2 border-white"
                 />
               </span>
-              <span className="absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 rounded-full border-2 border-[#f4f4f2] bg-emerald-500" />
+              <span className="absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 rounded-full border-2 border-canvas bg-emerald-500" />
             </button>
           </div>
           <button
@@ -1452,8 +1446,8 @@ export default function App() {
             className={clsx(
               "grid h-9 w-9 place-items-center rounded-xl transition",
               view === "settings"
-                ? "bg-black/[0.07] text-slate-900"
-                : "text-slate-500 hover:bg-black/[0.04] hover:text-slate-700",
+                ? "bg-overlay text-slate-900"
+                : "text-slate-500 hover:bg-overlay-soft hover:text-slate-700",
             )}
           >
             <span
@@ -1483,11 +1477,11 @@ export default function App() {
               className="flex h-9 shrink-0 items-center justify-between pr-2"
               data-tauri-drag-region
             >
-              <span className="min-w-0 flex-1 truncate px-2 text-[13px] font-semibold text-slate-800">
+              <span className="min-w-0 flex-1 truncate px-2 text-ui-base font-normal text-slate-800">
                 项目
               </span>
               {visibleWorkspaces.length ? (
-                <span className="shrink-0 text-[11px] tabular-nums text-slate-400">
+                <span className="shrink-0 text-ui-sm tabular-nums text-slate-400">
                   {visibleWorkspaces.length}
                 </span>
               ) : null}
@@ -1495,12 +1489,12 @@ export default function App() {
 
             <div className="min-h-0 flex-1 space-y-0.5 overflow-y-auto [scrollbar-gutter:stable]">
             {contextError ? (
-              <div className="rounded-xl bg-rose-50 p-2.5 text-[11px] leading-5 text-rose-700 ring-1 ring-rose-100">
+              <div className="rounded-xl bg-rose-50 p-2.5 text-ui-sm leading-5 text-rose-700 border border-rose-100">
                 <div className="break-all">{contextError}</div>
                 <button
                   type="button"
                   onClick={() => void loadContext()}
-                  className="mt-2 inline-flex items-center gap-1 rounded-md bg-white px-2 py-1 text-[10px] text-rose-700 ring-1 ring-rose-200 transition hover:bg-rose-100"
+                  className="mt-2 inline-flex items-center gap-1 rounded-md bg-surface px-2 py-1 text-ui-xs text-rose-700 border border-rose-200 transition hover:bg-rose-100"
                 >
                   <RefreshCw size={10} />
                   重试
@@ -1519,7 +1513,7 @@ export default function App() {
             ) : null}
 
             {context && visibleWorkspaces.length === 0 ? (
-              <div className="rounded-lg border border-dashed border-slate-200 px-2.5 py-3 text-[11px] leading-5 text-slate-400">
+              <div className="rounded-lg border border-dashed border-border px-2.5 py-3 text-ui-sm leading-5 text-slate-400">
                 项目已全部隐藏，可在「项目」tab 中恢复显示。
               </div>
             ) : null}
@@ -1541,10 +1535,10 @@ export default function App() {
                     });
                   }}
                   className={clsx(
-                    "flex w-full items-center gap-2.5 rounded-lg px-2.5 py-[7px] text-left text-[13px] transition",
+                    "flex w-full items-center gap-2.5 rounded-lg px-2.5 py-[7px] text-left text-ui-base transition",
                     active
-                      ? "bg-black/[0.06] font-medium text-slate-900"
-                      : "text-slate-600 hover:bg-black/[0.04]",
+                      ? "bg-overlay font-normal text-slate-900"
+                      : "text-slate-600 hover:bg-overlay-soft",
                   )}
                 >
                   <span
@@ -1566,25 +1560,25 @@ export default function App() {
             onClick={() => activateView("account")}
             title="账户与会话"
             className={clsx(
-              "group flex w-full items-center gap-2.5 border-t border-black/[0.06] px-3 py-2.5 text-left transition",
+              "group flex w-full items-center gap-2.5 border-t border-border px-3 py-2.5 text-left transition",
               view === "account"
-                ? "bg-black/[0.05]"
-                : "hover:bg-black/[0.035]",
+                ? "bg-overlay"
+                : "hover:bg-overlay-soft",
             )}
           >
             <span className="relative shrink-0">
               <Avatar
-                src={info.meAvatar}
+                src={avatarSrc(info.meAvatar)}
                 name={context?.user.nick || info.me}
-                className="h-7 w-7 text-[10px] shadow-sm"
+                className="h-7 w-7 text-ui-xs "
               />
-              <span className="absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 rounded-full border-2 border-[#f4f4f2] bg-emerald-500" />
+              <span className="absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 rounded-full border-2 border-canvas bg-emerald-500" />
             </span>
             <span className="min-w-0 flex-1">
-              <span className="block truncate text-[12px] font-medium text-slate-700">
+              <span className="block truncate text-ui-caption font-normal text-slate-700">
                 {context?.user.nick || info.me || "已登录"}
               </span>
-              <span className="block truncate text-[10px] text-slate-400">
+              <span className="block truncate text-ui-xs text-slate-400">
                 {context?.user.company || "账户与会话"}
               </span>
             </span>
@@ -1601,13 +1595,13 @@ export default function App() {
             onMouseDown={startSidebarResize}
             className={clsx(
               "absolute right-0 top-0 z-10 h-full w-1.5 cursor-col-resize",
-              resizingSidebar ? "bg-sky-400/50" : "bg-transparent transition hover:bg-black/[0.06]",
+              resizingSidebar ? "bg-sky-400/50" : "bg-transparent transition hover:bg-overlay",
             )}
           />
         </div>
 
         {/* Content panel */}
-        <main className="mb-2 mr-2 flex min-w-0 flex-1 flex-col overflow-hidden rounded-xl bg-white shadow-[0_1px_3px_rgba(15,23,42,0.06)] ring-1 ring-black/[0.06]">
+        <main className="mb-2 mr-2 flex min-w-0 flex-1 flex-col overflow-hidden rounded-xl bg-surface  border border-border">
           <header className="flex h-12 shrink-0 items-center gap-1.5 px-2" data-tauri-drag-region>
             {!projectListHidden ? (
               <button
@@ -1626,18 +1620,18 @@ export default function App() {
                   if (autoCollapseSidebar) setSidebarPeek((current) => !current);
                   else setSidebarCollapsed((current) => !current);
                 }}
-                className="grid h-8 w-8 shrink-0 place-items-center rounded-lg text-slate-400 transition hover:bg-black/[0.05] hover:text-slate-700"
+                className="grid h-8 w-8 shrink-0 place-items-center rounded-lg text-slate-400 transition hover:bg-overlay hover:text-slate-700"
               >
                 {sidebarHidden ? <PanelLeftOpen size={15} /> : <PanelLeftClose size={15} />}
               </button>
             ) : null}
 
             <div className="min-w-0 flex-1 px-1">
-              <h1 className="truncate text-[13px] font-semibold leading-5 text-slate-900">
+              <h1 className="truncate text-ui-base font-normal leading-5 text-slate-900">
                 {title}
               </h1>
               {subtitle ? (
-                <p className="truncate text-[11px] leading-4 text-slate-400">{subtitle}</p>
+                <p className="truncate text-ui-sm leading-4 text-slate-400">{subtitle}</p>
               ) : null}
             </div>
 
@@ -1654,8 +1648,8 @@ export default function App() {
           {view === "bugs" ? (
             contextError ? (
               <div className="p-5">
-                <div className="rounded-xl bg-rose-50 p-4 text-xs leading-6 text-rose-700 ring-1 ring-rose-100">
-                  <div className="font-semibold">项目列表加载失败</div>
+                <div className="rounded-xl bg-rose-50 p-4 text-ui-caption leading-6 text-rose-700 border border-rose-100">
+                  <div className="font-normal">项目列表加载失败</div>
                   <div className="mt-1 break-all">{contextError}</div>
                   <Button
                     size="sm"
@@ -1815,7 +1809,7 @@ export default function App() {
                   "absolute left-0 top-0 z-10 h-full w-1.5 cursor-col-resize",
                   resizingDetail
                     ? "bg-sky-400/50"
-                    : "bg-transparent transition hover:bg-black/[0.06]",
+                    : "bg-transparent transition hover:bg-overlay",
                 )}
               />
             ) : null}
@@ -1849,7 +1843,7 @@ export default function App() {
       {projectMenu ? (
         <div
           role="menu"
-          className="fixed z-[70] min-w-[190px] rounded-lg border border-slate-200 bg-white p-1 text-[11px] text-slate-700 shadow-xl"
+          className="fixed z-[70] min-w-[190px] rounded-lg border border-border bg-surface p-1 text-ui-sm text-slate-700 "
           style={{
             left: Math.min(projectMenu.x, window.innerWidth - 210),
             top: Math.min(projectMenu.y, window.innerHeight - 92),

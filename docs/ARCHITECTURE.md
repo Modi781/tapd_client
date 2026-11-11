@@ -96,8 +96,9 @@ AI 客户端 → tapd-mcp (stdio) → POST /mcp/call → mcp.rs
           → 会话桥读取或写回 TAPD → mcp_audit.rs 记录
 ```
 
-- 工具共 12 个：whoami、项目、查询、我的缺陷、详情、导出、状态查询、评论、状态更新、唤起胶囊通知、等待通知回执、Agent 改动审核。
-- 写操作可整体关闭；审计只记录工具、客户端、结果、耗时与项目 / 缺陷，不保存评论正文和 Cookie。
+- 工具共 14 个：whoami、项目、查询、我的缺陷、详情、导出、修复提示词、状态查询、评论、状态更新、唤起胶囊通知、等待通知回执、Agent 改动审核、Agent 任务回报。
+- 除显式 `workspace_id` 外，工具还接受 `root`（本地仓库目录）：按项目设置里的「本地文件夹」匹配项目，sidecar 默认注入自身 cwd 作为软提示。
+- 写操作可整体关闭；审计只记录工具、客户端、结果、耗时与项目 / 缺陷 / 目录，不保存评论正文和 Cookie。
 - 「接入 AI 客户端」把 sidecar 路径幂等写入 opencode / ZCode / Claude Code / Cursor / Codex 的用户级配置，并自动备份。
 
 ### 3.6 AI / MCP 胶囊通知
@@ -144,7 +145,7 @@ MCP tapd_notify_user → notification::raise_ai → 内存 ai_items → 胶囊�
 
 ### MCP 与运维
 
-- MCP tab：12 个工具（whoami / 项目 / 查询 / 我的缺陷 / 详情 / 导出 / 状态查询 / 评论 / 状态更新 / 胶囊通知 / 等待回执 / Agent 审核）；「接入 AI 客户端」按客户端一行，一键写入 opencode / ZCode / Claude Code / Cursor / Codex 的用户级配置（自动备份、幂等）；启动 Agent 时也会幂等确保注入 opencode。
+- MCP tab：14 个工具（whoami / 项目 / 查询 / 我的缺陷 / 详情 / 导出 / 修复提示词 / 状态查询 / 评论 / 状态更新 / 胶囊通知 / 等待回执 / Agent 审核 / 任务回报）；「接入 AI 客户端」按客户端一行，一键写入 opencode / ZCode / Claude Code / Cursor / Codex 的用户级配置（自动备份、幂等）；启动 Agent 时也会幂等确保注入 opencode。
 - MCP 策略与审计：可关闭写操作、限制可访问项目、限制目标状态白名单；每次调用记录工具、客户端、允许 / 拒绝 / 失败、耗时与项目 / 缺陷（不保存评论正文和 Cookie），支持筛选、导出与清空。
 - 首启引导：首次登录后展示三步引导（登录与离线缓存 / MCP 与 Agent / 通知与胶囊），可跳过，完成状态写入 `config.json`。
 - 自动更新：启动后检查 GitHub Releases，之后每两小时查询一次并记录检查时间；标题栏更新图标在有新版本时变绿，hover 展示更新日志。更新期间主窗口隐藏，胶囊放大 4 倍显示下载 / 解包安装进度；失败时可手动下载或取消。
@@ -172,7 +173,7 @@ apps/desktop/
     agent.rs                 Agent 队列、PTY、opencode server 事件、任务持久化
     opencode.rs              opencode serve / SSE / 权限回复适配
     mcp.rs                   MCP 工具调度、策略强制与审计记录
-    mcp_audit.rs             有界 MCP 调用审计（JSON，脱敏摘要）
+    mcp_audit.rs             有界 MCP 调用审计（SQLite `mcp_audit` 表，脱敏摘要）
     mcp_import.rs            各 AI 客户端配置一键注入
     export.rs                MD 导出与资源下载
     diagnostics.rs           脱敏诊断包

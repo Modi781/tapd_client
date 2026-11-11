@@ -84,15 +84,15 @@ export function UpdatePanel({ toast, bare = false }: Props) {
   const body = (
     <>
       <div className="flex flex-wrap items-center gap-2">
-        <h2 className="flex items-center gap-2 text-sm font-semibold text-slate-900">
+        <h2 className="flex items-center gap-2 text-ui-base font-normal text-slate-900">
           <CloudDownload size={15} className="text-slate-400" />
           版本更新
         </h2>
-        <span className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-[10px] text-slate-500">
+        <span className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-ui-xs text-slate-500">
           v{state?.currentVersion ?? "—"}
         </span>
         {phase === "available" ? (
-          <span className="rounded bg-sky-50 px-1.5 py-0.5 text-[10px] font-medium text-sky-700">
+          <span className="rounded bg-sky-50 px-1.5 py-0.5 text-ui-xs font-normal text-sky-700">
             可更新到 v{available?.version}
           </span>
         ) : null}
@@ -110,7 +110,7 @@ export function UpdatePanel({ toast, bare = false }: Props) {
         </div>
       </div>
 
-      <p className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-slate-500">
+      <p className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-ui-sm text-slate-500">
         <span>
           {phase === "available" && available
             ? `新版本 v${available.version} 已于 ${available.date ?? "近期"} 发布`
@@ -136,7 +136,7 @@ export function UpdatePanel({ toast, bare = false }: Props) {
 
       {phase === "downloading" ? (
         <div className="mt-3">
-          <div className="flex items-center justify-between text-[11px] text-slate-500">
+          <div className="flex items-center justify-between text-ui-sm text-slate-500">
             <span>正在下载更新包…</span>
             <span className="tabular-nums">
               {progress?.percent != null ? `${progress.percent.toFixed(0)}%` : ""}
@@ -155,7 +155,7 @@ export function UpdatePanel({ toast, bare = false }: Props) {
       ) : null}
 
       {phase === "installing" || phase === "ready" ? (
-        <div className="mt-3 flex items-center gap-2 rounded-lg bg-sky-50 px-3 py-2 text-[11px] text-sky-700">
+        <div className="mt-3 flex items-center gap-2 rounded-lg bg-sky-50 px-3 py-2 text-ui-sm text-sky-700">
           {phase === "ready" ? (
             <CheckCircle2 size={13} />
           ) : (
@@ -166,7 +166,7 @@ export function UpdatePanel({ toast, bare = false }: Props) {
       ) : null}
 
       {phase === "error" && state?.error ? (
-        <div className="mt-3 flex items-start gap-2 rounded-lg bg-rose-50 px-3 py-2 text-[11px] leading-5 text-rose-700">
+        <div className="mt-3 flex items-start gap-2 rounded-lg bg-rose-50 px-3 py-2 text-ui-sm leading-5 text-rose-700">
           <AlertTriangle size={13} className="mt-0.5 shrink-0" />
           <span className="min-w-0 break-words">{state.error}</span>
         </div>
@@ -176,10 +176,10 @@ export function UpdatePanel({ toast, bare = false }: Props) {
         <>
           <div className="mt-3">
             <div className="mb-1.5 flex items-center justify-between">
-              <h3 className="text-[11px] font-semibold text-slate-600">更新日志</h3>
-              <span className="text-[10px] text-slate-400">来自 GitHub Release</span>
+              <h3 className="text-ui-sm font-normal text-slate-600">更新日志</h3>
+              <span className="text-ui-xs text-slate-400">来自 GitHub Release</span>
             </div>
-            <div className="max-h-64 overflow-y-auto whitespace-pre-line rounded-xl bg-slate-50 px-3 py-2.5 font-mono text-[11px] leading-5 text-slate-600 ring-1 ring-slate-100">
+            <div className="max-h-64 overflow-y-auto whitespace-pre-line rounded-xl bg-slate-50 px-3 py-2.5 font-mono text-ui-sm leading-5 text-slate-600 border border-slate-100">
               {available.notes}
             </div>
           </div>
@@ -203,7 +203,7 @@ export function UpdatePanel({ toast, bare = false }: Props) {
             >
               手动下载
             </Button>
-            <span className="text-[10px] text-slate-400">
+            <span className="text-ui-xs text-slate-400">
               更新期间主窗口会隐藏，顶部胶囊显示下载与安装进度。
             </span>
           </div>
@@ -211,7 +211,7 @@ export function UpdatePanel({ toast, bare = false }: Props) {
       ) : null}
 
       {!available && phase === "idle" && state?.error ? (
-        <p className="mt-2 text-[11px] leading-5 text-rose-600">
+        <p className="mt-2 text-ui-sm leading-5 text-rose-600">
           检查更新失败：{state.error}
         </p>
       ) : null}
@@ -223,7 +223,7 @@ export function UpdatePanel({ toast, bare = false }: Props) {
   return (
     <section
       className={clsx(
-        "rounded-2xl border border-slate-200 bg-white p-5 shadow-sm",
+        "rounded-2xl border border-border bg-surface p-5 ",
         phase === "available" && "border-sky-200",
       )}
     >

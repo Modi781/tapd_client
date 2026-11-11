@@ -53,9 +53,9 @@ fn export_bundle(state: &SharedState) -> Result<DiagnosticsResult, String> {
         &agent_summary(&paths.data_dir),
     )?;
 
-    let audit_path = paths.data_dir.join("mcp-audit.json");
-    if audit_path.exists() {
-        copy_if_exists(&audit_path, &folder.join("mcp-audit.json"));
+    // Audit rows live in SQLite now; export a snapshot into the bundle.
+    if let Err(error) = state.mcp_audit.export(&folder.join("mcp-audit.json")) {
+        tracing::warn!(%error, "failed to export MCP audit for diagnostics");
     }
 
     let logs_dir = folder.join("logs");
@@ -207,12 +207,6 @@ fn copy_recent_logs(source: &Path, target: &Path) {
     }
 }
 
-fn copy_if_exists(source: &Path, target: &Path) {
-    if let Err(error) = fs::copy(source, target) {
-        tracing::warn!(%error, source = %source.display(), "diagnostics copy failed");
-    }
-}
-
 fn write_json(path: &Path, value: &Value) -> Result<(), String> {
     let raw = serde_json::to_vec_pretty(value).map_err(|error| error.to_string())?;
     fs::write(path, raw).map_err(|error| error.to_string())
@@ -306,6 +300,22 @@ mod tests {
         };
         let store = ConfigStore::new(paths.config_file.clone());
         let state: SharedState = Arc::new(AppState::new(paths, store, AppConfig::default()));
+        state
+            .mcp_audit
+            .record(crate::mcp_audit::McpAuditEntry {
+                id: "audit-1".to_string(),
+                ts: "2026-01-01T00:00:00Z".to_string(),
+                tool: "tapd_whoami".to_string(),
+                client: "zcode".to_string(),
+                decision: "allowed".to_string(),
+                ok: true,
+                duration_ms: 1,
+                workspace_id: None,
+                bug_id: None,
+                error: None,
+                summary: serde_json::json!({}),
+            })
+            .expect("record audit");
 
         let result = export_bundle(&state).unwrap();
         assert!(result.files >= 5, "expected meta/settings/log files");
@@ -318,12 +328,19 @@ mod tests {
                 .map(|output| String::from_utf8_lossy(&output.stdout).to_string())
                 .unwrap_or_default();
             assert!(listing.contains("meta.json"));
+            assert!(listing.contains("mcp-audit.json"));
             assert!(
                 !listing.contains("runtime.json"),
                 "runtime token must never be copied"
             );
         } else {
-            let folder = Path::new(&result.folder);
+            let folder = fs::read_dir(&result.folder)
+                .expect("diagnostics root")
+                .flatten()
+                .map(|entry| entry.path())
+                .find(|path| path.is_dir())
+                .expect("bundle folder");
+            assert!(folder.join("mcp-audit.json").exists());
             assert!(!folder.join("runtime.json").exists());
         }
 

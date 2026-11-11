@@ -151,6 +151,28 @@ export type AgentTasksState = {
   queuePaused?: boolean;
 };
 
+/** Paginated terminal-task history; filtering and paging run in Rust. */
+export type AgentHistoryQuery = {
+  workspaceId?: string;
+  status?: AgentTaskStatus;
+  keyword?: string;
+  taskId?: string;
+  offset?: number;
+  limit?: number;
+};
+
+export type AgentWorkspaceRef = {
+  id: string;
+  name: string;
+};
+
+export type AgentTasksPage = {
+  tasks: AgentTask[];
+  total: number;
+  hasMore: boolean;
+  workspaces: AgentWorkspaceRef[];
+};
+
 /** Lightweight agent state for the island capsule. */
 export type AgentSummary = {
   running: boolean;
@@ -299,6 +321,8 @@ export const agentApi = {
   saveResource: (name: string, data: string) =>
     featureCommand<{ path: string }>("agent_save_resource", { name, data }),
   tasksList: () => featureCommand<AgentTasksState>("agent_tasks_list"),
+  tasksHistory: (query: AgentHistoryQuery = {}) =>
+    featureCommand<AgentTasksPage>("agent_tasks_history", query),
   summary: () => featureCommand<AgentSummary>("agent_summary"),
   cancel: (taskId: string) =>
     featureCommand<{ task: AgentTask }>("agent_task_cancel", { taskId }),

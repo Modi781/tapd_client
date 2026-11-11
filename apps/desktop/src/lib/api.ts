@@ -455,6 +455,19 @@ export const ensureMediaEndpoint = async (): Promise<void> => {
 export const mediaSrc = (url: string): string | undefined =>
   mediaBase ? `${mediaBase}${encodeURIComponent(url)}` : undefined;
 
+/**
+ * Avatar URL for `<img>`: TAPD-hosted avatars need the session cookie, so they
+ * go through the media proxy. WeCom/CDN avatars are public and load directly.
+ */
+export const avatarSrc = (url: string | null | undefined): string | undefined => {
+  const trimmed = url?.trim();
+  if (!trimmed) return undefined;
+  if (/^https?:\/\/(?:[^/]*\.)?tapd\.cn(?::\d+)?(?:\/|$)/i.test(trimmed)) {
+    return mediaSrc(trimmed) ?? trimmed;
+  }
+  return trimmed;
+};
+
 export const formatBytes = (bytes: number | null | undefined): string => {
   if (!bytes || bytes <= 0) return "—";
   if (bytes < 1024) return `${bytes} B`;
