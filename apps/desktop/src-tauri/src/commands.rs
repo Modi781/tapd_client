@@ -1190,6 +1190,45 @@ pub fn open_path(path: String) -> Result<(), String> {
         .map_err(|error| error.to_string())
 }
 
+/// Opens a bound project folder in the saved editor (or `target` overrides it).
+///
+/// The target set for `directory` is limited to code editors, so a TAPD project
+/// folder never lands in a browser or an image viewer.
+#[tauri::command]
+pub async fn open_directory(
+    state: State<'_, SharedState>,
+    path: String,
+    target: Option<String>,
+) -> Result<(), String> {
+    let dir = expand_home(path.trim());
+    if dir.as_os_str().is_empty() {
+        return Err("还没有绑定项目目录".to_string());
+    }
+    if !dir.is_dir() {
+        return Err(format!("项目目录不存在：{}", dir.display()));
+    }
+
+    let selected = match target {
+        Some(target) if !target.trim().is_empty() => target,
+        _ => {
+            let open_with = state.config.lock().expect("config lock").open_with.clone();
+            open_with::selected_target("directory", &open_with)
+        }
+    };
+
+    open_local(&dir, &selected)
+}
+
+/// Expands a leading `~` so a hand-typed repo path works like the picker's.
+fn expand_home(path: &str) -> std::path::PathBuf {
+    if let Some(rest) = path.strip_prefix("~/") {
+        if let Some(home) = std::env::var_os("HOME") {
+            return std::path::PathBuf::from(home).join(rest);
+        }
+    }
+    std::path::PathBuf::from(path)
+}
+
 const MEDIA_DOWNLOAD_LIMIT: u64 = 300 * 1024 * 1024;
 const MEDIA_USER_AGENT: &str =
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko)";

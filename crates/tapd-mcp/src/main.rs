@@ -549,6 +549,30 @@ fn tool_definitions() -> Value {
                 "required": ["taskId", "summary"],
                 "additionalProperties": false
             }
+        },
+        {
+            "name": "agent_task_report",
+            "description": "仅用于客户端 Agent 修复流程（非 ACP 运行时）：向 TAPD 客户端回报任务生命周期。status=completed 表示修复并回写完成；failed 表示无法完成；needs_review 表示需要人工确认（附带 summary/files/risk）；progress 仅追加一条进度说明。ACP 运行时不需要调用本工具。",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "taskId": {"type": "string", "description": "当前 Agent 任务 id（提示词中的 {{task_id}}）"},
+                    "status": {
+                        "type": "string",
+                        "enum": ["completed", "failed", "needs_review", "progress"]
+                    },
+                    "message": {"type": "string", "description": "完成/失败/进度说明；needs_review 时作为审核摘要"},
+                    "files": {
+                        "type": "array",
+                        "maxItems": 50,
+                        "items": {"type": "string"},
+                        "description": "needs_review 时本次修改涉及的文件"
+                    },
+                    "risk": {"type": "string", "description": "needs_review 时的风险说明"}
+                },
+                "required": ["taskId", "status"],
+                "additionalProperties": false
+            }
         }
     ])
 }

@@ -17,6 +17,10 @@ export type ProjectAgentConfig = {
 };
 
 export type AgentConfig = {
+  /** Selected runtime; only `opencode` is available today. */
+  runtimeId: string;
+  /** Wire protocol: `acp` (bidirectional) or `pty` (interactive TUI). */
+  transport: string;
   binaryPath: string;
   /** Legacy: migrated into `projects` on load. */
   repoMappings: Record<string, string>;
@@ -27,13 +31,64 @@ export type AgentConfig = {
   autoOpenConsole: boolean;
 };
 
-/** A pending opencode permission prompt that needs a human decision. */
+/** A stage every runtime declares in the Agent management dialog. */
+export type AgentLifecycleStage = {
+  key: string;
+  label: string;
+  description: string;
+  /** The serial queue stays blocked until a human acts. */
+  needsHuman: boolean;
+  terminal: boolean;
+};
+
+/**
+ * What the desktop may assume about a runtime. Anything false must degrade to
+ * "send the user to review" instead of pretending the external action worked.
+ */
+export type AgentRuntimeCapabilities = {
+  interactiveTerminal: boolean;
+  permissionPrompt: boolean;
+  /** Desktop can answer a blocking prompt and the runtime accepts it. */
+  externalDecision: boolean;
+  sessionResume: boolean;
+  commitReview: boolean;
+};
+
+export type AgentRuntimeDescriptor = {
+  id: string;
+  name: string;
+  vendor: string;
+  description: string;
+  /** Default executable, used as the form placeholder. */
+  binary: string;
+  /** Wire protocols this runtime supports, preferred first. */
+  transports: string[];
+  defaultTransport: string;
+  available: boolean;
+  capabilities: AgentRuntimeCapabilities;
+  lifecycle: AgentLifecycleStage[];
+  limitations: string[];
+  /** What the UI does when an external decision cannot be applied. */
+  fallback: string;
+};
+
+/** One option offered by an ACP permission request. */
+export type AgentPermissionOption = {
+  optionId: string;
+  name: string;
+  kind: "allow_once" | "allow_always" | "reject_once" | "reject_always" | string;
+};
+
+/** A pending permission prompt that needs a human decision. */
 export type AgentReviewRequest = {
   id: string;
   sessionId: string;
   action: string;
   resource: string;
   title: string;
+  /** ACP options; empty for the legacy opencode 3-way prompt. */
+  options?: AgentPermissionOption[];
+  transport?: string;
 };
 
 /** A complex change paused for the user's commit decision. */
@@ -66,6 +121,9 @@ export type AgentTask = {
   error?: string;
   prompt: string;
   source: string;
+  /** Runtime and transport snapshotted at enqueue time. */
+  runtimeId?: string;
+  transport?: string;
   /** opencode session id, used to reopen the conversation in a terminal. */
   sessionId?: string;
   /** Present while the agent waits for a permission decision. */
@@ -74,6 +132,10 @@ export type AgentTask = {
   approval?: AgentApproval | null;
   /** The next run is the post-approval commit phase. */
   commitOnly?: boolean;
+  /** Markdown instructions from the compose sheet. */
+  extraPrompt?: string;
+  /** Local resource paths supplied with the task. */
+  attachments?: string[];
 };
 
 export type AgentTasksState = {
@@ -188,6 +250,10 @@ export type AgentEnqueueRequest = {
   title?: string | null;
   severity?: string | null;
   priority?: string | null;
+  /** Markdown instructions typed in the compose sheet. */
+  extraPrompt?: string | null;
+  /** Absolute paths; the agent only ever receives paths, not file bytes. */
+  attachments?: string[];
 };
 
 export type AgentOutputPayload = {
@@ -221,11 +287,17 @@ export const AGENT_STATUS_TONES: Record<
 };
 
 export const agentApi = {
+  /** Declared runtime catalog (lifecycle + capabilities + limitations). */
+  runtimes: () =>
+    featureCommand<{ runtimes: AgentRuntimeDescriptor[] }>("agent_runtimes"),
   configGet: () => featureCommand<{ config: AgentConfig }>("agent_config_get"),
   configSet: (patch: Partial<AgentConfig>) =>
     featureCommand<{ config: AgentConfig }>("agent_config_set", patch),
   enqueueBug: (request: AgentEnqueueRequest) =>
     featureCommand<{ task: AgentTask }>("agent_enqueue_bug", request),
+  /** Persist a pasted screenshot and return its absolute path. */
+  saveResource: (name: string, data: string) =>
+    featureCommand<{ path: string }>("agent_save_resource", { name, data }),
   tasksList: () => featureCommand<AgentTasksState>("agent_tasks_list"),
   summary: () => featureCommand<AgentSummary>("agent_summary"),
   cancel: (taskId: string) =>
@@ -256,6 +328,12 @@ export const agentApi = {
       taskId,
       response,
       remember,
+    }),
+  /** Answer an ACP permission request with one of its exact option ids. */
+  permissionOption: (taskId: string, optionId: string) =>
+    featureCommand<{ task: AgentTask }>("agent_permission_option", {
+      taskId,
+      optionId,
     }),
   input: (taskId: string, data: string) =>
     featureCommand<{ ok: boolean }>("agent_input", { taskId, data }),

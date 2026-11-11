@@ -279,6 +279,108 @@ export function McpPage({ workspaces, onCopy, toast }: Props) {
 
   return (
     <div className="mx-auto max-w-4xl space-y-4">
+      <section className="space-y-3">
+        <div className="px-1">
+          <h2 className="flex items-center gap-2 text-sm font-semibold text-slate-900">
+            <Wrench size={15} className="text-slate-400" />
+            接入 AI 客户端
+          </h2>
+          <p className="mt-1 text-xs leading-5 text-slate-500">
+            一键写入各客户端的用户级配置，改动前自动备份；只想对某个项目生效时，展开手动配置。
+          </p>
+        </div>
+
+        <div className="space-y-2">
+          {guides.map((guide) => {
+            const status = clientStatus(guide.id);
+            const expanded = Boolean(expandedClients[guide.id]);
+            const result = importResults[guide.id];
+            return (
+              <section
+                key={guide.id}
+                className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm"
+              >
+                <div className="flex flex-wrap items-center gap-3">
+                  <div className="flex min-w-0 flex-1 items-center gap-2.5">
+                    {guide.icon}
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2">
+                        <h3 className="text-xs font-semibold text-slate-900">{guide.title}</h3>
+                        <Badge tone={status?.imported ? "green" : "amber"}>
+                          {status?.imported ? "已导入" : "未导入"}
+                        </Badge>
+                      </div>
+                      <p
+                        className="mt-0.5 truncate text-[10px] text-slate-400"
+                        title={status?.path ?? guide.hint}
+                      >
+                        {status?.path ?? guide.hint}
+                      </p>
+                    </div>
+                  </div>
+                  <div className="flex shrink-0 items-center gap-2">
+                    <Button
+                      size="sm"
+                      variant={status?.imported ? "secondary" : "primary"}
+                      loading={importingClient === guide.id}
+                      onClick={() => void importClient(guide.id)}
+                      icon={<Download size={13} />}
+                    >
+                      {status?.imported ? "重新导入" : "一键导入"}
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => toggleClient(guide.id)}
+                      icon={
+                        <ChevronDown
+                          size={13}
+                          className={clsx("transition", expanded && "rotate-180")}
+                        />
+                      }
+                    >
+                      手动配置
+                    </Button>
+                  </div>
+                </div>
+
+                {result ? (
+                  <div className="mt-2 break-all text-[10px] leading-5 text-emerald-700">
+                    <CheckCircle2 size={11} className="mr-1 inline" />
+                    {result.changed ? "已写入" : "已存在，无需重复写入"}：
+                    <span className="font-mono">{result.path}</span>
+                    {result.backupPath ? (
+                      <span className="text-emerald-600/80">
+                        （备份：<span className="font-mono">{result.backupPath}</span>）
+                      </span>
+                    ) : null}
+                  </div>
+                ) : null}
+
+                {expanded ? (
+                  <div className="mt-3 rounded-xl border border-slate-100 bg-slate-50 p-3">
+                    <div className="flex items-start justify-between gap-3">
+                      <p className="text-[10px] leading-5 text-slate-500">{guide.manual}</p>
+                      <button
+                        type="button"
+                        onClick={() => onCopy(guide.code)}
+                        className={COPY_BUTTON}
+                      >
+                        <Copy size={10} />
+                        复制
+                      </button>
+                    </div>
+                    <pre className="mt-2 overflow-auto rounded-lg bg-slate-900 p-3 font-mono text-[10px] leading-5 text-slate-200">
+                      {guide.code}
+                    </pre>
+                  </div>
+                ) : null}
+              </section>
+            );
+          })}
+        </div>
+      </section>
+
       <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
         <div className="flex items-start justify-between gap-3">
           <div>
@@ -553,107 +655,7 @@ export function McpPage({ workspaces, onCopy, toast }: Props) {
         </div>
       </section>
 
-      <section className="space-y-3">
-        <div className="px-1">
-          <h2 className="flex items-center gap-2 text-sm font-semibold text-slate-900">
-            <Wrench size={15} className="text-slate-400" />
-            接入 AI 客户端
-          </h2>
-          <p className="mt-1 text-xs leading-5 text-slate-500">
-            一键写入各客户端的用户级配置，改动前自动备份；只想对某个项目生效时，展开手动配置。
-          </p>
-        </div>
 
-        <div className="space-y-2">
-          {guides.map((guide) => {
-            const status = clientStatus(guide.id);
-            const expanded = Boolean(expandedClients[guide.id]);
-            const result = importResults[guide.id];
-            return (
-              <section
-                key={guide.id}
-                className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm"
-              >
-                <div className="flex flex-wrap items-center gap-3">
-                  <div className="flex min-w-0 flex-1 items-center gap-2.5">
-                    {guide.icon}
-                    <div className="min-w-0">
-                      <div className="flex items-center gap-2">
-                        <h3 className="text-xs font-semibold text-slate-900">{guide.title}</h3>
-                        <Badge tone={status?.imported ? "green" : "amber"}>
-                          {status?.imported ? "已导入" : "未导入"}
-                        </Badge>
-                      </div>
-                      <p
-                        className="mt-0.5 truncate text-[10px] text-slate-400"
-                        title={status?.path ?? guide.hint}
-                      >
-                        {status?.path ?? guide.hint}
-                      </p>
-                    </div>
-                  </div>
-                  <div className="flex shrink-0 items-center gap-2">
-                    <Button
-                      size="sm"
-                      variant={status?.imported ? "secondary" : "primary"}
-                      loading={importingClient === guide.id}
-                      onClick={() => void importClient(guide.id)}
-                      icon={<Download size={13} />}
-                    >
-                      {status?.imported ? "重新导入" : "一键导入"}
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      onClick={() => toggleClient(guide.id)}
-                      icon={
-                        <ChevronDown
-                          size={13}
-                          className={clsx("transition", expanded && "rotate-180")}
-                        />
-                      }
-                    >
-                      手动配置
-                    </Button>
-                  </div>
-                </div>
-
-                {result ? (
-                  <div className="mt-2 break-all text-[10px] leading-5 text-emerald-700">
-                    <CheckCircle2 size={11} className="mr-1 inline" />
-                    {result.changed ? "已写入" : "已存在，无需重复写入"}：
-                    <span className="font-mono">{result.path}</span>
-                    {result.backupPath ? (
-                      <span className="text-emerald-600/80">
-                        （备份：<span className="font-mono">{result.backupPath}</span>）
-                      </span>
-                    ) : null}
-                  </div>
-                ) : null}
-
-                {expanded ? (
-                  <div className="mt-3 rounded-xl border border-slate-100 bg-slate-50 p-3">
-                    <div className="flex items-start justify-between gap-3">
-                      <p className="text-[10px] leading-5 text-slate-500">{guide.manual}</p>
-                      <button
-                        type="button"
-                        onClick={() => onCopy(guide.code)}
-                        className={COPY_BUTTON}
-                      >
-                        <Copy size={10} />
-                        复制
-                      </button>
-                    </div>
-                    <pre className="mt-2 overflow-auto rounded-lg bg-slate-900 p-3 font-mono text-[10px] leading-5 text-slate-200">
-                      {guide.code}
-                    </pre>
-                  </div>
-                ) : null}
-              </section>
-            );
-          })}
-        </div>
-      </section>
     </div>
   );
 }

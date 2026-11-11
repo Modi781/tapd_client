@@ -357,40 +357,12 @@ fn codex_config_path() -> Option<PathBuf> {
         .map(|home| home.join(".codex").join("config.toml"))
 }
 
-/// GUI apps inherit a minimal `PATH` on macOS; add the usual CLI install
-/// locations so `claude` is found when it is on the user's shell `PATH`.
+/// GUI apps inherit a minimal `PATH` on macOS, so `claude` / `opencode` are
+/// only found when the child gets the user's shell `PATH`.
 fn command_with_user_path(binary: &str) -> Command {
     let mut command = Command::new(binary);
-    if let Some(path) = user_path() {
-        command.env("PATH", path);
-    }
+    command.env("PATH", crate::shell_path::user_path());
     command
-}
-
-fn user_path() -> Option<std::ffi::OsString> {
-    let mut entries: Vec<PathBuf> = Vec::new();
-    if let Ok(home) = tapd_core::paths::home_dir() {
-        entries.push(home.join(".local/bin"));
-        entries.push(home.join(".npm-global/bin"));
-        entries.push(home.join(".bun/bin"));
-    }
-    #[cfg(target_os = "macos")]
-    {
-        entries.push(PathBuf::from("/opt/homebrew/bin"));
-        entries.push(PathBuf::from("/usr/local/bin"));
-    }
-    if let Some(appdata) = std::env::var_os("APPDATA") {
-        entries.push(PathBuf::from(appdata).join("npm"));
-    }
-
-    let mut parts: Vec<std::ffi::OsString> = entries
-        .into_iter()
-        .map(|path| path.into_os_string())
-        .collect();
-    if let Some(current) = std::env::var_os("PATH") {
-        parts.extend(std::env::split_paths(&current).map(|path| path.into_os_string()));
-    }
-    std::env::join_paths(parts).ok()
 }
 
 #[derive(Debug)]

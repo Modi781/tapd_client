@@ -36,7 +36,7 @@ struct Candidate {
     id: &'static str,
     label: &'static str,
     path: &'static str,
-    /// Kinds this app is offered for: `image`, `video`, `file`.
+    /// Kinds this app is offered for: `image`, `video`, `file`, `directory`.
     kinds: &'static [&'static str],
 }
 
@@ -108,13 +108,25 @@ const CANDIDATES: &[Candidate] = &[
         id: "vscode",
         label: "Visual Studio Code",
         path: "/Applications/Visual Studio Code.app",
-        kinds: &["image", "file"],
+        kinds: &["image", "file", "directory"],
+    },
+    Candidate {
+        id: "xcode",
+        label: "Xcode",
+        path: "/Applications/Xcode.app",
+        kinds: &["directory"],
+    },
+    Candidate {
+        id: "zed",
+        label: "Zed",
+        path: "/Applications/Zed.app",
+        kinds: &["directory"],
     },
     Candidate {
         id: "cursor",
         label: "Cursor",
         path: "/Applications/Cursor.app",
-        kinds: &["image", "file"],
+        kinds: &["image", "file", "directory"],
     },
     Candidate {
         id: "sublime",
@@ -141,8 +153,44 @@ fn system_app_path(kind: &str) -> &'static str {
     match kind {
         "image" => "/System/Applications/Preview.app",
         "video" => "/System/Applications/QuickTime Player.app",
+        "directory" => finder_app_path(),
         _ => "/System/Applications/TextEdit.app",
     }
+}
+
+/// Finder is a CoreServices app; some releases also expose it under
+/// /System/Applications.
+fn finder_app_path() -> &'static str {
+    const PATHS: [&str; 2] = [
+        "/System/Applications/Finder.app",
+        "/System/Library/CoreServices/Finder.app",
+    ];
+    PATHS
+        .into_iter()
+        .find(|path| Path::new(path).is_dir())
+        .unwrap_or(PATHS[1])
+}
+
+/// The system target is Finder for folders; everything else is a document.
+fn system_label(kind: &str) -> &'static str {
+    if kind == "directory" {
+        "访达"
+    } else {
+        "系统默认应用"
+    }
+}
+
+/// Editors a project folder is opened in, in default-preference order.
+const DIRECTORY_EDITORS: &[&str] = &["vscode", "xcode", "zed", "cursor"];
+
+/// A folder is almost always bound to a code project, so fall back to the first
+/// installed editor instead of Finder when the user has not chosen yet.
+fn default_directory_target() -> String {
+    DIRECTORY_EDITORS
+        .iter()
+        .find(|id| find_candidate(id).is_some_and(|candidate| Path::new(candidate.path).is_dir()))
+        .map(|id| (*id).to_string())
+        .unwrap_or_else(|| SYSTEM_TARGET.to_string())
 }
 
 fn browser_app_path() -> Option<&'static str> {
@@ -156,10 +204,23 @@ fn find_candidate(id: &str) -> Option<&'static Candidate> {
 }
 
 /// Resolves the effective target for a kind: the saved choice when it is still
-/// installed and supports the kind, otherwise `system`.
+/// installed and supports the kind, otherwise `system` (or, for a folder that
+/// was never configured, the first installed editor).
 pub fn selected_target(kind: &str, open_with: &BTreeMap<String, String>) -> String {
-    let saved = open_with.get(kind).map(String::as_str).unwrap_or(SYSTEM_TARGET);
-    if saved == SYSTEM_TARGET || saved == BROWSER_TARGET {
+    let kind = normalize_kind(kind);
+    let Some(saved) = open_with.get(kind) else {
+        return if kind == "directory" {
+            default_directory_target()
+        } else {
+            SYSTEM_TARGET.to_string()
+        };
+    };
+    let saved = saved.as_str();
+    if saved == SYSTEM_TARGET {
+        return saved.to_string();
+    }
+    // A folder is never handed to a browser, even if an old config says so.
+    if saved == BROWSER_TARGET && kind != "directory" {
         return saved.to_string();
     }
 
@@ -180,16 +241,19 @@ pub fn target_set(kind: &str, cache_dir: &Path, open_with: &BTreeMap<String, Str
 
     targets.push(OpenTarget {
         id: SYSTEM_TARGET.to_string(),
-        label: "系统默认应用".to_string(),
+        label: system_label(kind).to_string(),
         icon: icon_for(Path::new(system_app_path(kind)), cache_dir),
     });
 
-    if let Some(browser) = browser_app_path() {
-        targets.push(OpenTarget {
-            id: BROWSER_TARGET.to_string(),
-            label: "默认浏览器".to_string(),
-            icon: icon_for(Path::new(browser), cache_dir),
-        });
+    // A folder is never opened in a browser.
+    if kind != "directory" {
+        if let Some(browser) = browser_app_path() {
+            targets.push(OpenTarget {
+                id: BROWSER_TARGET.to_string(),
+                label: "默认浏览器".to_string(),
+                icon: icon_for(Path::new(browser), cache_dir),
+            });
+        }
     }
 
     let system_path = system_app_path(kind);
@@ -217,7 +281,7 @@ pub fn target_set(kind: &str, cache_dir: &Path, open_with: &BTreeMap<String, Str
 
 pub fn normalize_kind(kind: &str) -> &str {
     match kind {
-        "image" | "video" => kind,
+        "image" | "video" | "directory" => kind,
         _ => "file",
     }
 }
@@ -340,6 +404,39 @@ mod tests {
     fn normalizes_unknown_kinds_to_file() {
         assert_eq!(normalize_kind("image"), "image");
         assert_eq!(normalize_kind("video"), "video");
+        assert_eq!(normalize_kind("directory"), "directory");
         assert_eq!(normalize_kind("archive"), "file");
+    }
+
+    #[test]
+    fn missing_editor_for_directory_falls_back_to_system() {
+        let mut prefs = BTreeMap::new();
+        prefs.insert("directory".to_string(), "does-not-exist".to_string());
+        assert_eq!(selected_target("directory", &prefs), SYSTEM_TARGET);
+    }
+
+    #[test]
+    fn explicit_finder_choice_is_kept() {
+        let mut prefs = BTreeMap::new();
+        prefs.insert("directory".to_string(), SYSTEM_TARGET.to_string());
+        assert_eq!(selected_target("directory", &prefs), SYSTEM_TARGET);
+    }
+
+    #[test]
+    fn browser_is_never_a_directory_target() {
+        let mut prefs = BTreeMap::new();
+        prefs.insert("directory".to_string(), BROWSER_TARGET.to_string());
+        assert_eq!(selected_target("directory", &prefs), SYSTEM_TARGET);
+    }
+
+    #[test]
+    fn directory_menu_only_offers_editors() {
+        let cache = std::env::temp_dir().join("tapd-open-with-test");
+        let set = target_set("directory", &cache, &BTreeMap::new());
+        assert_eq!(set.kind, "directory");
+        assert_eq!(set.targets[0].label, "访达");
+        assert!(set.targets.iter().all(|target| {
+            target.id == SYSTEM_TARGET || DIRECTORY_EDITORS.contains(&target.id.as_str())
+        }));
     }
 }

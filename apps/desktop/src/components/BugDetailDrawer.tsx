@@ -73,6 +73,8 @@ type Props = {
   onCopy: (text: string) => void;
   onExport: (detail: BugDetail) => void;
   onAgentFix: (detail: BugDetail) => void;
+  /** Launch with a prompt/resources from the compose sheet. */
+  onAgentCompose: (detail: BugDetail) => void;
   /** In-flight agent tasks keyed by workspace + bug. */
   agentInFlight?: Map<string, AgentInFlight>;
   /** Jump to an already queued/running task instead of enqueuing again. */
@@ -109,6 +111,7 @@ function BugDetailDrawerImpl(props: Props) {
     onCopy,
     onExport,
     onAgentFix,
+    onAgentCompose,
     agentInFlight,
     onOpenAgentTask,
     onOpenPath,
@@ -741,15 +744,29 @@ function BugDetailDrawerImpl(props: Props) {
                     {agentInFlightLabel(agentInfo)} · 查看任务
                   </Button>
                 ) : (
-                  <Button
-                    size="sm"
-                    variant="secondary"
-                    icon={<Bot size={13} />}
-                    disabled={exporting || loading}
-                    onClick={() => onAgentFix(detail)}
-                  >
-                    用 Agent 修复
-                  </Button>
+                  <div className="inline-flex">
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      className="rounded-r-none"
+                      icon={<Bot size={13} />}
+                      disabled={exporting || loading}
+                      onClick={() => onAgentFix(detail)}
+                    >
+                      用 Agent 修复
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      className="rounded-l-none border-l-0 px-2"
+                      title="添加补充说明或资源后启动"
+                      aria-label="添加补充说明或资源后启动"
+                      disabled={exporting || loading}
+                      onClick={() => onAgentCompose(detail)}
+                    >
+                      <ChevronDown size={13} />
+                    </Button>
+                  </div>
                 )
               ) : null}
               <Button

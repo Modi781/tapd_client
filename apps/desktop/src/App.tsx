@@ -50,6 +50,10 @@ import {
   subscribeUpdate,
 } from "./lib/update";
 import { AgentPage } from "./components/AgentPage";
+import {
+  AgentComposeSheet,
+  type AgentComposePayload,
+} from "./components/AgentComposeSheet";
 import { AccountPage } from "./components/AccountPage";
 import { Avatar } from "./components/Avatar";
 import { BugDetailDrawer } from "./components/BugDetailDrawer";
@@ -59,6 +63,7 @@ import { LoginGate } from "./components/LoginGate";
 import { McpPage } from "./components/McpPage";
 import { Onboarding } from "./components/Onboarding";
 import { ProjectSettings } from "./components/ProjectSettings";
+import { ProjectOpenButton } from "./components/ProjectOpenButton";
 import { SettingsPage } from "./components/SettingsPage";
 import { ScrollingName } from "./components/ScrollingName";
 import { SkeletonRows } from "./components/Skeleton";
@@ -148,7 +153,13 @@ export default function App() {
   const [sidebarPeek, setSidebarPeek] = useState(false);
   const [resizingSidebar, setResizingSidebar] = useState(false);
   /** Set when the user asks for an Agent fix without a configured folder. */
-  const [pendingAgent, setPendingAgent] = useState<AgentTarget | null>(null);
+  const [pendingAgent, setPendingAgent] = useState<{
+    target: AgentTarget;
+    payload: AgentComposePayload | null;
+  } | null>(null);
+  /** Bug whose compose sheet (prompt + resources) is open. */
+  const [composeAgent, setComposeAgent] = useState<AgentTarget | null>(null);
+  const [composeSubmitting, setComposeSubmitting] = useState(false);
   /** Task the island capsule asked us to focus in the Agent tab. */
   const [agentFocusTaskId, setAgentFocusTaskId] = useState<string | null>(null);
   /** Locally hidden TAPD projects (persisted in config.json). */
@@ -965,7 +976,7 @@ export default function App() {
   );
 
   const doEnqueueAgent = useCallback(
-    async (target: AgentTarget) => {
+    async (target: AgentTarget, payload: AgentComposePayload | null) => {
       const workspaceName =
         target.workspaceName ||
         context?.workspaces.find((item) => item.id === target.workspaceId)?.name ||
@@ -979,55 +990,72 @@ export default function App() {
           title: target.title,
           severity: target.severityLabel,
           priority: target.priorityLabel,
+          extraPrompt: payload?.prompt.trim() ? payload.prompt : null,
+          attachments: payload?.attachments.length ? payload.attachments : undefined,
         });
         // The view switches to the Agent tab and focuses this task; a toast
         // on top of that is just noise.
         setAgentFocusTaskId(task.id);
         setView("agent");
+        return true;
       } catch (error) {
         showToast("error", String(error));
+        return false;
       }
     },
     [context, showToast],
   );
 
-  /** Asks for the project folder first when none is configured, then enqueues. */
+  /**
+   * Asks for the project folder first when none is configured, then enqueues.
+   * Returns "queued" when the task exists (or is focused instead of duplicated)
+   * and "needs_folder" when the picker took over.
+   */
   const enqueueAgent = useCallback(
-    async (target: AgentTarget) => {
+    async (
+      target: AgentTarget,
+      payload: AgentComposePayload | null = null,
+    ): Promise<"queued" | "needs_folder" | "error"> => {
       // The bug is already queued/running: focus that task instead of creating
       // a duplicate. The list and drawer also disable the action, this covers
       // stale snapshots and notification-triggered flows.
       const existing = agentInFlight.get(agentBugKey(target.workspaceId, target.id));
       if (existing) {
         openAgentTask(existing.task.id);
-        return;
+        return "queued";
       }
 
       try {
         const { config } = await agentApi.configGet();
         const repoPath = (config.projects?.[target.workspaceId]?.repoPath ?? "").trim();
         if (!repoPath) {
-          setPendingAgent(target);
-          return;
+          setPendingAgent({ target, payload });
+          return "needs_folder";
         }
       } catch (error) {
         showToast("error", String(error));
-        return;
+        return "error";
       }
-      await doEnqueueAgent(target);
+      return (await doEnqueueAgent(target, payload)) ? "queued" : "error";
     },
     [agentInFlight, doEnqueueAgent, openAgentTask, showToast],
   );
 
   const applyAgentFolder = useCallback(
-    async (target: AgentTarget, path: string) => {
+    async (
+      pending: { target: AgentTarget; payload: AgentComposePayload | null },
+      path: string,
+    ) => {
       setPendingAgent(null);
       try {
         const { config } = await agentApi.configGet();
         const projects = {
           ...(config.projects ?? {}),
-          [target.workspaceId]: {
-            ...(config.projects?.[target.workspaceId] ?? { repoPath: "", rule: "" }),
+          [pending.target.workspaceId]: {
+            ...(config.projects?.[pending.target.workspaceId] ?? {
+              repoPath: "",
+              rule: "",
+            }),
             repoPath: path,
           },
         };
@@ -1036,7 +1064,9 @@ export default function App() {
         showToast("error", String(error));
         return;
       }
-      await doEnqueueAgent(target);
+      if (await doEnqueueAgent(pending.target, pending.payload)) {
+        setComposeAgent(null);
+      }
     },
     [doEnqueueAgent, showToast],
   );
@@ -1044,6 +1074,35 @@ export default function App() {
   const handleAgentFix = useCallback(
     (target: BugDetail) => void enqueueAgent(target),
     [enqueueAgent],
+  );
+
+  /** Open the compose sheet, or jump to the existing task for this bug. */
+  const openAgentCompose = useCallback(
+    (target: AgentTarget) => {
+      const existing = agentInFlight.get(agentBugKey(target.workspaceId, target.id));
+      if (existing) {
+        openAgentTask(existing.task.id);
+        return;
+      }
+      setComposeAgent(target);
+    },
+    [agentInFlight, openAgentTask],
+  );
+
+  const submitAgentCompose = useCallback(
+    async (payload: AgentComposePayload) => {
+      if (!composeAgent || composeSubmitting) return;
+      setComposeSubmitting(true);
+      try {
+        const result = await enqueueAgent(composeAgent, payload);
+        // A missing repo keeps the sheet open behind the folder picker, so the
+        // typed instructions survive a cancel.
+        if (result === "queued") setComposeAgent(null);
+      } finally {
+        setComposeSubmitting(false);
+      }
+    },
+    [composeAgent, composeSubmitting, enqueueAgent],
   );
 
   const handleLogout = () => {
@@ -1240,7 +1299,7 @@ export default function App() {
         : view === "agent"
           ? "运行 opencode、审核改动与查看执行历史"
           : view === "mcp"
-            ? "接入 AI 客户端与一键导入 opencode"
+            ? "接入 AI 客户端"
             : view === "account"
               ? ""
               : "通知与 AI 配置";
@@ -1582,6 +1641,14 @@ export default function App() {
               ) : null}
             </div>
 
+            {view === "bugs" && workspace ? (
+              <ProjectOpenButton
+                key={workspace.id}
+                workspaceId={workspace.id}
+                onError={(text) => showToast("error", text)}
+              />
+            ) : null}
+
           </header>
 
           {view === "bugs" ? (
@@ -1609,8 +1676,9 @@ export default function App() {
                 onScopeChange={setScope}
                 onOpenBug={openBug}
                 onOpenWeb={openPath}
-                onCopyLink={copy}
+                onCopy={copy}
                 onAgentFix={enqueueAgent}
+                onAgentCompose={openAgentCompose}
                 agentInFlight={agentInFlight}
                 onOpenAgentTask={openAgentTask}
                 onClaim={claimBugFromList}
@@ -1719,6 +1787,7 @@ export default function App() {
                 onCopy={copy}
                 onExport={handleExport}
                 onAgentFix={handleAgentFix}
+                onAgentCompose={(target) => openAgentCompose(target)}
                 agentInFlight={agentInFlight}
                 onOpenAgentTask={openAgentTask}
                 onOpenPath={openPath}
@@ -1754,12 +1823,22 @@ export default function App() {
         ) : null}
       </div>
 
+      <AgentComposeSheet
+        key={composeAgent ? `${composeAgent.workspaceId}:${composeAgent.id}` : "agent-compose"}
+        open={composeAgent !== null}
+        title={composeAgent?.title ?? ""}
+        submitting={composeSubmitting}
+        onClose={() => setComposeAgent(null)}
+        onSubmit={(payload) => void submitAgentCompose(payload)}
+        toast={showToast}
+      />
+
       {pendingAgent ? (
         <FolderPicker
           open
           title="没有配置项目目录"
           description={`${
-            pendingAgent.workspaceName || pendingAgent.workspaceId
+            pendingAgent.target.workspaceName || pendingAgent.target.workspaceId
           } 还没有设置本地仓库目录。选择后会自动加入 Agent 队列。`}
           confirmLabel="使用并继续"
           onCancel={() => setPendingAgent(null)}

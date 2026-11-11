@@ -26,7 +26,9 @@ type Props = {
  */
 export function AgentLogViewer({ task, onClose, toast }: Props) {
   const [copied, setCopied] = useState(false);
-  const interactive = task ? LIVE_STATUSES.includes(task.status) : false;
+  const interactive = task
+    ? (task.transport ?? "pty") === "pty" && LIVE_STATUSES.includes(task.status)
+    : false;
   // Escape must reach the TUI while the user is typing in it.
   const interactiveRef = useRef(interactive);
   interactiveRef.current = interactive;
@@ -120,6 +122,7 @@ export function AgentLogViewer({ task, onClose, toast }: Props) {
             key={task.id}
             taskId={task.id}
             interactive={interactive}
+            convertEol={task.transport !== "pty"}
             className="h-full w-full"
           />
         </div>

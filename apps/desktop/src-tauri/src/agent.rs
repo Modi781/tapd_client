@@ -42,6 +42,7 @@ use tokio::sync::mpsc as tokio_mpsc;
 
 use crate::{
     opencode::{self, PermissionReview, ServerProcess},
+    shell_path,
     state::SharedState,
 };
 
@@ -51,8 +52,12 @@ const CONFIG_FILE: &str = "agent.json";
 const TASKS_FILE: &str = "agent-tasks.json";
 const LOG_DIR: &str = "agent-logs";
 const EVENTS_DIR: &str = "agent-events";
+/// Pasted screenshots/videos; only their paths are handed to the agent.
+const RESOURCE_DIR: &str = "agent-resources";
 
 const DEFAULT_BINARY: &str = "opencode";
+const DEFAULT_RUNTIME_ID: &str = "opencode";
+const DEFAULT_TRANSPORT: &str = "acp";
 const MAX_LOG_TAIL_BYTES: usize = 400 * 1024;
 /// Cap the diff preview so a huge refactor cannot freeze the review panel.
 const MAX_REVIEW_DIFF_CHARS: usize = 120_000;
@@ -101,6 +106,12 @@ pub struct ProjectAgentConfig {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct AgentConfig {
+    /// Selected agent runtime id. Only `opencode` is available today; the
+    /// runtime catalog is the single source of truth for this list.
+    pub runtime_id: String,
+    /// Wire protocol for the selected runtime. `acp` uses the bidirectional
+    /// Agent Client Protocol; `pty` keeps the interactive TUI transport.
+    pub transport: String,
     pub binary_path: String,
     /// Legacy map kept only for migration; use `projects` instead.
     pub repo_mappings: BTreeMap<String, String>,
@@ -118,6 +129,8 @@ pub struct AgentConfig {
 impl Default for AgentConfig {
     fn default() -> Self {
         Self {
+            runtime_id: DEFAULT_RUNTIME_ID.to_string(),
+            transport: DEFAULT_TRANSPORT.to_string(),
             binary_path: DEFAULT_BINARY.to_string(),
             repo_mappings: BTreeMap::new(),
             projects: BTreeMap::new(),
@@ -131,6 +144,17 @@ impl Default for AgentConfig {
 
 impl AgentConfig {
     fn sanitized(mut self) -> Self {
+        let runtime = self.runtime_id.trim();
+        self.runtime_id = match runtime_descriptor(runtime) {
+            Some(descriptor) if descriptor.available => runtime.to_string(),
+            _ => DEFAULT_RUNTIME_ID.to_string(),
+        };
+
+        self.transport = match self.transport.trim() {
+            "pty" => "pty".to_string(),
+            _ => DEFAULT_TRANSPORT.to_string(),
+        };
+
         let binary = self.binary_path.trim();
         self.binary_path = if binary.is_empty() {
             DEFAULT_BINARY.to_string()
@@ -194,9 +218,160 @@ impl AgentConfig {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Runtime catalog
+// ---------------------------------------------------------------------------
+
+/// A lifecycle stage every runtime must declare. `needs_human` stages block the
+/// serial queue until the user acts; `terminal` stages are final states.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentLifecycleStage {
+    /// Matches `TaskStatus` snake_case keys (plus UI-only review stages).
+    pub key: &'static str,
+    pub label: &'static str,
+    pub description: &'static str,
+    pub needs_human: bool,
+    pub terminal: bool,
+}
+
+/// What the desktop is allowed to assume about a runtime. Anything false must
+/// degrade to "send the user to review" instead of pretending it worked.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentRuntimeCapabilities {
+    /// PTY output + keystrokes.
+    pub interactive_terminal: bool,
+    /// Runtime raises blocking permission prompts at all.
+    pub permission_prompt: bool,
+    /// Desktop can answer the prompt and the runtime accepts that decision.
+    pub external_decision: bool,
+    /// Runtime exposes a session id that can be reopened later.
+    pub session_resume: bool,
+    /// Runtime can pause before committing for a human commit decision.
+    pub commit_review: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentRuntimeDescriptor {
+    pub id: &'static str,
+    pub name: &'static str,
+    pub vendor: &'static str,
+    pub description: &'static str,
+    /// Default executable, used as the placeholder in the settings form.
+    pub binary: &'static str,
+    /// Wire protocols supported by this runtime, in preferred order.
+    pub transports: Vec<&'static str>,
+    pub default_transport: &'static str,
+    /// False for future runtimes that are listed but not executable yet.
+    pub available: bool,
+    pub capabilities: AgentRuntimeCapabilities,
+    pub lifecycle: Vec<AgentLifecycleStage>,
+    /// Declared interoperability gaps, rendered verbatim in the management UI.
+    pub limitations: Vec<&'static str>,
+    /// What the UI does when an external decision cannot be applied.
+    pub fallback: &'static str,
+}
+
+/// Single source of truth for the runtime list. Adding Claude Code later means
+/// adding an adapter + one descriptor here, not branching the UI.
+pub fn runtime_catalog() -> Vec<AgentRuntimeDescriptor> {
+    vec![AgentRuntimeDescriptor {
+        id: "opencode",
+        name: "OpenCode",
+        vendor: "SST",
+        description: "终端式编码 Agent，支持 ACP 双向通信与 PTY 终端两种模式。",
+        binary: DEFAULT_BINARY,
+        transports: vec!["acp", "pty"],
+        default_transport: "acp",
+        available: true,
+        capabilities: AgentRuntimeCapabilities {
+            interactive_terminal: true,
+            permission_prompt: true,
+            external_decision: true,
+            session_resume: true,
+            commit_review: true,
+        },
+        lifecycle: vec![
+            AgentLifecycleStage {
+                key: "queued",
+                label: "入队",
+                description: "按 FIFO 排队，等待串行 worker 取出。",
+                needs_human: false,
+                terminal: false,
+            },
+            AgentLifecycleStage {
+                key: "preparing",
+                label: "启动",
+                description: "导出缺陷包并在项目仓库中启动运行时。",
+                needs_human: false,
+                terminal: false,
+            },
+            AgentLifecycleStage {
+                key: "running",
+                label: "执行中",
+                description: "Agent 修改代码；终端可随时接管操作。",
+                needs_human: false,
+                terminal: false,
+            },
+            AgentLifecycleStage {
+                key: "waiting_review",
+                label: "需要人工授权",
+                description: "敏感操作必须人工确认；不能外部确认的运行时会被引导到终端。",
+                needs_human: true,
+                terminal: false,
+            },
+            AgentLifecycleStage {
+                key: "awaiting_approval",
+                label: "改动待审核",
+                description: "复杂改动暂停提交，等待通过并提交或停止储藏。",
+                needs_human: true,
+                terminal: false,
+            },
+            AgentLifecycleStage {
+                key: "succeeded",
+                label: "任务完成",
+                description: "提交与 TAPD 回写完成。",
+                needs_human: false,
+                terminal: true,
+            },
+            AgentLifecycleStage {
+                key: "failed",
+                label: "任务失败",
+                description: "启动、执行或回写失败，错误保留在历史记录中。",
+                needs_human: false,
+                terminal: true,
+            },
+            AgentLifecycleStage {
+                key: "canceled",
+                label: "已取消",
+                description: "用户中断任务或取消排队。",
+                needs_human: false,
+                terminal: true,
+            },
+        ],
+        limitations: vec![
+            "ACP 模式支持运行时给出的任意权限选项；PTY 模式仅支持「允许一次 / 总是允许 / 拒绝」。",
+            "ACP 模式不提供交互式 TUI；需要手动接管时请切换到 PTY 传输。",
+            "会话恢复依赖运行时返回 sessionId；未返回时只能查看日志。",
+            "运行时不接受桌面回执时不会自动重试，任务会停在待审核并提示人工处理。",
+        ],
+        fallback: "当 ACP 权限请求无法回执或运行时不接受回执时，任务保持「待审核」；可切换到 PTY 传输后在终端处理。",
+    }]
+}
+
+fn runtime_descriptor(id: &str) -> Option<AgentRuntimeDescriptor> {
+    runtime_catalog()
+        .into_iter()
+        .find(|runtime| runtime.id == id)
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 struct AgentConfigPatch {
+    runtime_id: Option<String>,
+    transport: Option<String>,
     binary_path: Option<String>,
     repo_mappings: Option<BTreeMap<String, String>>,
     projects: Option<BTreeMap<String, ProjectAgentConfig>>,
@@ -266,6 +441,12 @@ pub struct AgentTask {
     pub error: Option<String>,
     pub prompt: String,
     pub source: String,
+    /// Runtime and transport selected when the task was enqueued, so switching
+    /// settings later cannot change how an existing/queued task runs.
+    #[serde(default = "default_task_runtime")]
+    pub runtime_id: String,
+    #[serde(default = "default_task_transport")]
+    pub transport: String,
     /// opencode session id, learned from the server event stream. Persisted so
     /// history rows can reopen the conversation in a real terminal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -290,6 +471,12 @@ pub struct AgentTask {
     /// not force a review for leftover untracked build artifacts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub baseline_head: Option<String>,
+    /// User instructions from the compose sheet; appended to the prompt.
+    #[serde(default)]
+    pub extra_prompt: String,
+    /// Local resource paths supplied with the task. Only paths reach the agent.
+    #[serde(default)]
+    pub attachments: Vec<String>,
 }
 
 /// A complex change the agent wants the user to approve before committing.
@@ -332,6 +519,12 @@ struct EnqueueRequest {
     pub priority: Option<String>,
     #[serde(default)]
     pub source: Option<String>,
+    /// Markdown instructions typed in the compose sheet.
+    #[serde(default)]
+    pub extra_prompt: Option<String>,
+    /// Absolute paths to screenshots, videos or other resources.
+    #[serde(default)]
+    pub attachments: Option<Vec<String>>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -392,6 +585,15 @@ impl PermissionReply {
     }
 }
 
+fn find_option(options: &[crate::acp::PermissionOption], kinds: &[&str]) -> Option<String> {
+    kinds.iter().find_map(|kind| {
+        options
+            .iter()
+            .find(|option| option.kind == *kind)
+            .map(|option| option.option_id.clone())
+    })
+}
+
 fn default_true() -> bool {
     true
 }
@@ -428,8 +630,24 @@ struct PermissionReplyRequest {
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
+struct PermissionOptionRequest {
+    task_id: String,
+    option_id: String,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
 struct DetectRequest {
     path: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+struct SaveResourceRequest {
+    /// Original file name, used only for the extension.
+    name: String,
+    /// Base64 bytes (a `data:` prefix is accepted).
+    data: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -449,6 +667,10 @@ pub struct PromptVars {
     pub priority: String,
     /// Project-specific rules (from the project card in settings).
     pub project_rule: String,
+    /// Extra instructions from the compose sheet, rendered as Markdown.
+    pub user_prompt: String,
+    /// Absolute resource paths; inserted into the prompt as a path list.
+    pub attachments: Vec<String>,
 }
 
 impl PromptVars {
@@ -463,6 +685,8 @@ impl PromptVars {
             severity: task.severity.clone(),
             priority: task.priority.clone(),
             project_rule: String::new(),
+            user_prompt: task.extra_prompt.clone(),
+            attachments: task.attachments.clone(),
         }
     }
 }
@@ -473,6 +697,7 @@ impl PromptVars {
 /// decide where it lands; when the template has no such placeholder the rule is
 /// appended as its own section instead of being silently dropped.
 pub fn render_prompt(template: &str, vars: &PromptVars) -> String {
+    let attachments = render_attachments(&vars.attachments);
     let pairs = [
         ("task_id", vars.task_id.as_str()),
         ("title", vars.title.as_str()),
@@ -483,9 +708,13 @@ pub fn render_prompt(template: &str, vars: &PromptVars) -> String {
         ("severity", vars.severity.as_str()),
         ("priority", vars.priority.as_str()),
         ("project_rule", vars.project_rule.as_str()),
+        ("user_prompt", vars.user_prompt.as_str()),
+        ("attachments", attachments.as_str()),
     ];
 
     let has_rule_slot = template.contains("{{project_rule}}");
+    let has_prompt_slot = template.contains("{{user_prompt}}");
+    let has_attachments_slot = template.contains("{{attachments}}");
     let mut rendered = template.to_string();
     for (key, value) in pairs {
         rendered = rendered.replace(&format!("{{{{{key}}}}}"), value);
@@ -496,13 +725,57 @@ pub fn render_prompt(template: &str, vars: &PromptVars) -> String {
         rendered.push_str("\n\n项目规则：\n");
         rendered.push_str(rule);
     }
+
+    // The compose sheet works with any template: when the global template has
+    // no explicit slot, append its sections instead of dropping the user input.
+    let user_prompt = vars.user_prompt.trim();
+    if !has_prompt_slot && !user_prompt.is_empty() {
+        rendered.push_str("\n\n用户补充说明：\n");
+        rendered.push_str(user_prompt);
+    }
+    if !has_attachments_slot && !attachments.is_empty() {
+        rendered.push_str("\n\n用户附加资源（本地路径，请直接读取）：\n");
+        rendered.push_str(&attachments);
+    }
     rendered
+}
+
+/// One path per line, labelled by kind. Only paths are passed to the agent.
+fn render_attachments(paths: &[String]) -> String {
+    paths
+        .iter()
+        .filter(|path| !path.trim().is_empty())
+        .map(|path| format!("- {}：{}", attachment_kind(path), path.trim()))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn attachment_kind(path: &str) -> &'static str {
+    let extension = Path::new(path)
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    match extension.as_str() {
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "heic" | "svg" => "图片",
+        "mp4" | "mov" | "webm" | "m4v" | "avi" | "mkv" => "视频",
+        _ => "文件",
+    }
 }
 
 fn next_queued_index(tasks: &[AgentTask]) -> Option<usize> {
     tasks
         .iter()
         .position(|task| task.status == TaskStatus::Queued)
+}
+
+fn default_task_runtime() -> String {
+    DEFAULT_RUNTIME_ID.to_string()
+}
+
+/// Tasks persisted before ACP existed were all PTY runs.
+fn default_task_transport() -> String {
+    "pty".to_string()
 }
 
 /// The live task that already owns a bug, if any. Terminal tasks are ignored so
@@ -922,6 +1195,9 @@ fn open_pty(
     command.cwd(cwd);
     command.env("TERM", "xterm-256color");
     command.env("COLORTERM", "truecolor");
+    // Finder-launched apps inherit a minimal PATH; hand the TUI (and whatever
+    // it shells out to) the user's shell PATH instead.
+    command.env("PATH", shell_path::user_path());
     for arg in args {
         command.arg(arg);
     }
@@ -1107,6 +1383,8 @@ pub struct AgentCore {
     tasks: Mutex<Vec<AgentTask>>,
     runtimes: Mutex<HashMap<String, Arc<Mutex<AgentRuntime>>>>,
     servers: Mutex<HashMap<String, ActiveServer>>,
+    /// ACP clients keyed by task id (new protocol transports).
+    acp_clients: Mutex<HashMap<String, Arc<crate::acp::Client>>>,
     /// Per-task cancel flag; created when the worker takes a queued task so a
     /// cancel can interrupt server startup before the PTY exists.
     cancels: Mutex<HashMap<String, Arc<AtomicBool>>>,
@@ -1128,6 +1406,7 @@ impl AgentCore {
             tasks: Mutex::new(Vec::new()),
             runtimes: Mutex::new(HashMap::new()),
             servers: Mutex::new(HashMap::new()),
+            acp_clients: Mutex::new(HashMap::new()),
             cancels: Mutex::new(HashMap::new()),
             sizes: Mutex::new(HashMap::new()),
             paused: AtomicBool::new(false),
@@ -1282,6 +1561,12 @@ impl AgentCore {
     fn update_config(&self, patch: AgentConfigPatch) -> AgentConfig {
         let next = {
             let mut config = self.config.lock().expect("agent config lock");
+            if let Some(runtime_id) = patch.runtime_id {
+                config.runtime_id = runtime_id;
+            }
+            if let Some(transport) = patch.transport {
+                config.transport = transport;
+            }
             if let Some(path) = patch.binary_path {
                 config.binary_path = path;
             }
@@ -1342,6 +1627,21 @@ impl AgentCore {
         let severity = request.severity.clone().unwrap_or_default();
         let priority = request.priority.clone().unwrap_or_default();
         let repo_path = config.repo_path_for(workspace_id);
+        let extra_prompt = request
+            .extra_prompt
+            .as_deref()
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        let mut seen = std::collections::HashSet::new();
+        let attachments: Vec<String> = request
+            .attachments
+            .clone()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|path| path.trim().to_string())
+            .filter(|path| !path.is_empty() && seen.insert(path.clone()))
+            .collect();
 
         let task = AgentTask {
             id,
@@ -1362,12 +1662,16 @@ impl AgentCore {
             error: None,
             prompt: String::new(),
             source: source.to_string(),
+            runtime_id: config.runtime_id.clone(),
+            transport: config.transport.clone(),
             session_id: None,
             review: None,
             approval: None,
             commit_only: false,
             baseline_dirty: Vec::new(),
             baseline_head: None,
+            extra_prompt,
+            attachments,
         };
 
         // One bug owns at most one live task. A double click, the notification
@@ -1448,6 +1752,20 @@ impl AgentCore {
             }
         }
 
+        // ACP: send the protocol cancel notification, then kill the process.
+        let acp_client = self
+            .acp_clients
+            .lock()
+            .expect("agent acp lock")
+            .get(task_id)
+            .cloned();
+        if let Some(client) = acp_client {
+            if let Some(session_id) = snapshot.session_id.clone() {
+                let _ =
+                    tokio::time::timeout(Duration::from_secs(3), client.cancel(&session_id)).await;
+            }
+        }
+
         self.stop_runtime(task_id);
         self.persist_tasks();
         self.emit_state();
@@ -1456,6 +1774,14 @@ impl AgentCore {
 
     /// Kills the TUI process group and closes its PTY handles. Idempotent.
     fn stop_runtime(&self, task_id: &str) {
+        if let Some(client) = self
+            .acp_clients
+            .lock()
+            .expect("agent acp lock")
+            .remove(task_id)
+        {
+            client.kill();
+        }
         let runtime = self
             .runtimes
             .lock()
@@ -1682,6 +2008,43 @@ impl AgentCore {
             .review
             .clone()
             .ok_or_else(|| "没有待处理的权限请求".to_string())?;
+
+        // ACP: the agent already told us which options it accepts; answer
+        // through the protocol instead of the legacy opencode HTTP surface.
+        if review.transport == "acp" {
+            let option_id = match response {
+                PermissionReply::Once => {
+                    find_option(&review.options, &["allow_once", "allow_always"]).or_else(|| {
+                        review
+                            .options
+                            .first()
+                            .map(|option| option.option_id.clone())
+                    })
+                }
+                PermissionReply::Always => {
+                    find_option(&review.options, &["allow_always", "allow_once"]).or_else(|| {
+                        review
+                            .options
+                            .first()
+                            .map(|option| option.option_id.clone())
+                    })
+                }
+                PermissionReply::Reject => {
+                    find_option(&review.options, &["reject_once", "reject_always"])
+                }
+            }
+            .ok_or_else(|| "该权限请求没有可用的拒绝选项".to_string())?;
+            let client = self
+                .acp_clients
+                .lock()
+                .expect("agent acp lock")
+                .get(task_id)
+                .cloned()
+                .ok_or_else(|| "ACP 进程未运行，无法回复权限请求".to_string())?;
+            client.respond_permission(&review.id, Some(option_id))?;
+            return self.clear_permission_review(task_id);
+        }
+
         let server = self
             .server_for(task_id)
             .ok_or_else(|| "Agent 服务未运行，无法回复权限请求".to_string())?;
@@ -1694,6 +2057,48 @@ impl AgentCore {
         .map_err(|_| "回复权限请求超时".to_string())?
         .map_err(|error| format!("回复权限请求失败：{error}"))?;
 
+        self.clear_permission_review(task_id)
+    }
+
+    /// Answers an ACP permission request with one of the exact option ids the
+    /// agent offered. This is what the ACP review card uses.
+    async fn reply_permission_option(
+        &self,
+        task_id: &str,
+        option_id: &str,
+    ) -> Result<AgentTask, String> {
+        let task = self
+            .task_snapshot(task_id)
+            .ok_or_else(|| "任务不存在".to_string())?;
+        if task.status.is_terminal() {
+            return Err("任务已经结束".to_string());
+        }
+        let review = task
+            .review
+            .clone()
+            .ok_or_else(|| "没有待处理的权限请求".to_string())?;
+        if review.transport != "acp" {
+            return Err("该任务不是 ACP 权限请求".to_string());
+        }
+        if !review
+            .options
+            .iter()
+            .any(|option| option.option_id == option_id)
+        {
+            return Err("未知的权限选项".to_string());
+        }
+        let client = self
+            .acp_clients
+            .lock()
+            .expect("agent acp lock")
+            .get(task_id)
+            .cloned()
+            .ok_or_else(|| "ACP 进程未运行，无法回复权限请求".to_string())?;
+        client.respond_permission(&review.id, Some(option_id.to_string()))?;
+        self.clear_permission_review(task_id)
+    }
+
+    fn clear_permission_review(&self, task_id: &str) -> Result<AgentTask, String> {
         let updated = self.mutate_tasks(|tasks| {
             let Some(task) = tasks.iter_mut().find(|task| task.id == task_id) else {
                 return false;
@@ -1707,7 +2112,6 @@ impl AgentCore {
         if !updated {
             return Err("任务不存在".to_string());
         }
-
         self.task_snapshot(task_id)
             .ok_or_else(|| "任务不存在".to_string())
     }
@@ -1775,6 +2179,18 @@ impl AgentCore {
         if let Some((server, session_id)) = server_session {
             let _ = tokio::time::timeout(Duration::from_secs(3), server.abort_session(&session_id))
                 .await;
+        }
+        let acp_client = self
+            .acp_clients
+            .lock()
+            .expect("agent acp lock")
+            .get(task_id)
+            .cloned();
+        if let Some(client) = acp_client {
+            if let Some(session_id) = updated.session_id.clone() {
+                let _ =
+                    tokio::time::timeout(Duration::from_secs(3), client.cancel(&session_id)).await;
+            }
         }
         self.stop_runtime(task_id);
         self.persist_tasks();
@@ -2163,8 +2579,12 @@ impl AgentCore {
         if !Path::new(&task.repo_path).is_dir() {
             return Err(format!("仓库路径不存在：{}", task.repo_path));
         }
-        let binary = self.config_snapshot().binary_path;
-        open_terminal_session(&binary, &task.repo_path, session_id)
+        let configured = self.config_snapshot().binary_path;
+        // Terminal.app already has the login shell PATH; an absolute path is
+        // still more exact than a bare name.
+        let binary =
+            validate_binary(&configured).unwrap_or_else(|_| PathBuf::from(configured.trim()));
+        open_terminal_session(&binary.to_string_lossy(), &task.repo_path, session_id)
     }
 
     fn write_input(&self, task_id: &str, data: &str) -> Result<(), String> {
@@ -2296,7 +2716,7 @@ impl AgentCore {
     }
 
     async fn run_task(self: &Arc<Self>, mut task: AgentTask) {
-        let config = self.config_snapshot();
+        let mut config = self.config_snapshot();
 
         // 1. Export the bug package (bug.md + assets).
         let export = crate::export::run_export(
@@ -2352,10 +2772,16 @@ impl AgentCore {
         }
         task.repo_path = repo_path;
 
-        // 3. Validate the agent binary (relative names are resolved via PATH).
-        if let Err(error) = validate_binary(&config.binary_path) {
-            self.fail_task(&task.id, error);
-            return;
+        // 3. Resolve the agent binary. `opencode` is usually a bare name, so it
+        //    is looked up on the user's shell PATH and the absolute path is used
+        //    from here on: every spawn (serve / ACP / PTY) then works even when
+        //    the app was launched from Finder with a minimal PATH.
+        match validate_binary(&config.binary_path) {
+            Ok(binary) => config.binary_path = binary.to_string_lossy().into_owned(),
+            Err(error) => {
+                self.fail_task(&task.id, error);
+                return;
+            }
         }
 
         // 3b. Make sure the opencode global config exposes the tapd MCP server.
@@ -2385,6 +2811,10 @@ impl AgentCore {
         // Approved reviews re-enter the queue with a commit-only prompt; the
         // reviewed diff is still in the working tree.
         let template = if task.commit_only {
+            // The commit phase only finishes the reviewed change; the original
+            // compose instructions must not run a second time.
+            vars.user_prompt.clear();
+            vars.attachments.clear();
             DEFAULT_COMMIT_PROMPT_TEMPLATE
         } else {
             config.prompt_template.as_str()
@@ -2423,6 +2853,16 @@ impl AgentCore {
         };
 
         if running_task.status == TaskStatus::Canceled {
+            return;
+        }
+
+        // ACP transport: one bidirectional JSON-RPC session (prompt + streamed
+        // updates + permission requests). It replaces the private opencode
+        // server, the PTY and the prompt-injection watchdog.
+        if running_task.transport == "acp" {
+            let outcome = self.run_acp(&running_task, &config).await;
+            self.teardown_task(&task.id);
+            self.finish_task(&task.id, outcome);
             return;
         }
 
@@ -2608,6 +3048,270 @@ impl AgentCore {
         // task, even when the task panicked further up.
         self.teardown_task(&task.id);
         self.finish_task(&task.id, outcome);
+    }
+
+    /// Runs one task through ACP: initialize, create a session, send the prompt,
+    /// and consume streamed updates + permission requests until the prompt
+    /// response arrives. No PTY, no private server, no custom task-response
+    /// protocol: completion and permissions are ACP's own messages.
+    async fn run_acp(&self, task: &AgentTask, config: &AgentConfig) -> PtyOutcome {
+        let mut outcome = PtyOutcome::default();
+        let raw_log = self.logs_dir().join(format!("{}-acp.ndjson", task.id));
+        let (client, mut events) = match crate::acp::Client::start(
+            &config.binary_path,
+            Path::new(&task.repo_path),
+            raw_log,
+        )
+        .await
+        {
+            Ok(value) => value,
+            Err(error) => {
+                outcome.error = Some(error);
+                return outcome;
+            }
+        };
+        self.acp_clients
+            .lock()
+            .expect("agent acp lock")
+            .insert(task.id.clone(), client.clone());
+
+        if let Err(error) = client.initialize().await {
+            outcome.error = Some(format!("ACP 初始化失败：{error}"));
+            self.append_task_log(&task.log_path, outcome.error.as_deref().unwrap_or(""));
+            self.stop_runtime(&task.id);
+            return outcome;
+        }
+
+        // The app's TAPD MCP sidecar is handed to the agent per session. This
+        // is the same server the MCP settings page writes to other clients.
+        let mcp_servers = json!([{
+            "name": "tapd",
+            "command": crate::commands::sidecar_command_path(),
+            "args": [],
+            "env": []
+        }]);
+
+        let session = match client.new_session(&task.repo_path, mcp_servers).await {
+            Ok(session) => session,
+            Err(error) => {
+                outcome.error = Some(format!("ACP 创建会话失败：{error}"));
+                self.append_task_log(&task.log_path, outcome.error.as_deref().unwrap_or(""));
+                self.stop_runtime(&task.id);
+                return outcome;
+            }
+        };
+        let session_id = session
+            .get("sessionId")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        if session_id.is_empty() {
+            outcome.error = Some("ACP 未返回 sessionId".to_string());
+            self.stop_runtime(&task.id);
+            return outcome;
+        }
+        self.remember_session(&task.id, &session_id);
+        self.append_task_log(&task.log_path, &format!("ACP 会话：{session_id}"));
+
+        let prompt = task.prompt.clone();
+        let prompt_session = session_id.clone();
+        let prompt_client = client.clone();
+        let prompt_future = async move { prompt_client.prompt(&prompt_session, &prompt).await };
+        tokio::pin!(prompt_future);
+
+        loop {
+            tokio::select! {
+                result = &mut prompt_future => {
+                    match result {
+                        Ok(value) => {
+                            let stop = value
+                                .get("stopReason")
+                                .and_then(Value::as_str)
+                                .unwrap_or("end_turn");
+                            self.append_task_log(&task.log_path, &format!("ACP 回合结束：{stop}"));
+                            match stop {
+                                "end_turn" => outcome.completed = true,
+                                "cancelled" => outcome.canceled = true,
+                                other => {
+                                    outcome.error = Some(format!("Agent 停止原因：{other}"));
+                                }
+                            }
+                        }
+                        Err(error) => outcome.error = Some(format!("ACP 回合失败：{error}")),
+                    }
+                    break;
+                }
+                event = events.recv() => {
+                    match event {
+                        Some(crate::acp::Event::Update(params)) => {
+                            self.handle_acp_update(task, &params);
+                        }
+                        Some(crate::acp::Event::Permission(request)) => {
+                            self.handle_acp_permission(task, request);
+                        }
+                        Some(crate::acp::Event::Stderr(line)) => {
+                            self.append_stream_output(
+                                &task.id,
+                                &task.log_path,
+                                &format!("\r\n[stderr] {line}\r\n"),
+                            );
+                        }
+                        Some(crate::acp::Event::ProtocolError(error)) => {
+                            outcome.error = Some(error);
+                            break;
+                        }
+                        Some(crate::acp::Event::Exited(code)) => {
+                            outcome.exit_code = code;
+                            if outcome.error.is_none()
+                                && !outcome.completed
+                                && !outcome.canceled
+                            {
+                                outcome.error = Some(match code {
+                                    Some(code) => format!("ACP 进程退出码 {code}"),
+                                    None => "ACP 进程异常结束".to_string(),
+                                });
+                            }
+                            break;
+                        }
+                        None => {
+                            if outcome.error.is_none()
+                                && !outcome.completed
+                                && !outcome.canceled
+                            {
+                                outcome.error = Some("ACP 事件流已结束".to_string());
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        if self.current_status(&task.id) == Some(TaskStatus::Canceled) {
+            outcome.canceled = true;
+            outcome.error = None;
+        }
+
+        let _ = tokio::time::timeout(Duration::from_secs(3), client.close(&session_id)).await;
+        self.stop_runtime(&task.id);
+        outcome
+    }
+
+    fn handle_acp_update(&self, task: &AgentTask, params: &Value) {
+        let update = params.get("update").unwrap_or(&Value::Null);
+        let kind = update
+            .get("sessionUpdate")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        match kind {
+            "agent_message_chunk" => {
+                if let Some(text) = update.pointer("/content/text").and_then(Value::as_str) {
+                    self.append_stream_output(&task.id, &task.log_path, text);
+                }
+            }
+            "agent_thought_chunk" => {
+                if let Some(text) = update.pointer("/content/text").and_then(Value::as_str) {
+                    self.append_stream_output(
+                        &task.id,
+                        &task.log_path,
+                        &format!("\r\n[thinking] {text}"),
+                    );
+                }
+            }
+            "tool_call" | "tool_call_update" => {
+                let title = update
+                    .get("title")
+                    .and_then(Value::as_str)
+                    .unwrap_or("工具调用");
+                let status = update
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .unwrap_or("pending");
+                let tool = update
+                    .get("toolCallId")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                self.append_stream_output(
+                    &task.id,
+                    &task.log_path,
+                    &format!("\r\n[tool {tool}] {title} · {status}\r\n"),
+                );
+            }
+            "plan" => {
+                if let Some(entries) = update.get("entries").and_then(Value::as_array) {
+                    let text = entries
+                        .iter()
+                        .map(|entry| {
+                            let content = entry
+                                .get("content")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default();
+                            let status = entry
+                                .get("status")
+                                .and_then(Value::as_str)
+                                .unwrap_or("pending");
+                            format!("- [{status}] {content}")
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    if !text.is_empty() {
+                        self.append_stream_output(
+                            &task.id,
+                            &task.log_path,
+                            &format!("\r\n[plan]\r\n{text}\r\n"),
+                        );
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_acp_permission(&self, task: &AgentTask, request: crate::acp::PermissionRequest) {
+        let options = request
+            .options
+            .iter()
+            .map(|option| option.name.as_str())
+            .collect::<Vec<_>>()
+            .join(" / ");
+        self.append_task_log(
+            &task.log_path,
+            &format!(
+                "Agent 请求权限：{}（{}）",
+                request.title,
+                if options.is_empty() {
+                    "无选项"
+                } else {
+                    &options
+                }
+            ),
+        );
+        let review = PermissionReview {
+            id: request.request_id,
+            session_id: request.session_id,
+            action: request.kind.unwrap_or_else(|| "tool".to_string()),
+            resource: request.tool_call_id,
+            title: request.title,
+            options: request.options,
+            transport: "acp".to_string(),
+        };
+        self.set_review(&task.id, review);
+    }
+
+    fn append_stream_output(&self, task_id: &str, log_path: &str, data: &str) {
+        if data.is_empty() {
+            return;
+        }
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log_path)
+        {
+            let _ = file.write_all(data.as_bytes());
+        }
+        let _ = self
+            .app
+            .emit("agent://output", json!({ "taskId": task_id, "data": data }));
     }
 
     fn append_task_log(&self, log_path: &str, message: &str) {
@@ -2940,9 +3644,12 @@ fn join_with_timeout(handle: Option<std::thread::JoinHandle<()>>, timeout: Durat
 }
 
 /// Accepts either an absolute/relative path or a bare command name resolved
-/// through `PATH` (the default `opencode` is normally installed by a package
-/// manager and only reachable through `PATH`).
-fn validate_binary(binary: &str) -> Result<(), String> {
+/// through the user's shell `PATH` (the default `opencode` is normally installed
+/// by a package manager and only reachable through `PATH`).
+///
+/// Returns the resolved path so callers do not depend on the minimal `PATH` a
+/// Finder-launched app inherits.
+fn validate_binary(binary: &str) -> Result<PathBuf, String> {
     let binary = binary.trim();
     if binary.is_empty() {
         return Err("未配置 Agent 可执行文件路径".to_string());
@@ -2954,41 +3661,24 @@ fn validate_binary(binary: &str) -> Result<(), String> {
         if !path.is_file() {
             return Err(format!("Agent 可执行文件不存在：{binary}"));
         }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::metadata(path)
-                .map_err(|error| error.to_string())?
-                .permissions()
-                .mode();
-            if mode & 0o111 == 0 {
-                return Err(format!("Agent 可执行文件没有执行权限：{binary}"));
-            }
+        if !shell_path::is_executable(path) {
+            return Err(format!("Agent 可执行文件没有执行权限：{binary}"));
         }
-        return Ok(());
+        return Ok(path.to_path_buf());
     }
 
-    let path_var = std::env::var_os("PATH").unwrap_or_default();
-    for dir in std::env::split_paths(&path_var) {
+    // Not the inherited `PATH`: a bundled macOS app started from Finder only
+    // sees `/usr/bin:/bin:/usr/sbin:/sbin`, so `opencode` installed by Homebrew
+    // or npm would never be found there.
+    for dir in std::env::split_paths(shell_path::user_path()) {
         let candidate = dir.join(binary);
-        if !candidate.is_file() {
-            continue;
+        if shell_path::is_executable(&candidate) {
+            return Ok(candidate);
         }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let executable = std::fs::metadata(&candidate)
-                .map(|metadata| metadata.permissions().mode() & 0o111 != 0)
-                .unwrap_or(false);
-            if executable {
-                return Ok(());
-            }
-            continue;
-        }
-        #[cfg(not(unix))]
-        return Ok(());
     }
-    Err(format!("在 PATH 中找不到 Agent 可执行文件：{binary}"))
+    Err(format!(
+        "在 PATH 中找不到 Agent 可执行文件：{binary}（可在 Agent 设置里填写绝对路径）"
+    ))
 }
 
 /// True when the configured agent is opencode (MCP injection only applies to it).
@@ -3040,7 +3730,11 @@ fn detect_version(binary: &str) -> Result<String, String> {
         return Err("未配置 Agent 可执行文件路径".to_string());
     }
 
-    let mut child = std::process::Command::new(binary)
+    // Resolve through the user's shell PATH instead of the minimal one a
+    // Finder-launched app inherits.
+    let resolved = validate_binary(binary)?;
+    let mut child = std::process::Command::new(&resolved)
+        .env("PATH", shell_path::user_path())
         .arg("--version")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
@@ -3080,6 +3774,64 @@ fn detect_version(binary: &str) -> Result<String, String> {
         .unwrap_or_default()
         .trim()
         .to_string())
+}
+
+/// Persists a pasted resource and returns its absolute path. The agent only
+/// ever receives paths, never inline base64 or webview URLs.
+fn save_resource(data_dir: &Path, name: &str, data: &str) -> Result<String, String> {
+    use base64::Engine as _;
+
+    let encoded = data
+        .split_once(',')
+        .filter(|(head, _)| head.starts_with("data:"))
+        .map(|(_, body)| body)
+        .unwrap_or(data)
+        .trim();
+    if encoded.is_empty() {
+        return Err("资源内容为空".to_string());
+    }
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .map_err(|error| format!("资源解码失败：{error}"))?;
+    if bytes.is_empty() {
+        return Err("资源内容为空".to_string());
+    }
+
+    let dir = data_dir.join(RESOURCE_DIR);
+    std::fs::create_dir_all(&dir).map_err(|error| format!("创建资源目录失败：{error}"))?;
+
+    let stem: String = Path::new(name)
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("")
+        .chars()
+        .filter(|ch| ch.is_alphanumeric() || matches!(ch, '-' | '_' | '.'))
+        .take(48)
+        .collect();
+    let stem = if stem.is_empty() {
+        "resource".to_string()
+    } else {
+        stem
+    };
+    let extension: String = Path::new(name)
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("")
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .take(8)
+        .collect::<String>()
+        .to_ascii_lowercase();
+
+    let id = uuid::Uuid::new_v4().simple().to_string();
+    let file_name = if extension.is_empty() {
+        format!("{id}-{stem}")
+    } else {
+        format!("{id}-{stem}.{extension}")
+    };
+    let path = dir.join(file_name);
+    std::fs::write(&path, bytes).map_err(|error| format!("写入资源失败：{error}"))?;
+    Ok(path.to_string_lossy().to_string())
 }
 
 fn focus_main_window(app: &AppHandle) {
@@ -3216,9 +3968,93 @@ pub async fn request_review_from_mcp(app: &AppHandle, arguments: &Value) -> Resu
     core.request_review(&task_id, summary, files, risk).await
 }
 
+/// MCP `agent_task_report`: explicit lifecycle report for runtimes without ACP.
+/// This is the fallback that lets a non-ACP agent say "completed / failed /
+/// needs review" instead of us reverse-engineering its transcript.
+pub async fn task_report_from_mcp(app: &AppHandle, arguments: &Value) -> Result<Value, String> {
+    let core = app
+        .try_state::<Arc<AgentCore>>()
+        .ok_or_else(|| "Agent 模块尚未初始化".to_string())?;
+    let task_id = arguments
+        .get("taskId")
+        .or_else(|| arguments.get("task_id"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| "缺少参数 taskId".to_string())?
+        .to_string();
+    let status = arguments
+        .get("status")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default()
+        .to_string();
+    let message = arguments
+        .get("message")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|message| !message.is_empty())
+        .map(|message| truncate_text(message, 2_000));
+
+    match status.as_str() {
+        "completed" => {
+            core.finish_task(
+                &task_id,
+                PtyOutcome {
+                    exit_code: Some(0),
+                    completed: true,
+                    ..PtyOutcome::default()
+                },
+            );
+            core.stop_runtime(&task_id);
+            Ok(json!({ "status": "completed", "taskId": task_id }))
+        }
+        "failed" => {
+            core.fail_task(
+                &task_id,
+                message.unwrap_or_else(|| "Agent 报告任务失败".to_string()),
+            );
+            core.stop_runtime(&task_id);
+            Ok(json!({ "status": "failed", "taskId": task_id }))
+        }
+        "needs_review" => {
+            let summary = message.unwrap_or_else(|| "Agent 请求人工审核".to_string());
+            let files = match arguments.get("files") {
+                None => Vec::new(),
+                Some(Value::Array(items)) => items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::trim)
+                    .filter(|path| !path.is_empty())
+                    .map(|path| truncate_text(path, 300))
+                    .take(50)
+                    .collect(),
+                Some(_) => return Err("files 必须是字符串数组".to_string()),
+            };
+            let risk = arguments
+                .get("risk")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|risk| !risk.is_empty())
+                .map(|risk| truncate_text(risk, 500));
+            core.request_review(&task_id, summary, files, risk).await
+        }
+        "progress" => {
+            if let Some(task) = core.task_snapshot(&task_id) {
+                core.append_task_log(
+                    &task.log_path,
+                    message.as_deref().unwrap_or("Agent 进度更新"),
+                );
+            }
+            Ok(json!({ "status": "progress", "taskId": task_id }))
+        }
+        other => Err(format!("未知 status：{other}")),
+    }
+}
+
 pub async fn command(
     app: &AppHandle,
-    _state: &SharedState,
+    state: &SharedState,
     name: &str,
     payload: Value,
 ) -> Result<Value, String> {
@@ -3227,6 +4063,7 @@ pub async fn command(
         .ok_or_else(|| "Agent 模块尚未初始化".to_string())?;
 
     match name {
+        "agent_runtimes" => Ok(json!({ "runtimes": runtime_catalog() })),
         "agent_config_get" => {
             let config = core.config_snapshot();
             Ok(json!({ "config": config }))
@@ -3242,6 +4079,12 @@ pub async fn command(
                 .map_err(|error| format!("无效的入队参数：{error}"))?;
             let task = core.enqueue(&request, request.source.as_deref().unwrap_or("manual"))?;
             Ok(json!({ "task": task }))
+        }
+        "agent_save_resource" => {
+            let request: SaveResourceRequest = serde_json::from_value(payload)
+                .map_err(|error| format!("无效的资源参数：{error}"))?;
+            let path = save_resource(&state.paths.data_dir, &request.name, &request.data)?;
+            Ok(json!({ "path": path }))
         }
         "agent_tasks_list" => Ok(json!(core.tasks_state())),
         "agent_summary" => Ok(json!(core.summary())),
@@ -3268,6 +4111,21 @@ pub async fn command(
             }
             let task = core
                 .reply_permission(task_id, request.response, request.remember)
+                .await?;
+            Ok(json!({ "task": task }))
+        }
+        "agent_permission_option" => {
+            let request: PermissionOptionRequest = serde_json::from_value(payload)
+                .map_err(|error| format!("无效的权限选项参数：{error}"))?;
+            let task_id = request.task_id.trim();
+            if task_id.is_empty() {
+                return Err("缺少 taskId".to_string());
+            }
+            if request.option_id.trim().is_empty() {
+                return Err("缺少 optionId".to_string());
+            }
+            let task = core
+                .reply_permission_option(task_id, request.option_id.trim())
                 .await?;
             Ok(json!({ "task": task }))
         }
@@ -3387,18 +4245,24 @@ mod tests {
             error: None,
             prompt: "prompt".to_string(),
             source: "manual".to_string(),
+            runtime_id: DEFAULT_RUNTIME_ID.to_string(),
+            transport: "pty".to_string(),
             session_id: None,
             review: None,
             approval: None,
             commit_only: false,
             baseline_dirty: Vec::new(),
             baseline_head: None,
+            extra_prompt: String::new(),
+            attachments: Vec::new(),
         }
     }
 
     #[test]
     fn config_defaults_match_spec() {
         let config = AgentConfig::default();
+        assert_eq!(config.runtime_id, "opencode");
+        assert_eq!(config.transport, "acp");
         assert_eq!(config.binary_path, "opencode");
         assert!(config.repo_mappings.is_empty());
         assert_eq!(config.ready_quiet_ms, 900);
@@ -3423,6 +4287,8 @@ mod tests {
     #[test]
     fn config_is_sanitized() {
         let config = AgentConfig {
+            runtime_id: "  ".to_string(),
+            transport: "bogus".to_string(),
             binary_path: "   ".to_string(),
             repo_mappings: BTreeMap::from([
                 ("1".to_string(), "  /repo  ".to_string()),
@@ -3437,6 +4303,8 @@ mod tests {
         .sanitized();
 
         assert_eq!(config.binary_path, "opencode");
+        assert_eq!(config.runtime_id, "opencode");
+        assert_eq!(config.transport, "acp");
         assert_eq!(config.ready_quiet_ms, 100);
         assert_eq!(config.ready_timeout_ms, 120_000);
         assert_eq!(config.repo_mappings.len(), 0);
@@ -3452,6 +4320,40 @@ mod tests {
     }
 
     #[test]
+    fn runtime_catalog_declares_lifecycle_and_capabilities() {
+        let catalog = runtime_catalog();
+        let opencode = catalog
+            .iter()
+            .find(|runtime| runtime.id == "opencode")
+            .expect("opencode runtime");
+
+        assert!(opencode.available);
+        assert!(opencode.capabilities.interactive_terminal);
+        assert!(opencode.capabilities.external_decision);
+
+        let keys: Vec<&str> = opencode.lifecycle.iter().map(|stage| stage.key).collect();
+        for expected in [
+            "queued",
+            "preparing",
+            "running",
+            "waiting_review",
+            "awaiting_approval",
+            "succeeded",
+            "failed",
+            "canceled",
+        ] {
+            assert!(keys.contains(&expected), "missing stage {expected}");
+        }
+        assert!(opencode
+            .lifecycle
+            .iter()
+            .any(|stage| stage.needs_human && !stage.terminal));
+        assert!(!opencode.limitations.is_empty());
+        assert!(!opencode.fallback.is_empty());
+        assert!(runtime_descriptor("unknown").is_none());
+    }
+
+    #[test]
     fn renders_prompt_placeholders() {
         let vars = PromptVars {
             task_id: "task-42".to_string(),
@@ -3463,6 +4365,8 @@ mod tests {
             severity: "严重".to_string(),
             priority: "高".to_string(),
             project_rule: "只用 Rust 写".to_string(),
+            user_prompt: String::new(),
+            attachments: Vec::new(),
         };
 
         let rendered = render_prompt(
@@ -3487,6 +4391,8 @@ mod tests {
             severity: "s".to_string(),
             priority: "p".to_string(),
             project_rule: "先跑 cargo test".to_string(),
+            user_prompt: String::new(),
+            attachments: Vec::new(),
         };
 
         assert_eq!(
@@ -3507,9 +4413,72 @@ mod tests {
             severity: "s".to_string(),
             priority: "p".to_string(),
             project_rule: String::new(),
+            user_prompt: String::new(),
+            attachments: Vec::new(),
         };
 
         assert_eq!(render_prompt("{{title}}", &vars), "t");
+    }
+
+    #[test]
+    fn compose_sections_append_when_template_has_no_slot() {
+        let vars = PromptVars {
+            task_id: "task-1".to_string(),
+            title: "t".to_string(),
+            md_path: "m".to_string(),
+            repo_path: "r".to_string(),
+            workspace_name: "w".to_string(),
+            bug_id: "1".to_string(),
+            severity: "s".to_string(),
+            priority: "p".to_string(),
+            project_rule: String::new(),
+            user_prompt: "只改登录页".to_string(),
+            attachments: vec![
+                "/tmp/shot.png".to_string(),
+                "/tmp/demo.mp4".to_string(),
+                "/tmp/log.txt".to_string(),
+            ],
+        };
+
+        let rendered = render_prompt("修 {{title}}", &vars);
+        assert!(rendered.contains("用户补充说明：\n只改登录页"));
+        assert!(rendered.contains("- 图片：/tmp/shot.png"));
+        assert!(rendered.contains("- 视频：/tmp/demo.mp4"));
+        assert!(rendered.contains("- 文件：/tmp/log.txt"));
+    }
+
+    #[test]
+    fn pasted_resources_are_saved_as_paths() {
+        let dir = std::env::temp_dir().join(format!(
+            "tapd-agent-resource-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let path = save_resource(&dir, "截图 1.PNG", "aGVsbG8=").expect("save resource");
+        assert!(path.ends_with(".png"), "unexpected path: {path}");
+        assert_eq!(std::fs::read(&path).expect("read resource"), b"hello");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn compose_sections_use_explicit_slots() {
+        let vars = PromptVars {
+            task_id: "task-1".to_string(),
+            title: "t".to_string(),
+            md_path: "m".to_string(),
+            repo_path: "r".to_string(),
+            workspace_name: "w".to_string(),
+            bug_id: "1".to_string(),
+            severity: "s".to_string(),
+            priority: "p".to_string(),
+            project_rule: String::new(),
+            user_prompt: "只改登录页".to_string(),
+            attachments: vec!["/tmp/shot.png".to_string()],
+        };
+
+        assert_eq!(
+            render_prompt("说明：{{user_prompt}}｜资源：{{attachments}}", &vars),
+            "说明：只改登录页｜资源：- 图片：/tmp/shot.png"
+        );
     }
 
     #[test]
@@ -3774,6 +4743,8 @@ mod tests {
             action: "edit".to_string(),
             resource: "src/main.rs".to_string(),
             title: "允许编辑".to_string(),
+            options: Vec::new(),
+            transport: "opencode".to_string(),
         });
         tasks[4].approval = Some(TaskApproval {
             summary: "改了 2 个文件".to_string(),

@@ -1,0 +1,178 @@
+import { useEffect, useRef, useState } from "react";
+import { Check, ChevronDown, FolderGit2, Loader2 } from "lucide-react";
+import clsx from "clsx";
+
+import { agentApi } from "../lib/agent";
+import { api, type OpenTarget, type OpenTargetSet } from "../lib/api";
+
+type Props = {
+  workspaceId: string;
+  onError: (message: string) => void;
+};
+
+/**
+ * Header split button for the folder bound to a TAPD project: the left half
+ * opens it in the current editor, the caret picks another one. The target set
+ * is the `directory` kind, which only offers code editors (VS Code, Xcode,
+ * Zed, Cursor) plus Finder — folders never go to a browser or image viewer.
+ */
+export function ProjectOpenButton({ workspaceId, onError }: Props) {
+  const [repoPath, setRepoPath] = useState("");
+  const [targets, setTargets] = useState<OpenTargetSet | null>(null);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const rootRef = useRef<HTMLDivElement | null>(null);
+
+  // The folder lives in the agent config, so re-read it whenever the project
+  // changes. Switching views remounts this button, which picks up edits made
+  // in 项目管理.
+  useEffect(() => {
+    let cancelled = false;
+    setRepoPath("");
+    setTargets(null);
+
+    void agentApi
+      .configGet()
+      .then(({ config }) => {
+        if (cancelled) return;
+        const path = (config.projects?.[workspaceId]?.repoPath ?? "").trim();
+        setRepoPath(path);
+        if (!path) return;
+        return api
+          .openTargets("directory")
+          .then((set) => {
+            if (!cancelled) setTargets(set);
+          })
+          .catch(() => {
+            // Icons are decoration: the button still opens the folder.
+          });
+      })
+      .catch(() => {
+        // No config means no bound folder; the header stays clean.
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [workspaceId]);
+
+  useEffect(() => {
+    if (!menuOpen) return;
+
+    const close = () => setMenuOpen(false);
+    const onPointerDown = (event: MouseEvent) => {
+      if (rootRef.current?.contains(event.target as Node)) return;
+      close();
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") close();
+    };
+
+    window.addEventListener("mousedown", onPointerDown);
+    window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("resize", close);
+    window.addEventListener("blur", close);
+    return () => {
+      window.removeEventListener("mousedown", onPointerDown);
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("resize", close);
+      window.removeEventListener("blur", close);
+    };
+  }, [menuOpen]);
+
+  if (!repoPath) return null;
+
+  const selected =
+    targets?.targets.find((target) => target.id === targets.selected) ?? null;
+
+  const open = async () => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      // The visible choice wins even if saving it is still in flight.
+      await api.openDirectory(repoPath, targets?.selected);
+    } catch (error) {
+      onError(String(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const select = (id: string) => {
+    setMenuOpen(false);
+    setTargets((current) => (current ? { ...current, selected: id } : current));
+    void api
+      .setOpenTarget("directory", id)
+      .catch((error) => onError(String(error)));
+  };
+
+  return (
+    <div ref={rootRef} className="relative shrink-0">
+      <div className="inline-flex items-stretch overflow-hidden rounded-lg border border-slate-200 bg-white text-[11px] text-slate-600 shadow-sm">
+        <button
+          type="button"
+          onClick={() => void open()}
+          disabled={busy}
+          title={`用${selected?.label ?? "默认应用"}打开 ${repoPath}`}
+          className="inline-flex items-center gap-1.5 px-2.5 py-1.5 transition hover:bg-slate-50 disabled:opacity-60"
+        >
+          {busy ? (
+            <Loader2 size={13} className="shrink-0 animate-spin" />
+          ) : (
+            <TargetIcon target={selected} />
+          )}
+          打开
+        </button>
+        <button
+          type="button"
+          aria-label="选择打开项目的应用"
+          aria-expanded={menuOpen}
+          onClick={() => setMenuOpen((current) => !current)}
+          className="border-l border-slate-200 px-1 transition hover:bg-slate-50"
+        >
+          <ChevronDown size={11} />
+        </button>
+      </div>
+
+      {menuOpen ? (
+        <div className="absolute right-0 z-30 mt-1 w-52 overflow-hidden rounded-lg border border-slate-200 bg-white py-1 shadow-lg">
+          <p className="px-3 py-1 text-[10px] text-slate-400">用以下应用打开</p>
+          {(targets?.targets ?? []).map((target) => {
+            const active = target.id === targets?.selected;
+            return (
+              <button
+                key={target.id}
+                type="button"
+                onClick={() => select(target.id)}
+                className={clsx(
+                  "flex w-full items-center gap-2 px-3 py-1.5 text-left text-[11px] transition hover:bg-slate-50",
+                  active ? "text-slate-800" : "text-slate-600",
+                )}
+              >
+                <TargetIcon target={target} />
+                <span className="truncate">{target.label}</span>
+                {active ? <Check size={12} className="ml-auto text-sky-500" /> : null}
+              </button>
+            );
+          })}
+          {targets && targets.targets.length === 0 ? (
+            <p className="px-3 py-2 text-[11px] text-slate-400">没有可用的应用</p>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function TargetIcon({ target }: { target: OpenTarget | null }) {
+  if (target?.icon) {
+    return (
+      <img
+        src={target.icon}
+        alt={target.label}
+        className="h-4 w-4 shrink-0 rounded-[4px] object-contain"
+      />
+    );
+  }
+  return <FolderGit2 size={13} className="shrink-0" />;
+}

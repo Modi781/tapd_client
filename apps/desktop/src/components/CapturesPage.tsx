@@ -203,19 +203,31 @@ export function CapturesPage({ toast, onOpenPath }: Props) {
           />
         ) : (
           <div className="max-h-[calc(100vh-280px)] overflow-auto">
-            <table className="w-full border-collapse text-left">
-              <thead className="sticky top-0 z-10 bg-slate-50 text-[11px] uppercase tracking-wide text-slate-500">
+            <table className="w-full border-separate border-spacing-0 text-left">
+              <thead className="text-[11px] uppercase tracking-wide text-slate-500">
                 <tr>
-                  <th className="w-8 px-3 py-2" />
-                  <th className="w-16 px-3 py-2">时间</th>
-                  <th className="w-16 px-3 py-2">方法</th>
-                  <th className="w-14 px-3 py-2">状态</th>
-                  <th className="px-3 py-2">URL</th>
-                  <th className="w-20 px-3 py-2 text-right">大小</th>
-                  <th className="w-16 px-3 py-2 text-right">耗时</th>
+                  <th className="sticky top-0 z-10 w-8 bg-slate-50 px-3 py-2 shadow-[0_-2px_0_0_var(--color-slate-50)]" />
+                  <th className="sticky top-0 z-10 w-16 bg-slate-50 px-3 py-2 shadow-[0_-2px_0_0_var(--color-slate-50)]">
+                    时间
+                  </th>
+                  <th className="sticky top-0 z-10 w-16 bg-slate-50 px-3 py-2 shadow-[0_-2px_0_0_var(--color-slate-50)]">
+                    方法
+                  </th>
+                  <th className="sticky top-0 z-10 w-14 bg-slate-50 px-3 py-2 shadow-[0_-2px_0_0_var(--color-slate-50)]">
+                    状态
+                  </th>
+                  <th className="sticky top-0 z-10 bg-slate-50 px-3 py-2 shadow-[0_-2px_0_0_var(--color-slate-50)]">
+                    URL
+                  </th>
+                  <th className="sticky top-0 z-10 w-20 bg-slate-50 px-3 py-2 text-right shadow-[0_-2px_0_0_var(--color-slate-50)]">
+                    大小
+                  </th>
+                  <th className="sticky top-0 z-10 w-16 bg-slate-50 px-3 py-2 text-right shadow-[0_-2px_0_0_var(--color-slate-50)]">
+                    耗时
+                  </th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-slate-100">
+              <tbody className="[&>tr+tr>td]:border-t [&>tr+tr>td]:border-slate-100">
                 {filtered.map((entry) => {
                   const isOpen = expanded === entry.id;
                   return (

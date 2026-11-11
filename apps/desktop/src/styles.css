@@ -245,3 +245,74 @@ body {
     animation: none;
   }
 }
+
+/* Bottom sheet used for the Agent compose mode. */
+@keyframes agent-sheet-up {
+  from {
+    opacity: 0;
+    transform: translateY(28px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.agent-sheet-up {
+  animation: agent-sheet-up 240ms cubic-bezier(0.22, 0.9, 0.24, 1);
+}
+
+/* @uiw/react-md-editor ships enterprise-neutral defaults; align it with the
+   dense TAPD views instead of letting its larger type win. */
+.agent-compose-editor .w-md-editor {
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  box-shadow: none;
+  background: #fff;
+  font-family: var(--font-sans);
+  font-size: 12px;
+}
+
+.agent-compose-editor .w-md-editor:focus-within {
+  border-color: #38bdf8;
+  box-shadow: 0 0 0 2px rgb(224 242 254);
+}
+
+.agent-compose-editor .w-md-editor-toolbar {
+  border-bottom: 1px solid #f1f5f9;
+  border-radius: 12px 12px 0 0;
+  background: #f8fafc;
+  padding: 3px 6px;
+}
+
+.agent-compose-editor .w-md-editor-toolbar li > button {
+  color: #64748b;
+  height: 24px;
+  padding: 2px 5px;
+}
+
+.agent-compose-editor .w-md-editor-toolbar li > button:hover {
+  color: #0f172a;
+  background: #e2e8f0;
+}
+
+.agent-compose-editor .w-md-editor-text,
+.agent-compose-editor .w-md-editor-text-pre > code,
+.agent-compose-editor .w-md-editor-text-input {
+  font-family: var(--font-mono);
+  font-size: 12px !important;
+  line-height: 1.7 !important;
+}
+
+.agent-compose-editor .w-md-editor-preview {
+  box-shadow: inset 1px 0 0 0 #f1f5f9;
+  padding: 10px 14px;
+}
+
+.agent-compose-editor .wmde-markdown {
+  font-family: var(--font-sans);
+  font-size: 12px;
+  line-height: 1.7;
+  color: #334155;
+  background: transparent;
+}

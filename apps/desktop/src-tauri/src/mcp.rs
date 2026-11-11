@@ -228,6 +228,8 @@ async fn dispatch(
         "tapd_wait_notification" => crate::notification::mcp_wait(arguments).await,
         // Local agent only: pauses the running task for a commit decision.
         "tapd_request_review" => crate::agent::request_review_from_mcp(app, arguments).await,
+        // Local agent only: explicit lifecycle report for non-ACP runtimes.
+        "agent_task_report" => crate::agent::task_report_from_mcp(app, arguments).await,
         other => Err(format!("tool `{other}` is not available")),
     }
 }

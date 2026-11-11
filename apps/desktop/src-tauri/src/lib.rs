@@ -1,3 +1,4 @@
+mod acp;
 mod agent;
 mod bug_write;
 mod cache;
@@ -15,6 +16,7 @@ mod opencode;
 mod reset;
 mod server;
 mod session;
+mod shell_path;
 mod state;
 mod update;
 
@@ -61,6 +63,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_dialog::init())
         .manage(state.clone())
         .invoke_handler(tauri::generate_handler![
             commands::app_info,
@@ -103,6 +106,7 @@ pub fn run() {
             commands::capture_export,
             commands::clear_app_data,
             commands::open_path,
+            commands::open_directory,
             commands::open_media,
             commands::media_endpoint,
             commands::list_dirs,

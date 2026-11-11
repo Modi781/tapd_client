@@ -352,6 +352,9 @@ export const api = {
   clearCaptures: () => invoke<void>("capture_clear"),
   exportCaptures: () => invoke<string>("capture_export"),
   openPath: (path: string) => invoke<void>("open_path", { path }),
+  /** Opens a bound project folder in the saved editor (or `target`). */
+  openDirectory: (path: string, target?: string) =>
+    invoke<void>("open_directory", { path, target: target ?? null }),
   listDirs: (path?: string) => invoke<DirListing>("list_dirs", { path: path ?? null }),
   openMedia: (url: string, mode: OpenMediaMode, kind?: string, target?: string) =>
     invoke<string>("open_media", {

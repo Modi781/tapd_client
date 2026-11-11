@@ -8,6 +8,7 @@ import {
   Bug,
   Check,
   CheckCheck,
+  Copy,
   ExternalLink,
   FolderOpen,
   Hourglass,
@@ -25,6 +26,7 @@ import {
   AGENT_STATUS_TONES,
   agentApi,
   exportDirFor,
+  type AgentRuntimeDescriptor,
   type AgentTask,
   type AgentTaskStatus,
   type AgentTasksState,
@@ -76,8 +78,14 @@ export function AgentPage({
   // cleared when the active task changes so the terminal follows the worker.
   const [explicitTaskId, setExplicitTaskId] = useState<string | null>(null);
   const [permissionBusy, setPermissionBusy] = useState<PermissionReply | null>(null);
+  const [permissionOptionBusy, setPermissionOptionBusy] = useState<string | null>(null);
   const [actionBusy, setActionBusy] = useState<string | null>(null);
   const [resumeBusy, setResumeBusy] = useState<string | null>(null);
+  /** Current runtime descriptor; decides whether external decisions are allowed. */
+  const [runtime, setRuntime] = useState<AgentRuntimeDescriptor | null>(null);
+  const [terminalFocus, setTerminalFocus] = useState(0);
+  /** Set when the runtime rejects a desktop decision; UI falls back to review. */
+  const [replyFallback, setReplyFallback] = useState<string | null>(null);
 
   const appliedFocusRef = useRef<string | null>(null);
   const focusRefreshRef = useRef<string | null>(null);
@@ -123,6 +131,25 @@ export function AgentPage({
   useEffect(() => {
     setExplicitTaskId(null);
   }, [activeTaskId]);
+
+  // Runtime capability declaration. If the desktop cannot deliver a decision
+  // (or the runtime rejects it), the UI must point at the terminal instead of
+  // offering buttons that would silently fail.
+  useEffect(() => {
+    let cancelled = false;
+    void Promise.all([agentApi.configGet(), agentApi.runtimes()])
+      .then(([configResult, runtimeResult]) => {
+        if (cancelled) return;
+        const current = runtimeResult.runtimes.find(
+          (item) => item.id === configResult.config.runtimeId,
+        );
+        setRuntime(current ?? runtimeResult.runtimes[0] ?? null);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // Follow the island capsule's focus request. Terminal tasks belong to the
   // history tab; active/queued ones to the run tab.
@@ -192,6 +219,11 @@ export function AgentPage({
     selectedTask !== null &&
     (selectedTask.status === "running" || selectedTask.status === "waiting_review");
 
+  // A new permission prompt (or a different task) deserves a fresh attempt.
+  useEffect(() => {
+    setReplyFallback(null);
+  }, [selectedTask?.id, selectedTask?.review?.id]);
+
   const counts = useMemo(() => {
     const queued =
       tasksState?.queuedCount ??
@@ -235,13 +267,32 @@ export function AgentPage({
   const handlePermission = async (response: PermissionReply) => {
     if (!selectedTask?.review || permissionBusy) return;
     setPermissionBusy(response);
+    setReplyFallback(null);
     try {
       await agentApi.permissionReply(selectedTask.id, response, response === "always");
       await refresh();
     } catch (error) {
+      // The runtime did not accept the desktop decision. Never retry blindly:
+      // keep the review visible and point the user at the terminal.
+      setReplyFallback(String(error));
       toast("error", String(error));
     } finally {
       setPermissionBusy(null);
+    }
+  };
+
+  const handlePermissionOption = async (optionId: string) => {
+    if (!selectedTask?.review || permissionOptionBusy) return;
+    setPermissionOptionBusy(optionId);
+    setReplyFallback(null);
+    try {
+      await agentApi.permissionOption(selectedTask.id, optionId);
+      await refresh();
+    } catch (error) {
+      setReplyFallback(String(error));
+      toast("error", String(error));
+    } finally {
+      setPermissionOptionBusy(null);
     }
   };
 
@@ -306,6 +357,14 @@ export function AgentPage({
   };
 
   const canCancel = selectedTask !== null && ACTIVE_STATUSES.includes(selectedTask.status);
+  /** Capability says the desktop may not answer this runtime's prompts. */
+  const runtimeBlocksDecision =
+    runtime !== null && !runtime.capabilities.externalDecision;
+  const decisionFallbackText = `${runtime?.name ?? "当前运行时"} 不接受桌面回执，该确认请直接在任务中处理。`;
+  /** Only the PTY transport accepts keystrokes; ACP/process are read-only. */
+  const interactive =
+    selectedTask !== null && (selectedTask.transport ?? "pty") === "pty";
+  const reviewOptions = selectedTask?.review?.options ?? [];
 
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-3 p-4 pt-2.5">
@@ -616,52 +675,139 @@ export function AgentPage({
                     >
                       {selectedTask.review.action} · {selectedTask.review.resource}
                     </div>
+                    {replyFallback ? (
+                      <div
+                        className="mb-2 rounded-lg border border-rose-200 bg-white/70 px-2.5 py-1.5 text-[11px] leading-4 text-rose-700"
+                        title={replyFallback}
+                      >
+                        运行时没有接受这次回执，请重试或选择其他选项。
+                      </div>
+                    ) : null}
                     <div className="mt-2 flex flex-wrap items-center gap-1.5">
-                      <Button
-                        size="sm"
-                        variant="primary"
-                        icon={
-                          permissionBusy === "once" ? (
-                            <Loader2 size={12} className="animate-spin" />
+                      {runtimeBlocksDecision ? (
+                        <>
+                          <span className="min-w-0 flex-1 text-[11px] leading-4 text-amber-900">
+                            {decisionFallbackText}
+                          </span>
+                          {interactive ? (
+                            <Button
+                              size="sm"
+                              variant="secondary"
+                              icon={<Terminal size={12} />}
+                              onClick={() =>
+                                setTerminalFocus((value) => value + 1)
+                              }
+                            >
+                              去终端处理
+                            </Button>
                           ) : (
-                            <Check size={12} />
-                          )
-                        }
-                        disabled={permissionBusy !== null}
-                        onClick={() => void handlePermission("once")}
-                      >
-                        允许一次
-                      </Button>
-                      <Button
-                        size="sm"
-                        variant="secondary"
-                        icon={
-                          permissionBusy === "always" ? (
-                            <Loader2 size={12} className="animate-spin" />
-                          ) : (
-                            <CheckCheck size={12} />
-                          )
-                        }
-                        disabled={permissionBusy !== null}
-                        onClick={() => void handlePermission("always")}
-                      >
-                        总是允许
-                      </Button>
-                      <Button
-                        size="sm"
-                        variant="danger"
-                        icon={
-                          permissionBusy === "reject" ? (
-                            <Loader2 size={12} className="animate-spin" />
-                          ) : (
-                            <Ban size={12} />
-                          )
-                        }
-                        disabled={permissionBusy !== null}
-                        onClick={() => void handlePermission("reject")}
-                      >
-                        拒绝
-                      </Button>
+                            <Button
+                              size="sm"
+                              variant="secondary"
+                              icon={<Copy size={12} />}
+                              disabled={!selectedTask.sessionId}
+                              onClick={() => {
+                                if (selectedTask.sessionId) {
+                                  void navigator.clipboard.writeText(
+                                    selectedTask.sessionId,
+                                  );
+                                }
+                              }}
+                            >
+                              复制会话 ID
+                            </Button>
+                          )}
+                        </>
+                      ) : reviewOptions.length > 0 ? (
+                        <>
+                          {reviewOptions.map((option) => {
+                            const rejecting = option.kind.startsWith("reject");
+                            const always = option.kind === "allow_always";
+                            const busy = permissionOptionBusy === option.optionId;
+                            return (
+                              <Button
+                                key={option.optionId}
+                                size="sm"
+                                variant={
+                                  rejecting
+                                    ? "danger"
+                                    : always
+                                      ? "secondary"
+                                      : "primary"
+                                }
+                                icon={
+                                  busy ? (
+                                    <Loader2 size={12} className="animate-spin" />
+                                  ) : rejecting ? (
+                                    <Ban size={12} />
+                                  ) : always ? (
+                                    <CheckCheck size={12} />
+                                  ) : (
+                                    <Check size={12} />
+                                  )
+                                }
+                                disabled={
+                                  permissionOptionBusy !== null ||
+                                  permissionBusy !== null
+                                }
+                                onClick={() =>
+                                  void handlePermissionOption(option.optionId)
+                                }
+                              >
+                                {option.name}
+                              </Button>
+                            );
+                          })}
+                        </>
+                      ) : (
+                        <>
+                          <Button
+                            size="sm"
+                            variant="primary"
+                            icon={
+                              permissionBusy === "once" ? (
+                                <Loader2 size={12} className="animate-spin" />
+                              ) : (
+                                <Check size={12} />
+                              )
+                            }
+                            disabled={permissionBusy !== null}
+                            onClick={() => void handlePermission("once")}
+                          >
+                            允许一次
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="secondary"
+                            icon={
+                              permissionBusy === "always" ? (
+                                <Loader2 size={12} className="animate-spin" />
+                              ) : (
+                                <CheckCheck size={12} />
+                              )
+                            }
+                            disabled={permissionBusy !== null}
+                            onClick={() => void handlePermission("always")}
+                          >
+                            总是允许
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="danger"
+                            icon={
+                              permissionBusy === "reject" ? (
+                                <Loader2 size={12} className="animate-spin" />
+                              ) : (
+                                <Ban size={12} />
+                              )
+                            }
+                            disabled={permissionBusy !== null}
+                            onClick={() => void handlePermission("reject")}
+                          >
+                            拒绝
+                          </Button>
+                        </>
+                      )}
                     </div>
                   </div>
                 ) : null}
@@ -677,7 +823,9 @@ export function AgentPage({
                     <AgentTerminal
                       key={selectedTask.id}
                       taskId={selectedTask.id}
-                      interactive
+                      interactive={interactive}
+                      convertEol={!interactive}
+                      focusToken={terminalFocus}
                       className="h-full w-full"
                     />
                   </div>

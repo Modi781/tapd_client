@@ -1,18 +1,19 @@
 import { memo, useCallback, useEffect, useRef, useState } from "react";
-import type { ReactNode } from "react";
+import type { MouseEvent as ReactMouseEvent, ReactNode } from "react";
 import {
   Bug,
+  ChevronDown,
   ChevronLeft,
   ChevronRight,
-  Copy,
   ExternalLink,
-  Eye,
+  Hash,
   ListFilter,
   Loader2,
   RefreshCw,
   Search,
   ShieldAlert,
   Sparkles,
+  Type,
   UserPlus,
   UserRound,
   Users,
@@ -82,6 +83,10 @@ const SEVERITIES = [
  */
 const AUTO_REFRESH_MS = 30_000;
 
+/** Approximate row context menu box, used to keep it inside the window. */
+const MENU_WIDTH = 168;
+const MENU_HEIGHT = 100;
+
 type Scope = "mine" | "all";
 
 type Props = {
@@ -92,8 +97,11 @@ type Props = {
   onOpenBug: (bug: BugSummary) => void;
   /** Row actions (action column). */
   onOpenWeb?: (url: string) => void;
-  onCopyLink?: (url: string) => void;
+  /** Copy arbitrary text from the row context menu. */
+  onCopy?: (text: string) => void;
   onAgentFix?: (bug: BugSummary) => void;
+  /** Launch with a prompt/resources from the compose sheet. */
+  onAgentCompose?: (bug: BugSummary) => void;
   /** In-flight agent tasks keyed by workspace + bug. */
   agentInFlight?: Map<string, AgentInFlight>;
   /** Jump to an already queued/running task instead of enqueuing again. */
@@ -111,8 +119,9 @@ function BugListViewImpl(props: Props) {
     onScopeChange,
     onOpenBug,
     onOpenWeb,
-    onCopyLink,
+    onCopy,
     onAgentFix,
+    onAgentCompose,
     agentInFlight,
     onOpenAgentTask,
     onClaim,
@@ -139,6 +148,69 @@ function BugListViewImpl(props: Props) {
   const lastLoadedAtRef = useRef(0);
   /** Bug id whose claim request is in flight. */
   const [claimingId, setClaimingId] = useState<string | null>(null);
+  /** Right-click menu anchored at the pointer, on the row's bug. */
+  const [rowMenu, setRowMenu] = useState<{ x: number; y: number; bug: BugSummary } | null>(
+    null,
+  );
+  /** Menu entry that just copied, shown as "已复制" until the menu closes. */
+  const [copiedKey, setCopiedKey] = useState<"id" | "title" | null>(null);
+  const menuRef = useRef<HTMLDivElement | null>(null);
+  const copiedTimerRef = useRef<number | null>(null);
+
+  // Dismiss the row menu on any outside click, Escape, scroll, resize or blur.
+  useEffect(() => {
+    if (!rowMenu) return;
+
+    const close = () => setRowMenu(null);
+    const onPointerDown = (event: MouseEvent) => {
+      if (menuRef.current?.contains(event.target as Node)) return;
+      close();
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") close();
+    };
+
+    window.addEventListener("mousedown", onPointerDown);
+    window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("resize", close);
+    window.addEventListener("blur", close);
+    window.addEventListener("scroll", close, true);
+    return () => {
+      window.removeEventListener("mousedown", onPointerDown);
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("resize", close);
+      window.removeEventListener("blur", close);
+      window.removeEventListener("scroll", close, true);
+    };
+  }, [rowMenu]);
+
+  useEffect(
+    () => () => {
+      if (copiedTimerRef.current !== null) window.clearTimeout(copiedTimerRef.current);
+    },
+    [],
+  );
+
+  const openRowMenu = (event: ReactMouseEvent<HTMLTableRowElement>, bug: BugSummary) => {
+    event.preventDefault();
+    if (copiedTimerRef.current !== null) {
+      window.clearTimeout(copiedTimerRef.current);
+      copiedTimerRef.current = null;
+    }
+    setCopiedKey(null);
+    setRowMenu({ x: event.clientX, y: event.clientY, bug });
+  };
+
+  const copyFromMenu = (key: "id" | "title", text: string) => {
+    onCopy?.(text);
+    setCopiedKey(key);
+    if (copiedTimerRef.current !== null) window.clearTimeout(copiedTimerRef.current);
+    copiedTimerRef.current = window.setTimeout(() => {
+      copiedTimerRef.current = null;
+      setCopiedKey(null);
+      setRowMenu(null);
+    }, 700);
+  };
 
   useEffect(() => {
     const timer = window.setTimeout(() => setDebouncedKeyword(keyword.trim()), 300);
@@ -468,22 +540,41 @@ function BugListViewImpl(props: Props) {
         ) : null}
 
         {!error && page && page.bugs.length > 0 ? (
-          <table className="w-full min-w-[1040px] border-collapse text-left">
-            <thead className="sticky top-0 z-20 bg-slate-50 text-[11px] uppercase tracking-wide text-slate-500">
+          <table className="w-full min-w-[1040px] border-separate border-spacing-0 text-left">
+            <thead className="text-[11px] uppercase tracking-wide text-slate-500">
               <tr>
-                <th className="min-w-[320px] px-4 py-2.5 font-medium">标题</th>
-                <th className="w-[92px] px-3 py-2.5 font-medium">状态</th>
-                <th className="w-[76px] px-3 py-2.5 font-medium">优先级</th>
-                <th className="w-[100px] px-3 py-2.5 font-medium">严重程度</th>
-                <th className="w-[104px] px-3 py-2.5 font-medium">处理人</th>
-                <th className="w-[88px] px-3 py-2.5 font-medium">创建人</th>
-                <th className="w-[136px] px-4 py-2.5 font-medium">创建时间</th>
-                <th className="sticky right-0 z-30 w-[124px] border-l border-slate-200/70 bg-slate-50 px-3 py-2.5 text-right font-medium">
+                <th className="sticky top-0 z-20 min-w-[320px] bg-slate-50 px-4 py-2.5 font-medium shadow-[0_-2px_0_0_var(--color-slate-50)]">
+                  标题
+                </th>
+                <th className="sticky top-0 z-20 w-[92px] bg-slate-50 px-3 py-2.5 font-medium shadow-[0_-2px_0_0_var(--color-slate-50)]">
+                  状态
+                </th>
+                <th className="sticky top-0 z-20 w-[76px] bg-slate-50 px-3 py-2.5 font-medium shadow-[0_-2px_0_0_var(--color-slate-50)]">
+                  优先级
+                </th>
+                <th className="sticky top-0 z-20 w-[100px] bg-slate-50 px-3 py-2.5 font-medium shadow-[0_-2px_0_0_var(--color-slate-50)]">
+                  严重程度
+                </th>
+                <th className="sticky top-0 z-20 w-[104px] bg-slate-50 px-3 py-2.5 font-medium shadow-[0_-2px_0_0_var(--color-slate-50)]">
+                  处理人
+                </th>
+                <th className="sticky top-0 z-20 w-[88px] bg-slate-50 px-3 py-2.5 font-medium shadow-[0_-2px_0_0_var(--color-slate-50)]">
+                  创建人
+                </th>
+                <th className="sticky top-0 z-20 w-[136px] bg-slate-50 px-4 py-2.5 font-medium shadow-[0_-2px_0_0_var(--color-slate-50)]">
+                  创建时间
+                </th>
+                <th className="sticky top-0 right-0 z-30 w-[96px] border-l border-slate-200/70 bg-slate-50 px-2 py-2.5 text-right font-medium shadow-[0_-2px_0_0_var(--color-slate-50)]">
                   操作
                 </th>
               </tr>
             </thead>
-            <tbody className={clsx("divide-y divide-slate-100", loading && "opacity-60")}>
+            <tbody
+              className={clsx(
+                "[&>tr+tr>td]:border-t [&>tr+tr>td]:border-slate-100",
+                loading && "opacity-60",
+              )}
+            >
               {page.bugs.map((bug) => {
                 const agent = agentInFlight?.get(
                   agentBugKey(bug.workspaceId, bug.id),
@@ -492,6 +583,7 @@ function BugListViewImpl(props: Props) {
                 <tr
                   key={bug.id}
                   onClick={() => onOpenBug(bug)}
+                  onContextMenu={(event) => openRowMenu(event, bug)}
                   className="group cursor-pointer bg-white text-xs transition hover:bg-sky-50"
                 >
                   <td className="min-w-[320px] max-w-0 px-4 py-2.5">
@@ -603,34 +695,12 @@ function BugListViewImpl(props: Props) {
                         </button>
                       </div>
                     ) : (
-                      <div className="flex items-center justify-end gap-0.5">
-                        <RowAction
-                          label="查看详情"
-                          onClick={() => onOpenBug(bug)}
-                          icon={<Eye size={13} />}
-                        />
-                        {onOpenWeb ? (
-                          <RowAction
-                            label="在 TAPD 中打开"
-                            onClick={() => onOpenWeb(bug.bugUrl)}
-                            icon={<ExternalLink size={13} />}
-                          />
-                        ) : null}
-                        {onCopyLink ? (
-                          <RowAction
-                            label="复制链接"
-                            onClick={() => onCopyLink(bug.bugUrl)}
-                            icon={<Copy size={13} />}
-                          />
-                        ) : null}
-                        {onAgentFix ? (
-                          <RowAction
-                            label="用 Agent 修复"
-                            onClick={() => onAgentFix(bug)}
-                            icon={<Sparkles size={13} />}
-                          />
-                        ) : null}
-                      </div>
+                      <AgentRowAction
+                        onFix={() => onAgentFix?.(bug)}
+                        onCompose={
+                          onAgentCompose ? () => onAgentCompose(bug) : undefined
+                        }
+                      />
                     )}
                   </td>
                 </tr>
@@ -670,6 +740,43 @@ function BugListViewImpl(props: Props) {
           </div>
         </div>
       ) : null}
+
+      {rowMenu ? (
+        <div
+          ref={menuRef}
+          role="menu"
+          aria-label="缺陷快捷操作"
+          style={{
+            left: Math.max(8, Math.min(rowMenu.x, window.innerWidth - MENU_WIDTH - 8)),
+            top: Math.max(8, Math.min(rowMenu.y, window.innerHeight - MENU_HEIGHT - 8)),
+          }}
+          className="fixed z-50 w-[168px] overflow-hidden rounded-lg border border-slate-200 bg-white py-1 shadow-xl"
+          onContextMenu={(event) => event.preventDefault()}
+        >
+          <RowMenuItem
+            icon={<Hash size={12} />}
+            label={copiedKey === "id" ? "已复制 ID" : "复制 ID"}
+            done={copiedKey === "id"}
+            onClick={() => copyFromMenu("id", rowMenu.bug.shortId || rowMenu.bug.id)}
+          />
+          <RowMenuItem
+            icon={<Type size={12} />}
+            label={copiedKey === "title" ? "已复制标题" : "复制标题"}
+            done={copiedKey === "title"}
+            onClick={() => copyFromMenu("title", rowMenu.bug.title)}
+          />
+          {onOpenWeb ? (
+            <RowMenuItem
+              icon={<ExternalLink size={12} />}
+              label="在 TAPD 中打开"
+              onClick={() => {
+                onOpenWeb(rowMenu.bug.bugUrl);
+                setRowMenu(null);
+              }}
+            />
+          ) : null}
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -681,19 +788,66 @@ function BugListViewImpl(props: Props) {
  */
 export const BugListView = memo(BugListViewImpl);
 
-function RowAction(props: { label: string; icon: ReactNode; onClick: () => void }) {
+/**
+ * Compact split action: the label launches the default prompt, the caret opens
+ * the compose sheet for extra instructions or resources.
+ */
+function AgentRowAction(props: {
+  onFix: () => void;
+  onCompose?: () => void;
+}) {
+  return (
+    <div className="flex items-center justify-end">
+      <button
+        type="button"
+        title="用 Agent 修复"
+        onClick={(event) => {
+          event.stopPropagation();
+          props.onFix();
+        }}
+        className="inline-flex h-6 items-center gap-1 rounded-l-md border border-slate-200 bg-white px-2 text-[11px] font-medium text-slate-600 transition hover:border-sky-300 hover:bg-sky-50 hover:text-sky-700"
+      >
+        <Sparkles size={12} />
+        修复
+      </button>
+      {props.onCompose ? (
+        <button
+          type="button"
+          title="添加补充说明或资源后启动"
+          aria-label="添加补充说明或资源后启动"
+          onClick={(event) => {
+            event.stopPropagation();
+            props.onCompose?.();
+          }}
+          className="grid h-6 w-6 place-items-center rounded-r-md border border-l-0 border-slate-200 bg-white text-slate-400 transition hover:border-sky-300 hover:bg-sky-50 hover:text-sky-700"
+        >
+          <ChevronDown size={12} />
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
+function RowMenuItem(props: {
+  label: string;
+  icon: ReactNode;
+  done?: boolean;
+  onClick: () => void;
+}) {
   return (
     <button
       type="button"
-      title={props.label}
-      aria-label={props.label}
-      onClick={(event) => {
-        event.stopPropagation();
-        props.onClick();
-      }}
-      className="grid h-6 w-6 place-items-center rounded-md text-slate-400 transition hover:bg-white hover:text-slate-700 hover:shadow-sm"
+      role="menuitem"
+      onClick={props.onClick}
+      className={clsx(
+        "flex w-full items-center gap-2 px-3 py-1.5 text-left text-[11px] transition",
+        props.done
+          ? "bg-emerald-50 text-emerald-700"
+          : "text-slate-600 hover:bg-sky-50 hover:text-slate-900",
+      )}
     >
-      {props.icon}
+      <span className={props.done ? "text-emerald-600" : "text-slate-400"}>{props.icon}</span>
+      {props.label}
     </button>
   );
 }

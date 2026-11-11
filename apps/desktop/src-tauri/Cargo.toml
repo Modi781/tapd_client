@@ -31,6 +31,7 @@ base64 = "0.21"
 rusqlite = { version = "0.41", features = ["bundled"] }
 toml_edit = "0.22"
 tapd-core = { path = "../../../crates/tapd-core" }
+tauri-plugin-dialog = "2"
 
 [features]
 custom-protocol = ["tauri/custom-protocol"]

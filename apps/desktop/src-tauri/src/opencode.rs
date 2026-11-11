@@ -56,6 +56,13 @@ pub struct PermissionReview {
     pub action: String,
     pub resource: String,
     pub title: String,
+    /// ACP permission options, in the order the agent offered them. Empty for
+    /// the legacy opencode 3-way prompt.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<crate::acp::PermissionOption>,
+    /// `opencode` for the PTY path, `acp` for the protocol path.
+    #[serde(default)]
+    pub transport: String,
 }
 
 /// Which HTTP surface the running opencode server exposes.
@@ -130,6 +137,9 @@ impl ServerProcess {
 
         let mut command = Command::new(binary);
         command
+            // A Finder-launched app only has `/usr/bin:/bin:/usr/sbin:/sbin`;
+            // the server needs the user's shell PATH for its own tool calls.
+            .env("PATH", crate::shell_path::user_path())
             .arg("serve")
             .arg("--hostname")
             .arg("127.0.0.1")
@@ -745,6 +755,8 @@ fn review_from_object(value: &Value) -> Option<PermissionReview> {
         action,
         resource,
         title,
+        options: Vec::new(),
+        transport: "opencode".to_string(),
     })
 }
 
@@ -884,6 +896,8 @@ mod tests {
                 action: "edit".to_string(),
                 resource: "src/main.rs".to_string(),
                 title: "允许编辑？".to_string(),
+                options: Vec::new(),
+                transport: "opencode".to_string(),
             })
         );
         assert_eq!(event_session_id(&event).as_deref(), Some("ses_1"));

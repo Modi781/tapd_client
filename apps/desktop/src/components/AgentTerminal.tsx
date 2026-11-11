@@ -10,6 +10,10 @@ type Props = {
   taskId: string;
   /** Forward keystrokes and PTY resizes; only while the task is alive. */
   interactive: boolean;
+  /** Translate LF to CRLF for non-PTY output such as ACP logs. */
+  convertEol?: boolean;
+  /** Increment to move keyboard focus into the terminal (e.g. "去终端处理"). */
+  focusToken?: number;
   className?: string;
 };
 
@@ -56,7 +60,13 @@ const TUI_MODES = "\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h\x1b[?2004h";
  * While the task is alive the panel is bidirectional: keystrokes go back to the
  * PTY and the PTY is resized to the panel, which makes the TUI re-layout.
  */
-export function AgentTerminal({ taskId, interactive, className }: Props) {
+export function AgentTerminal({
+  taskId,
+  interactive,
+  convertEol = false,
+  focusToken,
+  className,
+}: Props) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const termRef = useRef<Terminal | null>(null);
   // Read from the terminal callbacks without re-creating the emulator.
@@ -68,7 +78,7 @@ export function AgentTerminal({ taskId, interactive, className }: Props) {
     if (!host) return;
 
     const term = new Terminal({
-      convertEol: false,
+      convertEol,
       cursorBlink: interactiveRef.current,
       // 鼠标上报打开后，macOS 上用 Option+拖动才能选中文本（同 iTerm）。
       macOptionClickForcesSelection: true,
@@ -154,7 +164,7 @@ export function AgentTerminal({ taskId, interactive, className }: Props) {
       term.dispose();
       termRef.current = null;
     };
-  }, [taskId]);
+  }, [taskId, convertEol]);
 
   // The task can finish while the panel stays open: stop accepting input and
   // sync the size one last time.
@@ -166,6 +176,12 @@ export function AgentTerminal({ taskId, interactive, className }: Props) {
     term.focus();
     void agentApi.resize(taskId, term.cols, term.rows).catch(() => {});
   }, [interactive, taskId]);
+
+  // External "focus terminal" request; the terminal effect above owns creation.
+  useEffect(() => {
+    if (focusToken === undefined) return;
+    termRef.current?.focus();
+  }, [focusToken]);
 
   return <div ref={hostRef} data-agent-terminal className={className} />;
 }
