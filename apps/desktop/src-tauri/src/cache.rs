@@ -451,12 +451,12 @@ impl Cache {
                 tx.execute(
                     "INSERT INTO agent_tasks (
                         id, workspace_id, workspace_name, bug_id, title, severity,
-                        priority, status, session_id, repo_path, log_path, md_path,
+                        priority, status, repo_path, log_path, md_path,
                         source, created_at, started_at, finished_at, exit_code, error,
-                        runtime_id, transport, payload, updated_at
+                        runtime_id, payload, updated_at
                      ) VALUES (
-                        ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
-                        ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22
+                        ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
+                        ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20
                      )
                      ON CONFLICT(id) DO UPDATE SET
                         workspace_id = excluded.workspace_id,
@@ -466,7 +466,6 @@ impl Cache {
                         severity = excluded.severity,
                         priority = excluded.priority,
                         status = excluded.status,
-                        session_id = excluded.session_id,
                         repo_path = excluded.repo_path,
                         log_path = excluded.log_path,
                         md_path = excluded.md_path,
@@ -477,7 +476,6 @@ impl Cache {
                         exit_code = excluded.exit_code,
                         error = excluded.error,
                         runtime_id = excluded.runtime_id,
-                        transport = excluded.transport,
                         payload = excluded.payload,
                         updated_at = excluded.updated_at",
                     params![
@@ -489,7 +487,6 @@ impl Cache {
                         task.severity,
                         task.priority,
                         status,
-                        task.session_id,
                         task.repo_path,
                         task.log_path,
                         task.md_path,
@@ -500,7 +497,6 @@ impl Cache {
                         task.exit_code,
                         task.error,
                         task.runtime_id,
-                        task.transport,
                         payload,
                         updated_at
                     ],
@@ -856,9 +852,6 @@ mod tests {
             prompt: "prompt".to_string(),
             source: "manual".to_string(),
             runtime_id: "opencode".to_string(),
-            transport: "acp".to_string(),
-            session_id: Some("ses_1".to_string()),
-            review: None,
             approval: None,
             commit_only: false,
             extra_prompt: String::new(),
@@ -879,7 +872,7 @@ mod tests {
         {
             let guard = cache.conn.lock().expect("cache lock");
             let conn = guard.as_ref().expect("cache connection");
-            let (status, session, payload): (String, String, String) = conn
+            let (status, session, payload): (String, Option<String>, String) = conn
                 .query_row(
                     "SELECT status, session_id, payload FROM agent_tasks WHERE id = 'task-1'",
                     [],
@@ -887,7 +880,9 @@ mod tests {
                 )
                 .expect("persisted row");
             assert_eq!(status, "succeeded");
-            assert_eq!(session, "ses_1");
+            // The column is kept for older databases but new rows no longer
+            // carry a session id.
+            assert_eq!(session, None);
             assert!(payload.contains("\"prompt\":\"prompt\""));
         }
 

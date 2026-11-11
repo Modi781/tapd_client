@@ -624,7 +624,7 @@ fn tool_definitions() -> Value {
         },
         {
             "name": "agent_task_report",
-            "description": "仅用于客户端 Agent 修复流程（非 ACP 运行时）：向 TAPD 客户端回报任务生命周期。status=completed 表示修复并回写完成；failed 表示无法完成；needs_review 表示需要人工确认（附带 summary/files/risk）；progress 仅追加一条进度说明。ACP 运行时不需要调用本工具。",
+            "description": "仅用于客户端 Agent 修复流程（通用 TUI 运行时）：向 TAPD 客户端回报任务生命周期。status=completed 表示修复并回写完成；failed 表示无法完成；needs_review 表示需要人工确认（附带 summary/files/risk）；progress 仅追加一条进度说明。opencode 由私有 server 判定轮次结束，不需要调用本工具。",
             "inputSchema": {
                 "type": "object",
                 "properties": {

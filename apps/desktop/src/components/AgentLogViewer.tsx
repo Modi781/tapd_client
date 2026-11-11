@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { Copy, ExternalLink, FolderOpen, ScrollText, X } from "lucide-react";
+import { Copy, FolderOpen, ScrollText, X } from "lucide-react";
 
 import { agentApi, type AgentTask, type AgentTaskStatus } from "../lib/agent";
 import { stripAnsi } from "../lib/ansi";
@@ -8,12 +8,7 @@ import { bugTitle } from "../lib/bug";
 import { AgentTerminal } from "./AgentTerminal";
 
 /** Statuses where the PTY is still alive and accepts keystrokes. */
-const LIVE_STATUSES: AgentTaskStatus[] = [
-  "queued",
-  "preparing",
-  "running",
-  "waiting_review",
-];
+const LIVE_STATUSES: AgentTaskStatus[] = ["running"];
 
 type Props = {
   task: AgentTask | null;
@@ -27,9 +22,7 @@ type Props = {
  */
 export function AgentLogViewer({ task, onClose, toast }: Props) {
   const [copied, setCopied] = useState(false);
-  const interactive = task
-    ? (task.transport ?? "pty") === "pty" && LIVE_STATUSES.includes(task.status)
-    : false;
+  const interactive = task !== null && LIVE_STATUSES.includes(task.status);
   // Escape must reach the TUI while the user is typing in it.
   const interactiveRef = useRef(interactive);
   interactiveRef.current = interactive;
@@ -72,14 +65,6 @@ export function AgentLogViewer({ task, onClose, toast }: Props) {
     );
   };
 
-  const resume = async () => {
-    try {
-      await agentApi.openSession(task.id);
-    } catch (reason) {
-      toast("error", String(reason));
-    }
-  };
-
   return (
     <div
       className="fixed inset-0 z-[80] flex items-center justify-center bg-slate-900/30 p-6 backdrop-blur-[1px]"
@@ -100,9 +85,6 @@ export function AgentLogViewer({ task, onClose, toast }: Props) {
               <span>
                 {task.workspaceName || task.workspaceId} · #{task.bugId.slice(-7)}
               </span>
-              {task.sessionId ? (
-                <span className="truncate font-mono">{task.sessionId}</span>
-              ) : null}
               <span className="truncate font-mono" title={task.logPath}>
                 {task.logPath}
               </span>
@@ -123,7 +105,7 @@ export function AgentLogViewer({ task, onClose, toast }: Props) {
             key={task.id}
             taskId={task.id}
             interactive={interactive}
-            convertEol={task.transport !== "pty"}
+            convertEol={!interactive}
             className="h-full w-full"
           />
         </div>
@@ -150,16 +132,6 @@ export function AgentLogViewer({ task, onClose, toast }: Props) {
               ? "实时终端：可直接输入，窗口大小会同步给 Agent"
               : "已结束的任务只回放输出，不能输入"}
           </span>
-          {task.sessionId ? (
-            <button
-              type="button"
-              onClick={() => void resume()}
-              className="inline-flex items-center gap-1 rounded-md border border-border px-2 py-1 text-ui-sm text-slate-600 transition hover:border-slate-300"
-            >
-              <ExternalLink size={11} />
-              终端恢复
-            </button>
-          ) : null}
         </footer>
       </div>
     </div>

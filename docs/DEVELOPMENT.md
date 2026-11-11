@@ -43,8 +43,23 @@ CI（`.github/workflows/ci.yml`）会依次执行前端类型检查、构建 deb
 
 需先 `pnpm dev` 并完成登录：
 
+opencode v2.2+ 需要把条目直接写在 `mcp.tapd` 下（`mcp.servers` 会被启动校验拒绝）。在项目或全局 `opencode.json[c]` 中加入：
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "tapd": {
+      "type": "local",
+      "command": ["/绝对路径/tapd_client/target/debug/tapd-mcp"]
+    }
+  }
+}
+```
+
+然后确认：
+
 ```bash
-opencode mcp add tapd -- "$PWD/target/debug/tapd-mcp"
 opencode mcp list     # ✓ tapd connected
 ```
 

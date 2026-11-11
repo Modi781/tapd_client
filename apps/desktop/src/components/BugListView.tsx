@@ -35,6 +35,7 @@ import {
   type Workspace,
 } from "../lib/api";
 import { bugTitle, isMyBug } from "../lib/bug";
+import { useCurrentAgent } from "../lib/useCurrentAgent";
 import {
   agentBugKey,
   agentInFlightLabel,
@@ -253,6 +254,8 @@ function BugListViewImpl(props: Props) {
     refreshToken,
   } = props;
 
+  /** Runtime name shown on the row's fix button. */
+  const currentAgent = useCurrentAgent();
   const [initialFilters] = useState(loadFilters);
   const [statusFilter, setStatusFilter] = useState<string[]>(
     initialFilters.statuses,
@@ -946,8 +949,7 @@ function BugListViewImpl(props: Props) {
                           }}
                           className={clsx(
                             "inline-flex max-w-full items-center gap-1 rounded-md border px-2 py-1 text-ui-sm font-normal transition",
-                            agent.task.status === "waiting_review" ||
-                              agent.task.status === "awaiting_approval"
+                            agent.task.status === "awaiting_approval"
                               ? "border-amber-200 bg-amber-50 text-amber-700 hover:border-amber-300 hover:bg-amber-100"
                               : agent.task.status === "queued"
                                 ? "border-border bg-slate-50 text-slate-600 hover:border-slate-300 hover:bg-slate-100"
@@ -956,8 +958,7 @@ function BugListViewImpl(props: Props) {
                         >
                           {agent.task.status === "queued" ? (
                             <Sparkles size={12} className="shrink-0" />
-                          ) : agent.task.status === "waiting_review" ||
-                            agent.task.status === "awaiting_approval" ? (
+                          ) : agent.task.status === "awaiting_approval" ? (
                             <ShieldAlert size={12} className="shrink-0" />
                           ) : (
                             <Loader2 size={12} className="shrink-0 animate-spin" />
@@ -989,6 +990,7 @@ function BugListViewImpl(props: Props) {
                       </div>
                     ) : (
                       <AgentRowAction
+                        agentName={currentAgent?.name}
                         onFix={() => onAgentFix?.(bug)}
                         onCompose={
                           onAgentCompose ? () => onAgentCompose(bug) : undefined
@@ -1084,16 +1086,18 @@ export const BugListView = memo(BugListViewImpl);
  * the compose sheet for extra instructions or resources.
  */
 function AgentRowAction(props: {
+  agentName?: string;
   onFix: () => void;
   onCompose?: () => void;
 }) {
+  const label = props.agentName ? `用 ${props.agentName} 修复` : "用 Agent 修复";
   return (
     <div className="flex items-center justify-end whitespace-nowrap">
       <div className="inline-flex shrink-0 overflow-hidden rounded-lg border border-border bg-surface">
         <button
           type="button"
-          title="用 Agent 修复"
-          aria-label="用 Agent 修复"
+          title={label}
+          aria-label={label}
           onClick={(event) => {
             event.stopPropagation();
             props.onFix();

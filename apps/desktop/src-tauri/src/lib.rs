@@ -1,4 +1,3 @@
-mod acp;
 mod agent;
 mod bug_write;
 mod cache;
@@ -12,7 +11,6 @@ mod mcp_import;
 mod notification;
 mod notification_db;
 mod open_with;
-mod opencode;
 mod reset;
 mod server;
 mod session;

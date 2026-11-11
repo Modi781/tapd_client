@@ -3,7 +3,7 @@
 //! Each client gets a user-scope entry pointing at the bundled `tapd-mcp`
 //! sidecar:
 //!
-//! - opencode: `<config>/opencode.json[c]` → `mcp.servers.tapd`
+//! - opencode: `<config>/opencode.json[c]` → `mcp.tapd`
 //! - Claude Code: `claude mcp add --scope user` (writes `~/.claude.json`)
 //! - Cursor: `~/.cursor/mcp.json` → `mcpServers.tapd`
 //! - Codex: `~/.codex/config.toml` → `[mcp_servers.tapd]`
@@ -375,15 +375,98 @@ fn tapd_entry(command_path: &str) -> Value {
     json!({ "type": "local", "command": [command_path] })
 }
 
-/// Merges `mcp.servers.tapd` into the opencode JSON config at `path`.
+/// Merges `mcp.tapd` into the opencode JSON config at `path`.
+///
+/// opencode v2.2.x validates `mcp` as a map of server configs. The older
+/// `mcp.servers.<name>` wrapper is read as a server named `servers` and makes
+/// startup fail (`Missing key mcp.servers.enabled`), so an existing wrapper is
+/// migrated to direct entries on the next import.
 fn ensure_mcp_in_file(path: &Path, command_path: &str) -> Result<MergeOutcome, String> {
-    ensure_json_entry(
-        path,
-        &["mcp", "servers", "tapd"],
-        tapd_entry(command_path),
-        json!({ "$schema": CONFIG_SCHEMA }),
-        "opencode",
-    )
+    let existing = read_existing(path, "opencode")?;
+    let (mut config, existed) = match existing {
+        Some(raw) => {
+            let value: Value = serde_json::from_str(&raw).map_err(|error| {
+                format!(
+                    "无法解析 {}（可能是带注释的 JSONC）：{error}。为避免破坏已有内容，未做任何修改。",
+                    path.display()
+                )
+            })?;
+            if !value.is_object() {
+                return Err(format!(
+                    "{} 的根节点不是 JSON 对象，未做任何修改",
+                    path.display()
+                ));
+            }
+            (value, true)
+        }
+        None => (json!({ "$schema": CONFIG_SCHEMA }), false),
+    };
+
+    let mut changed = migrate_opencode_servers(&mut config);
+    let desired = tapd_entry(command_path);
+    if config.pointer("/mcp/tapd") != Some(&desired) {
+        let mcp = config
+            .as_object_mut()
+            .ok_or_else(|| format!("{} 的根节点不是 JSON 对象", path.display()))?
+            .entry("mcp")
+            .or_insert_with(|| Value::Object(Map::new()));
+        let mcp = mcp.as_object_mut().ok_or_else(|| {
+            format!(
+                "opencode 配置中的 mcp 字段不是对象，未做任何修改：{}",
+                path.display()
+            )
+        })?;
+        mcp.insert("tapd".to_string(), desired);
+        changed = true;
+    }
+
+    if !changed {
+        return Ok(MergeOutcome {
+            changed: false,
+            backup_path: None,
+        });
+    }
+
+    let mut rendered = serde_json::to_string_pretty(&config).map_err(|error| error.to_string())?;
+    rendered.push('\n');
+    let backup_path = if existed {
+        let backup = backup_path_for(path);
+        std::fs::copy(path, &backup)
+            .map_err(|error| format!("备份 {} 失败：{error}", path.display()))?;
+        Some(backup)
+    } else {
+        None
+    };
+    write_atomic(path, rendered.as_bytes())?;
+    Ok(MergeOutcome {
+        changed: true,
+        backup_path,
+    })
+}
+
+/// Hoists `mcp.servers.<name>` entries into `mcp.<name>` and drops the
+/// wrapper. Direct entries win so a user's existing config is never replaced.
+fn migrate_opencode_servers(config: &mut Value) -> bool {
+    let Some(mcp) = config
+        .get_mut("mcp")
+        .and_then(Value::as_object_mut)
+    else {
+        return false;
+    };
+    match mcp.remove("servers") {
+        Some(Value::Object(entries)) => {
+            for (name, server) in entries {
+                mcp.entry(name).or_insert(server);
+            }
+            true
+        }
+        Some(other) => {
+            // Not the wrapper shape; put it back untouched.
+            mcp.insert("servers".to_string(), other);
+            false
+        }
+        None => false,
+    }
 }
 
 /// Merges `mcp.servers.tapd` into ZCode's `~/.zcode/cli/config.json`.
@@ -663,7 +746,10 @@ fn backup_existing(path: &Path, exists: bool) -> Result<Option<PathBuf>, String>
 
 /// Whether the given opencode config already points at this sidecar.
 pub(crate) fn is_imported_in(path: &Path, command_path: &str) -> bool {
-    json_entry_matches(path, &["mcp", "servers", "tapd", "command"], command_path)
+    // Accept the legacy wrapper too, so the UI does not offer an import for a
+    // config that still works before the next migration.
+    json_entry_matches(path, &["mcp", "tapd", "command"], command_path)
+        || json_entry_matches(path, &["mcp", "servers", "tapd", "command"], command_path)
 }
 
 fn json_entry_matches(path: &Path, segments: &[&str], command_path: &str) -> bool {
@@ -786,16 +872,56 @@ mod tests {
         let written: Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(written.get("model"), Some(&json!("anthropic/claude")));
+        // The legacy wrapper is migrated to direct entries.
         assert_eq!(
-            written.pointer("/mcp/servers/other/command"),
+            written.pointer("/mcp/other/command"),
             Some(&json!(["other"]))
         );
+        assert!(written.pointer("/mcp/servers").is_none());
         assert_eq!(
-            written.pointer("/mcp/servers/tapd"),
+            written.pointer("/mcp/tapd"),
             Some(&json!({ "type": "local", "command": ["/Applications/TAPD/tapd-mcp"] }))
         );
         assert!(is_imported_in(&path, "/Applications/TAPD/tapd-mcp"));
         assert!(!is_imported_in(&path, "/Applications/TAPD/other"));
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn migrates_legacy_servers_wrapper_without_losing_entries() {
+        let dir = temp_dir("migrate");
+        let path = dir.join(CONFIG_JSON);
+        let original = json!({
+            "$schema": CONFIG_SCHEMA,
+            "mcp": {
+                "servers": {
+                    "codegraph": {
+                        "type": "local",
+                        "command": ["codegraph", "serve", "--mcp"],
+                        "disabled": false
+                    },
+                    "tapd": { "type": "local", "command": ["/old/tapd-mcp"] }
+                }
+            }
+        });
+        std::fs::write(&path, serde_json::to_string_pretty(&original).unwrap()).unwrap();
+
+        let outcome = ensure_mcp_in_file(&path, "/new/tapd-mcp").unwrap();
+        assert!(outcome.changed);
+
+        let written: Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(written.pointer("/mcp/servers").is_none());
+        assert_eq!(
+            written.pointer("/mcp/codegraph/command"),
+            Some(&json!(["codegraph", "serve", "--mcp"]))
+        );
+        assert_eq!(
+            written.pointer("/mcp/tapd/command"),
+            Some(&json!(["/new/tapd-mcp"]))
+        );
+        assert!(is_imported_in(&path, "/new/tapd-mcp"));
 
         cleanup(&dir);
     }
@@ -813,7 +939,7 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(written.get("$schema"), Some(&json!(CONFIG_SCHEMA)));
         assert_eq!(
-            written.pointer("/mcp/servers/tapd"),
+            written.pointer("/mcp/tapd"),
             Some(&json!({ "type": "local", "command": ["/opt/tapd-mcp"] }))
         );
 

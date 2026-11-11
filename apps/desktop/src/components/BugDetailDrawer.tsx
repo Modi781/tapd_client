@@ -45,6 +45,7 @@ import {
   type WorkspaceMember,
 } from "../lib/api";
 import { bugTitle, isMyBug, ownerNames } from "../lib/bug";
+import { useCurrentAgent } from "../lib/useCurrentAgent";
 import {
   agentBugKey,
   agentInFlightLabel,
@@ -129,6 +130,8 @@ function BugDetailDrawerImpl(props: Props) {
   const [previewIndex, setPreviewIndex] = useState<number | null>(null);
   const [targetSets, setTargetSets] = useState<Record<string, OpenTargetSet>>({});
   const [, bumpMedia] = useState(0);
+  /** Runtime that the enqueue will use; shown on the fix button. */
+  const currentAgent = useCurrentAgent();
 
   /** Live agent task for this bug: re-clicking must focus it, not enqueue. */
   const agentInfo = detail
@@ -752,10 +755,15 @@ function BugDetailDrawerImpl(props: Props) {
                       variant="primary"
                       className="rounded-r-none"
                       icon={<Bot size={13} />}
+                      title={
+                        currentAgent
+                          ? `当前 Agent：${currentAgent.name}（${currentAgent.binary}）`
+                          : "正在读取当前 Agent"
+                      }
                       disabled={exporting || loading}
                       onClick={() => onAgentFix(detail)}
                     >
-                      用 Agent 修复
+                      用 {currentAgent?.name ?? "Agent"} 修复
                     </Button>
                     <Button
                       size="sm"

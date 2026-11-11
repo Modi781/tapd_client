@@ -3,13 +3,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import clsx from "clsx";
 import {
-  Ban,
   Bot,
   Bug,
-  Check,
-  CheckCheck,
-  Copy,
-  ExternalLink,
   FolderOpen,
   Hourglass,
   ListOrdered,
@@ -30,7 +25,6 @@ import {
   type AgentTask,
   type AgentTaskStatus,
   type AgentTasksState,
-  type PermissionReply,
 } from "../lib/agent";
 import { relativeTime } from "../lib/api";
 import { bugTitle } from "../lib/bug";
@@ -40,12 +34,7 @@ import { AgentTerminal } from "./AgentTerminal";
 import { Segmented } from "./Segmented";
 import { Badge, Button } from "./ui";
 
-const ACTIVE_STATUSES: AgentTaskStatus[] = [
-  "queued",
-  "preparing",
-  "running",
-  "waiting_review",
-];
+const ACTIVE_STATUSES: AgentTaskStatus[] = ["queued", "preparing", "running"];
 const isActiveStatus = (status: AgentTaskStatus) => ACTIVE_STATUSES.includes(status);
 const isApprovalStatus = (status: AgentTaskStatus) => status === "awaiting_approval";
 
@@ -78,15 +67,9 @@ export function AgentPage({
   // Task explicitly selected by `agent://focus` or a click in the run queue;
   // cleared when the active task changes so the terminal follows the worker.
   const [explicitTaskId, setExplicitTaskId] = useState<string | null>(null);
-  const [permissionBusy, setPermissionBusy] = useState<PermissionReply | null>(null);
-  const [permissionOptionBusy, setPermissionOptionBusy] = useState<string | null>(null);
   const [actionBusy, setActionBusy] = useState<string | null>(null);
-  const [resumeBusy, setResumeBusy] = useState<string | null>(null);
-  /** Current runtime descriptor; decides whether external decisions are allowed. */
-  const [runtime, setRuntime] = useState<AgentRuntimeDescriptor | null>(null);
-  const [terminalFocus, setTerminalFocus] = useState(0);
-  /** Set when the runtime rejects a desktop decision; UI falls back to review. */
-  const [replyFallback, setReplyFallback] = useState<string | null>(null);
+  /** Runtime catalog, used to show which agent owns the selected task. */
+  const [runtimes, setRuntimes] = useState<AgentRuntimeDescriptor[]>([]);
 
   const appliedFocusRef = useRef<string | null>(null);
   const focusRefreshRef = useRef<string | null>(null);
@@ -130,18 +113,13 @@ export function AgentPage({
     setExplicitTaskId(null);
   }, [activeTaskId]);
 
-  // Runtime capability declaration. If the desktop cannot deliver a decision
-  // (or the runtime rejects it), the UI must point at the terminal instead of
-  // offering buttons that would silently fail.
+  // Runtime names are stable; fetch once for the task header.
   useEffect(() => {
     let cancelled = false;
-    void Promise.all([agentApi.configGet(), agentApi.runtimes()])
-      .then(([configResult, runtimeResult]) => {
-        if (cancelled) return;
-        const current = runtimeResult.runtimes.find(
-          (item) => item.id === configResult.config.runtimeId,
-        );
-        setRuntime(current ?? runtimeResult.runtimes[0] ?? null);
+    void agentApi
+      .runtimes()
+      .then((result) => {
+        if (!cancelled) setRuntimes(result.runtimes);
       })
       .catch(() => undefined);
     return () => {
@@ -200,13 +178,9 @@ export function AgentPage({
     return index >= 0 ? index + 1 : null;
   };
 
-  // Prefer the selected task, then a pending permission prompt, then the active
-  // task, then the next queued one. Terminal tasks never leak into the run tab.
-  const reviewTask = runTasks.find(
-    (task) => task.status === "waiting_review" && task.review,
-  );
+  // Prefer the active task, then the next queued one. Terminal tasks never
+  // leak into the run tab.
   const fallbackId =
-    reviewTask?.id ??
     (activeTaskId && runTasks.some((task) => task.id === activeTaskId)
       ? activeTaskId
       : null) ??
@@ -218,15 +192,11 @@ export function AgentPage({
       : null) ?? fallbackId;
   const selectedTask = runTasks.find((task) => task.id === selectedId) ?? null;
   const selectedQueuePosition = selectedTask ? queuePosition(selectedTask) : null;
+  /** Human-readable runtime name for a task; falls back to the stored id. */
+  const runtimeName = (id?: string) =>
+    runtimes.find((runtime) => runtime.id === id)?.name ?? id ?? "Agent";
   /** The PTY log file exists once the task is actually running. */
-  const logReady =
-    selectedTask !== null &&
-    (selectedTask.status === "running" || selectedTask.status === "waiting_review");
-
-  // A new permission prompt (or a different task) deserves a fresh attempt.
-  useEffect(() => {
-    setReplyFallback(null);
-  }, [selectedTask?.id, selectedTask?.review?.id]);
+  const logReady = selectedTask !== null && selectedTask.status === "running";
 
   const counts = useMemo(() => {
     const queued =
@@ -235,16 +205,12 @@ export function AgentPage({
     const active = tasks.filter(
       (task) => task.status === "preparing" || task.status === "running",
     ).length;
-    const waiting =
-      tasksState?.waitingReviewCount ??
-      tasks.filter((task) => task.status === "waiting_review").length;
     const awaiting =
       tasksState?.awaitingApprovalCount ??
       tasks.filter((task) => task.status === "awaiting_approval").length;
     return {
       queued,
       active,
-      waiting,
       awaiting,
       paused: Boolean(tasksState?.queuePaused),
     };
@@ -267,38 +233,6 @@ export function AgentPage({
     },
     [actionBusy, refresh, toast],
   );
-
-  const handlePermission = async (response: PermissionReply) => {
-    if (!selectedTask?.review || permissionBusy) return;
-    setPermissionBusy(response);
-    setReplyFallback(null);
-    try {
-      await agentApi.permissionReply(selectedTask.id, response, response === "always");
-      await refresh();
-    } catch (error) {
-      // The runtime did not accept the desktop decision. Never retry blindly:
-      // keep the review visible and point the user at the terminal.
-      setReplyFallback(String(error));
-      toast("error", String(error));
-    } finally {
-      setPermissionBusy(null);
-    }
-  };
-
-  const handlePermissionOption = async (optionId: string) => {
-    if (!selectedTask?.review || permissionOptionBusy) return;
-    setPermissionOptionBusy(optionId);
-    setReplyFallback(null);
-    try {
-      await agentApi.permissionOption(selectedTask.id, optionId);
-      await refresh();
-    } catch (error) {
-      setReplyFallback(String(error));
-      toast("error", String(error));
-    } finally {
-      setPermissionOptionBusy(null);
-    }
-  };
 
   const handleApprove = async (task: AgentTask) => {
     if (actionBusy) return;
@@ -345,30 +279,9 @@ export function AgentPage({
     );
   };
 
-  const resumeSession = async (task: AgentTask) => {
-    if (!task.sessionId) {
-      toast("error", "该任务还没有 opencode 会话 ID");
-      return;
-    }
-    setResumeBusy(task.id);
-    try {
-      await agentApi.openSession(task.id);
-    } catch (error) {
-      toast("error", String(error));
-    } finally {
-      setResumeBusy(null);
-    }
-  };
-
   const canCancel = selectedTask !== null && ACTIVE_STATUSES.includes(selectedTask.status);
-  /** Capability says the desktop may not answer this runtime's prompts. */
-  const runtimeBlocksDecision =
-    runtime !== null && !runtime.capabilities.externalDecision;
-  const decisionFallbackText = `${runtime?.name ?? "当前运行时"} 不接受桌面回执，该确认请直接在任务中处理。`;
-  /** Only the PTY transport accepts keystrokes; ACP/process are read-only. */
-  const interactive =
-    selectedTask !== null && (selectedTask.transport ?? "pty") === "pty";
-  const reviewOptions = selectedTask?.review?.options ?? [];
+  /** Every runtime runs in a PTY, so any live task accepts keystrokes. */
+  const interactive = selectedTask !== null && selectedTask.status === "running";
 
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-3 p-4 pt-2.5">
@@ -379,16 +292,7 @@ export function AgentPage({
           options={[
             {
               value: "run",
-              label: (
-                <span className="inline-flex items-center gap-1.5">
-                  运行
-                  {counts.waiting > 0 ? (
-                    <span className="inline-flex min-w-[2ch] justify-center rounded-full bg-rose-500 px-1.5 py-0.5 text-ui-2xs font-normal leading-none tabular-nums text-white">
-                      {counts.waiting}
-                    </span>
-                  ) : null}
-                </span>
-              ),
+              label: "运行",
             },
             {
               value: "approval",
@@ -408,8 +312,7 @@ export function AgentPage({
         />
 
         <span className="text-ui-sm text-slate-400">
-          {counts.active} 运行 · {counts.queued} 排队 · {counts.waiting} 权限 ·{" "}
-          {counts.awaiting} 待审核
+          {counts.active} 运行 · {counts.queued} 排队 · {counts.awaiting} 待审核
           {counts.paused ? " · 队列已暂停" : ""}
         </span>
 
@@ -441,7 +344,7 @@ export function AgentPage({
 
       {tab === "history" ? (
         <AgentHistory
-          revision={`${counts.active}:${counts.queued}:${counts.waiting}:${counts.awaiting}`}
+          revision={`${counts.active}:${counts.queued}:${counts.awaiting}`}
           focusTaskId={focusTaskId}
           onOpenBug={onOpenBug}
           onQueued={(taskId) => {
@@ -543,6 +446,7 @@ export function AgentPage({
             ) : selectedTask.status === "queued" ? (
               <QueuedTaskDetail
                 task={selectedTask}
+                runtimeName={runtimeName(selectedTask.runtimeId)}
                 position={selectedQueuePosition ?? 1}
                 queuePaused={counts.paused}
                 busy={actionBusy}
@@ -572,6 +476,7 @@ export function AgentPage({
                         <Badge tone={AGENT_STATUS_TONES[selectedTask.status]}>
                           {AGENT_STATUS_LABELS[selectedTask.status]}
                         </Badge>
+                        <Badge tone="neutral">{runtimeName(selectedTask.runtimeId)}</Badge>
                       </div>
                       <div className="mt-1 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-ui-xs text-slate-400">
                         <span className="shrink-0">
@@ -622,21 +527,6 @@ export function AgentPage({
                       <Button
                         size="sm"
                         variant="secondary"
-                        icon={
-                          resumeBusy === selectedTask.id ? (
-                            <Loader2 size={11} className="animate-spin" />
-                          ) : (
-                            <ExternalLink size={11} />
-                          )
-                        }
-                        disabled={!selectedTask.sessionId || resumeBusy !== null}
-                        onClick={() => void resumeSession(selectedTask)}
-                      >
-                        终端恢复
-                      </Button>
-                      <Button
-                        size="sm"
-                        variant="secondary"
                         icon={<FolderOpen size={11} />}
                         disabled={!selectedTask.mdPath}
                         onClick={() => openExportDir(selectedTask)}
@@ -657,163 +547,6 @@ export function AgentPage({
                   </div>
                 </div>
 
-                {selectedTask.review ? (
-                  <div className="shrink-0 border-b border-amber-200/70 bg-amber-50/70 px-3.5 py-2.5">
-                    <div className="flex min-w-0 items-center gap-1.5">
-                      <ShieldAlert size={14} className="shrink-0 text-amber-600" />
-                      <span className="shrink-0 text-ui-caption font-normal text-amber-900">
-                        Agent 请求权限
-                      </span>
-                      <span
-                        className="min-w-0 flex-1 truncate text-ui-sm text-amber-800"
-                        title={selectedTask.review.title}
-                      >
-                        {selectedTask.review.title}
-                      </span>
-                    </div>
-                    <div
-                      className="mt-1 truncate font-mono text-ui-xs text-amber-700/90"
-                      title={`${selectedTask.review.action} · ${selectedTask.review.resource}`}
-                    >
-                      {selectedTask.review.action} · {selectedTask.review.resource}
-                    </div>
-                    {replyFallback ? (
-                      <div
-                        className="mb-2 rounded-lg border border-rose-200 bg-surface/70 px-2.5 py-1.5 text-ui-sm leading-4 text-rose-700"
-                        title={replyFallback}
-                      >
-                        运行时没有接受这次回执，请重试或选择其他选项。
-                      </div>
-                    ) : null}
-                    <div className="mt-2 flex flex-wrap items-center gap-1.5">
-                      {runtimeBlocksDecision ? (
-                        <>
-                          <span className="min-w-0 flex-1 text-ui-sm leading-4 text-amber-900">
-                            {decisionFallbackText}
-                          </span>
-                          {interactive ? (
-                            <Button
-                              size="sm"
-                              variant="secondary"
-                              icon={<Terminal size={12} />}
-                              onClick={() =>
-                                setTerminalFocus((value) => value + 1)
-                              }
-                            >
-                              去终端处理
-                            </Button>
-                          ) : (
-                            <Button
-                              size="sm"
-                              variant="secondary"
-                              icon={<Copy size={12} />}
-                              disabled={!selectedTask.sessionId}
-                              onClick={() => {
-                                if (selectedTask.sessionId) {
-                                  void navigator.clipboard.writeText(
-                                    selectedTask.sessionId,
-                                  );
-                                }
-                              }}
-                            >
-                              复制会话 ID
-                            </Button>
-                          )}
-                        </>
-                      ) : reviewOptions.length > 0 ? (
-                        <>
-                          {reviewOptions.map((option) => {
-                            const rejecting = option.kind.startsWith("reject");
-                            const always = option.kind === "allow_always";
-                            const busy = permissionOptionBusy === option.optionId;
-                            return (
-                              <Button
-                                key={option.optionId}
-                                size="sm"
-                                variant={
-                                  rejecting
-                                    ? "danger"
-                                    : always
-                                      ? "secondary"
-                                      : "primary"
-                                }
-                                icon={
-                                  busy ? (
-                                    <Loader2 size={12} className="animate-spin" />
-                                  ) : rejecting ? (
-                                    <Ban size={12} />
-                                  ) : always ? (
-                                    <CheckCheck size={12} />
-                                  ) : (
-                                    <Check size={12} />
-                                  )
-                                }
-                                disabled={
-                                  permissionOptionBusy !== null ||
-                                  permissionBusy !== null
-                                }
-                                onClick={() =>
-                                  void handlePermissionOption(option.optionId)
-                                }
-                              >
-                                {option.name}
-                              </Button>
-                            );
-                          })}
-                        </>
-                      ) : (
-                        <>
-                          <Button
-                            size="sm"
-                            variant="primary"
-                            icon={
-                              permissionBusy === "once" ? (
-                                <Loader2 size={12} className="animate-spin" />
-                              ) : (
-                                <Check size={12} />
-                              )
-                            }
-                            disabled={permissionBusy !== null}
-                            onClick={() => void handlePermission("once")}
-                          >
-                            允许一次
-                          </Button>
-                          <Button
-                            size="sm"
-                            variant="secondary"
-                            icon={
-                              permissionBusy === "always" ? (
-                                <Loader2 size={12} className="animate-spin" />
-                              ) : (
-                                <CheckCheck size={12} />
-                              )
-                            }
-                            disabled={permissionBusy !== null}
-                            onClick={() => void handlePermission("always")}
-                          >
-                            总是允许
-                          </Button>
-                          <Button
-                            size="sm"
-                            variant="danger"
-                            icon={
-                              permissionBusy === "reject" ? (
-                                <Loader2 size={12} className="animate-spin" />
-                              ) : (
-                                <Ban size={12} />
-                              )
-                            }
-                            disabled={permissionBusy !== null}
-                            onClick={() => void handlePermission("reject")}
-                          >
-                            拒绝
-                          </Button>
-                        </>
-                      )}
-                    </div>
-                  </div>
-                ) : null}
-
                 {selectedTask.error ? (
                   <div className="shrink-0 break-all border-b border-rose-100 bg-rose-50 px-3.5 py-1.5 text-ui-sm leading-5 text-rose-700">
                     {selectedTask.error}
@@ -827,7 +560,6 @@ export function AgentPage({
                       taskId={selectedTask.id}
                       interactive={interactive}
                       convertEol={!interactive}
-                      focusToken={terminalFocus}
                       className="h-full w-full"
                     />
                   </div>
@@ -922,6 +654,7 @@ function RunQueueRow(props: {
 
 function QueuedTaskDetail(props: {
   task: AgentTask;
+  runtimeName: string;
   position: number;
   queuePaused: boolean;
   busy: string | null;
@@ -946,6 +679,7 @@ function QueuedTaskDetail(props: {
                 {bugTitle(task.title) || "（无标题）"}
               </h2>
               <Badge tone="neutral">排队中</Badge>
+              <Badge tone="neutral">{props.runtimeName}</Badge>
             </div>
             <div className="mt-1 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-ui-xs text-slate-400">
               <span className="shrink-0">
